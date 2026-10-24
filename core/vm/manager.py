@@ -32,7 +32,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from core.vm import cloudinit, hostinfo, images, qemu
+from core.vm import (
+    cloudinit,
+    hostinfo,
+    images,
+    qemu,
+    shared_disk,
+)
 
 # 数据根目录
 VM_ROOT = Path.home() / ".local" / "share" / "podman-gui" / "vm"
@@ -190,9 +196,6 @@ def create_vm(
     *,
     name: str,
     image_key: str,
-    memory_mb: int = 2048,
-    cpus: int = 2,
-    disk_gb: int = 20,
     username: str = "",
     forwards: list[qemu.PortForward] | None = None,
     shares: list[tuple[str, str]] | None = None,
@@ -200,6 +203,11 @@ def create_vm(
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[VM | None, str]:
     """创建虚拟机
+
+    用户只需提供名称和镜像，其余全部用默认值：
+      · 磁盘：所有 VM 共用一个只读基础（稀疏 qcow2 backing file），
+        每台 VM 只有一个增量层，按需增长，无需选大小
+      · 内存 / CPU：用镜像的推荐值（见 ImageSpec.default_*）
 
     返回 (VM, 错误信息)
     """
@@ -283,10 +291,16 @@ def create_vm(
         shutil.rmtree(vm_dir, ignore_errors=True)
         return None, f"cloud-init 生成失败: {err}"
 
-    # ── 5. 创建磁盘（基于 base image 的 COW 副本）──
-    log(f"创建磁盘（{disk_gb}GB）…")
-    base = images.image_path(spec_img, arch)
-    ok, err = _create_disk(base, vm_dir / "disk.qcow2", disk_gb)
+    # ── 5. 准备磁盘（共享基础 + 本机增量层）──
+    # 共享基础首次创建，之后所有 VM 复用；
+    # 每台 VM 的 disk.qcow2 只记录自己的改动，毫秒级完成。
+    ok, err = shared_disk.ensure_shared_base(spec_img, arch, on_log=log)
+    if not ok:
+        shutil.rmtree(vm_dir, ignore_errors=True)
+        return None, f"磁盘准备失败: {err}"
+
+    log("创建虚拟机磁盘…")
+    ok, err = shared_disk.create_vm_disk(spec_img, vm_dir, arch)
     if not ok:
         shutil.rmtree(vm_dir, ignore_errors=True)
         return None, f"磁盘创建失败: {err}"
@@ -296,9 +310,9 @@ def create_vm(
         name=name,
         image_key=image_key,
         arch=arch,
-        memory_mb=memory_mb,
-        cpus=cpus,
-        disk_gb=disk_gb,
+        memory_mb=spec_img.default_mem_mb,
+        cpus=spec_img.default_cpus,
+        disk_gb=shared_disk.DEFAULT_INCREMENTAL_GB,
         username=vm_user,
         hostname=name,
         forwards=fwd_list,
@@ -471,3 +485,81 @@ def disk_usage(vm: VM) -> int:
 def total_usage() -> int:
     """所有 VM 占用"""
     return sum(disk_usage(vm) for vm in load_all())
+
+
+# ─────────────────────────────────────────
+# 一键清空
+# ─────────────────────────────────────────
+def purge_all(*, include_images: bool = True) -> tuple[int, int, str]:
+    """清空所有虚拟机及相关数据
+
+    删除内容：
+      · 所有 VM（含磁盘、配置、cloud-init seed、日志）
+      · 可选的镜像缓存（include_images=True）
+      · 共享磁盘基础
+
+    VM 会先被强制停止。正在运行的 QEMU 进程被 kill 后，
+    qcow2 文件才可安全删除。
+
+    返回 (删除的 VM 数, 释放的字节数, 错误信息)
+    错误信息非空表示部分删除失败，但不影响已删部分。
+    """
+    import shutil as _sh
+
+    vms = load_all()
+    freed = 0
+    errors = []
+
+    for vm in vms:
+        if vm.running:
+            qemu.kill(vm.dir)
+        try:
+            freed += disk_usage(vm)
+        except Exception:
+            pass
+
+        ok, err = delete_vm(vm, remove_disk=True)
+        if not ok:
+            # delete_vm 内部可能因进程未退出而失败，直接删目录兜底
+            _sh.rmtree(vm.dir, ignore_errors=True)
+            if vm.dir.exists():
+                errors.append(f"{vm.name}: {err}")
+
+    # 共享磁盘基础
+    try:
+        from core.vm import images as _images
+
+        for spec in _images.list_images():
+            shared_disk.clear_shared_base(spec)
+    except Exception as e:
+        errors.append(f"清理共享磁盘: {e}")
+
+    # 镜像缓存（下载的发行版镜像，可重新下载）
+    if include_images:
+        try:
+            from core.vm import images as _images
+
+            for spec in _images.list_images():
+                p = _images.image_path(spec)
+                if p.exists():
+                    try:
+                        freed += p.stat().st_size
+                    except OSError:
+                        pass
+                    _images.delete_image(spec)
+        except Exception as e:
+            errors.append(f"清理镜像缓存: {e}")
+
+    return len(vms), freed, "；".join(errors)
+
+
+def vm_data_size() -> tuple[int, int]:
+    """虚拟机相关数据占用
+
+    返回 (VM 总字节, 镜像缓存字节)
+    """
+    from core.vm import images as _images
+
+    vm_bytes = total_usage()
+    img_bytes = _images.cache_size()
+    return vm_bytes, img_bytes

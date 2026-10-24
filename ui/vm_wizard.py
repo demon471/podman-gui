@@ -17,8 +17,6 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -32,7 +30,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QStackedWidget,
     QTextEdit,
     QVBoxLayout,
@@ -43,7 +40,6 @@ from core.async_task import run_async
 from core.vm import cloudinit, deps, hostinfo, images, manager as vm_manager
 from core.vm import qemu as vm_qemu
 from resources.icons import ICON_SIZE_TOOLBAR, icon
-from ui.utils import fmt_size
 
 
 class VMWizard(QDialog):
@@ -75,36 +71,15 @@ class VMWizard(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
 
         # ── 左侧步骤列表 ──
-        self.nav = QListWidget()
-        self.nav.setObjectName("wizardNav")
-        self.nav.setFixedWidth(196)
-        self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for i, title in enumerate(["依赖检查", "选择系统", "资源配置", "确认创建"]):
-            it = QListWidgetItem(f"{i + 1}.  {title}")
-            it.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.nav.addItem(it)
-        self.nav.setCurrentRow(0)
-        self.nav.setStyleSheet(
-            "QListWidget#wizardNav { border: none; padding-top: 10px; }"
-            "QListWidget#wizardNav::item { height: 36px; padding-left: 14px; }"
-        )
-        body.addWidget(self.nav)
-
-        # ── 右侧内容 ──
+        # 单步向导：不需要左侧步骤导航，直接铺内容区
         right = QVBoxLayout()
         right.setContentsMargins(18, 16, 18, 8)
         right.setSpacing(10)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_dep_page())
-        self.stack.addWidget(self._build_image_page())
-        self.stack.addWidget(self._build_resource_page())
-        self.stack.addWidget(self._build_confirm_page())
+        self.stack.addWidget(self._build_config_page())
         right.addWidget(self.stack, 1)
 
         self.lbl_error = QLabel("")
@@ -113,8 +88,7 @@ class VMWizard(QDialog):
         self.lbl_error.hide()
         right.addWidget(self.lbl_error)
 
-        body.addLayout(right, 1)
-        root.addLayout(body, 1)
+        root.addLayout(right, 1)
 
         # ── 底部按钮 ──
         bar = QFrame()
@@ -122,14 +96,7 @@ class VMWizard(QDialog):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(18, 10, 18, 10)
 
-        self.lbl_step = QLabel("")
-        self.lbl_step.setObjectName("hintLabel")
-        bl.addWidget(self.lbl_step)
         bl.addStretch()
-
-        self.btn_back = QPushButton("上一步")
-        self.btn_back.clicked.connect(lambda: self._goto_step(self.stack.currentIndex() - 1))
-        bl.addWidget(self.btn_back)
 
         self.btn_next = QPushButton("下一步")
         self.btn_next.setDefault(True)
@@ -142,89 +109,70 @@ class VMWizard(QDialog):
 
         root.addWidget(bar)
 
-    # ── 步骤 1：依赖 ──
-    def _build_dep_page(self) -> QWidget:
+    # ── 新建虚拟机（一页搞定）──
+    def _build_config_page(self) -> QWidget:
+        """镜像选择 + 名称，合并为一页
+
+        磁盘与内存全部用默认值，不再让用户选：
+          · 磁盘：所有虚拟机共用一个稀疏基础镜像，按需增长
+          · 内存：用镜像推荐值，与容器共用设置里的内存预算
+        """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(10)
 
-        title = QLabel("检查运行环境")
-        f = QFont(title.font())
-        f.setPointSizeF(f.pointSizeF() + 1.5)
-        f.setBold(True)
-        title.setFont(f)
-        v.addWidget(title)
+        # ── 名称 ──
+        g1 = QGroupBox("名称")
+        f1 = QFormLayout(g1)
+        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f1.setSpacing(8)
 
-        hint = QLabel(
-            "虚拟机依赖 QEMU 与 KVM 硬件加速。检测到缺失时可以直接安装。"
+        self.ed_name = QLineEdit("")
+        self.ed_name.setPlaceholderText("例如 ubuntu-dev、my-server")
+        f1.addRow("虚拟机名称", self.ed_name)
+
+        self.ed_user = QLineEdit(self._host.username)
+        self.ed_user.setToolTip("虚拟机内的登录用户名")
+        f1.addRow("登录用户名", self.ed_user)
+
+        v.addWidget(g1)
+
+        # ── 依赖提示（检测中/缺失时显示）──
+        # 依赖提示行：就绪时一行绿字，缺失时列出缺什么 + 安装按钮
+        self.dep_row_widget = QWidget()
+        dep_row = QHBoxLayout(self.dep_row_widget)
+        dep_row.setContentsMargins(0, 0, 0, 0)
+        dep_row.setSpacing(8)
+
+        self.lbl_dep = QLabel("正在检查运行环境…")
+        self.lbl_dep.setObjectName("hintLabel")
+        self.lbl_dep.setWordWrap(True)
+        dep_row.addWidget(self.lbl_dep, 1)
+
+        self.btn_install = QPushButton("安装组件…")
+        self.btn_install.setIcon(
+            icon("settings", ICON_SIZE_TOOLBAR.width())
         )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-
-        self.dep_list = QListWidget()
-        self.dep_list.setAlternatingRowColors(True)
-        v.addWidget(self.dep_list, 1)
-
-        row = QHBoxLayout()
-        self.btn_recheck = QPushButton("重新检测")
-        self.btn_recheck.clicked.connect(self._check_deps)
-        row.addWidget(self.btn_recheck)
-
-        self.btn_install = QPushButton("安装缺失依赖…")
         self.btn_install.clicked.connect(self._install_deps)
         self.btn_install.hide()
-        row.addWidget(self.btn_install)
-        row.addStretch()
-        v.addLayout(row)
+        dep_row.addWidget(self.btn_install)
 
-        self.dep_log = QTextEdit()
-        self.dep_log.setReadOnly(True)
-        self.dep_log.setFixedHeight(110)
-        self.dep_log.hide()
-        v.addWidget(self.dep_log)
+        v.addWidget(self.dep_row_widget)
 
-        return w
-
-    # ── 步骤 2：镜像 ──
-    def _build_image_page(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(10)
-
-        title = QLabel("选择操作系统")
-        f = QFont(title.font())
-        f.setPointSizeF(f.pointSizeF() + 1.5)
-        f.setBold(True)
-        title.setFont(f)
-        v.addWidget(title)
-
-        hint = QLabel(
-            "使用官方云镜像（cloud image），首次创建时自动下载并校验。\n"
-            "轻量场景推荐 Alpine（guest 内仅约 150 MB 内存）。"
-        )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
+        # ── 镜像 ──
+        g2 = QGroupBox("选择系统")
+        v2 = QVBoxLayout(g2)
+        v2.setSpacing(8)
 
         self.img_list = QListWidget()
         self.img_list.setAlternatingRowColors(True)
         self.img_list.currentRowChanged.connect(self._on_image_changed)
-        v.addWidget(self.img_list, 1)
+        v2.addWidget(self.img_list, 1)
 
-        self.lbl_img_detail = QLabel("")
-        self.lbl_img_detail.setObjectName("hintLabel")
-        self.lbl_img_detail.setWordWrap(True)
-        v.addWidget(self.lbl_img_detail)
 
-        self.lbl_img_note = QLabel("")
-        self.lbl_img_note.setObjectName("hintLabel")
-        self.lbl_img_note.setWordWrap(True)
-        v.addWidget(self.lbl_img_note)
+        v.addWidget(g2, 1)
 
-        # 下载进度
         self.prog = QProgressBar()
         self.prog.setFixedHeight(18)
         self.prog.hide()
@@ -232,232 +180,120 @@ class VMWizard(QDialog):
 
         return w
 
-    # ── 步骤 3：资源 ──
-    def _build_resource_page(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(10)
-
-        title = QLabel("资源配置")
-        f = QFont(title.font())
-        f.setPointSizeF(f.pointSizeF() + 1.5)
-        f.setBold(True)
-        title.setFont(f)
-        v.addWidget(title)
-
-        grp = QGroupBox("基本信息")
-        form = QFormLayout(grp)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(10)
-
-        self.ed_name = QLineEdit("")
-        self.ed_name.setPlaceholderText("例如 ubuntu-dev（只能含字母数字和 - _）")
-        form.addRow("名称", self.ed_name)
-
-        self.ed_user = QLineEdit(self._host.username)
-        form.addRow("用户名", self.ed_user)
-
-        self.ed_pass = QLineEdit("12345")
-        form.addRow("初始密码", self.ed_pass)
-
-        v.addWidget(grp)
-
-        grp2 = QGroupBox("硬件")
-        form2 = QFormLayout(grp2)
-        form2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form2.setSpacing(10)
-
-        self.sp_cpu = QSpinBox()
-        self.sp_cpu.setRange(1, 16)
-        self.sp_cpu.setValue(2)
-        self.sp_cpu.setSuffix(" vCPU")
-        form2.addRow("处理器", self.sp_cpu)
-
-        self.sp_mem = QSpinBox()
-        self.sp_mem.setRange(128, 65536)
-        self.sp_mem.setSingleStep(128)
-        self.sp_mem.setValue(1024)
-        self.sp_mem.setSuffix(" MB")
-        self.sp_mem.valueChanged.connect(self._on_mem_changed)
-        form2.addRow("内存", self.sp_mem)
-
-        self.sp_disk = QSpinBox()
-        self.sp_disk.setRange(2, 512)
-        self.sp_disk.setValue(20)
-        self.sp_disk.setSuffix(" GB")
-        form2.addRow("磁盘", self.sp_disk)
-
-        self.lbl_mem_hint = QLabel("")
-        self.lbl_mem_hint.setObjectName("hintLabel")
-        self.lbl_mem_hint.setWordWrap(True)
-        form2.addRow("", self.lbl_mem_hint)
-
-        chk = QLabel(
-            "内存使用 virtio-balloon，空闲时可回收给宿主机，"
-            "因此分配值可大于实际占用。"
-        )
-        chk.setObjectName("hintLabel")
-        chk.setWordWrap(True)
-        form2.addRow("", chk)
-
-        v.addWidget(grp2)
-        v.addStretch()
-
-        self._update_mem_hint()
-        return w
-
-    # ── 步骤 4：确认 ──
-    def _build_confirm_page(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(10)
-
-        title = QLabel("确认创建")
-        f = QFont(title.font())
-        f.setPointSizeF(f.pointSizeF() + 1.5)
-        f.setBold(True)
-        title.setFont(f)
-        v.addWidget(title)
-
-        self.lbl_summary = QLabel("")
-        self.lbl_summary.setWordWrap(True)
-        self.lbl_summary.setTextFormat(Qt.TextFormat.RichText)
-        self.lbl_summary.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-        )
-        v.addWidget(self.lbl_summary)
-
-        note = QLabel(
-            "创建过程包括：下载并校验镜像 → 生成 SSH 密钥 → 生成 cloud-init 配置 "
-            "→ 创建 COW 磁盘。首次创建需要下载镜像，可能耗时较长。\n\n"
-            "创建完成后可随时启动；虚拟机内的用户名、时区、locale、DNS "
-            "均继承自当前宿主机。"
-        )
-        note.setObjectName("hintLabel")
-        note.setWordWrap(True)
-        v.addWidget(note)
-        v.addStretch()
-
-        return w
 
     # ─────────────────────────────────────────
     # 步骤控制
     # ─────────────────────────────────────────
     def _goto_step(self, idx: int) -> None:
-        idx = max(0, min(idx, self.stack.count() - 1))
-        self.stack.setCurrentIndex(idx)
-        self.nav.setCurrentRow(idx)
-        self.lbl_step.setText(f"第 {idx + 1} / {self.stack.count()} 步")
-        self.btn_back.setEnabled(idx > 0)
+        """切页（单步向导，保留以兼容旧调用）"""
+        self.stack.setCurrentIndex(0)
         self.lbl_error.hide()
-
-        last = idx == self.stack.count() - 1
-        self.btn_next.setText("创建" if last else "下一步")
-
-        if idx == 0:
-            self.btn_next.setEnabled(self._dep_ok)
-        elif idx == 1:
-            self.btn_next.setEnabled(self.img_list.currentRow() >= 0)
-        elif idx == 2:
-            self.btn_next.setEnabled(True)
-        else:
-            self.btn_next.setEnabled(not self._busy)
-            self._build_summary()
+        self.btn_next.setText("创建")
+        self.btn_next.setEnabled(not self._busy and self._dep_ok)
 
     def _on_next(self) -> None:
-        idx = self.stack.currentIndex()
-
-        if idx == 0:
-            if not self._dep_ok:
-                return
-            self._goto_step(1)
+        if not self._dep_ok:
             return
-
-        if idx == 1:
-            if self.img_list.currentRow() < 0:
-                return
-            self._apply_image_defaults()
-            self._goto_step(2)
+        if not self._validate():
             return
-
-        if idx == 2:
-            if not self._validate():
-                return
-            self._goto_step(3)
-            return
-
         self._do_create()
 
     def _fail(self, msg: str) -> None:
         self.lbl_error.setText(msg)
         self.lbl_error.show()
 
+    def _validate(self) -> bool:
+        """创建前校验（名称、用户名、镜像）"""
+        name = self.ed_name.text().strip()
+        if not name:
+            self._fail("请填写虚拟机名称。")
+            return False
+        if "/" in name or name.startswith(".") or " " in name:
+            self._fail("名称不能包含空格、/ 或以 . 开头。")
+            return False
+        if vm_manager.name_taken(name):
+            self._fail(f"名称「{name}」已被占用，请换一个。")
+            return False
+        if not self.ed_user.text().strip():
+            self._fail("请填写用户名。")
+            return False
+        if not cloudinit.iso_tool_available():
+            self._fail(
+                "缺少 ISO 生成工具（xorriso / genisoimage），"
+                "无法生成 cloud-init 配置。"
+            )
+            return False
+        return True
+
     # ─────────────────────────────────────────
     # 步骤 1：依赖
     # ─────────────────────────────────────────
     def _check_deps(self) -> None:
-        self.btn_recheck.setEnabled(False)
-        self.dep_list.clear()
-        it = QListWidgetItem("检测中…")
-        self.dep_list.addItem(it)
+        """检测依赖
 
-        def work():
-            return deps.check_all()
+        刻意在 UI 线程执行（不用 run_async）：deps.check_all() 内部
+        会跑多条 subprocess（qemu-system-x86_64 --version、test -r /dev/kvm
+        等）。实测把这些 subprocess 放在 BackgroundTask 的工作线程里执行，
+        会与 Qt 事件循环冲突并触发 QMessageLogger::fatal，整个进程 abort。
+        检测本身很快（几十毫秒），在 UI 线程延迟到界面渲染完再跑即可。
+        """
+        # 检测开始时保持隐藏；只有缺失时才显示提示行
+        self.dep_row_widget.hide()
+        QTimer.singleShot(0, self._do_check_deps)
 
-        def done(results):
-            self._dep_results = results
-            self._dep_ok = deps.ready_for_vm(results)
-            self.btn_recheck.setEnabled(True)
-            self._render_deps()
-            self._goto_step(self.stack.currentIndex())
+    def _do_check_deps(self) -> None:
+        try:
+            results = deps.check_all()
+        except Exception as e:
+            self._fail(f"检测失败：{e}")
+            return
 
-        def error(msg):
-            self.btn_recheck.setEnabled(True)
-            self._fail(f"检测失败：{msg}")
-
-        self._spawn(work, done, error)
+        self._dep_results = results
+        self._dep_ok = deps.ready_for_vm(results)
+        self._render_deps()
+        self._goto_step(self.stack.currentIndex())
 
     def _render_deps(self) -> None:
+        """把依赖检测结果以行内提示显示
+
+        全部就绪 → 显示一行绿色「运行环境就绪」，其余时间不打扰。
+        有缺失   → 显示哪些缺、怎么装，并禁用创建按钮。
+        """
         from PyQt6.QtGui import QColor
 
-        self.dep_list.clear()
-        missing = []
+        missing = [r for r in self._dep_results
+                   if not r.ok and r.dep.required]
+        optional = [r for r in self._dep_results
+                    if not r.ok and not r.dep.required]
 
-        for r in self._dep_results:
-            if r.ok:
-                mark = "✓"
-                text = f"✓  {r.dep.name}"
-                if r.detail:
-                    text += f"    {r.detail}"
-            else:
-                mark = "✗" if r.dep.required else "!"
-                text = f"{mark}  {r.dep.name}    {r.dep.purpose}"
-                if r.detail:
-                    text += f"（{r.detail}）"
-                if r.dep.required:
-                    missing.append(r)
-
-            it = QListWidgetItem(text)
-            if not r.ok:
-                it.setForeground(
-                    QColor("#e74c3c" if r.dep.required else "#f39c12")
-                )
-            self.dep_list.addItem(it)
-
-        if missing:
-            self.btn_install.show()
-            self.btn_next.setEnabled(False)
-            self._fail(
-                f"缺少 {len(missing)} 项必需依赖，无法创建虚拟机。"
-                "点击「安装缺失依赖」自动安装。"
-            )
-        else:
-            self.btn_install.hide()
-            self.btn_next.setEnabled(True)
+        if not missing:
+            # 环境就绪：整行隐藏，不占空间也不打扰
+            self.dep_row_widget.hide()
+            self.btn_next.setEnabled(not self._busy)
             self.lbl_error.hide()
             self._populate_images()
+            return
+
+        # 有必需依赖缺失：显示提示行和安装按钮
+        self.dep_row_widget.show()
+        self.btn_install.show()
+        self.btn_next.setEnabled(False)
+
+        lines = [f"✗ 缺少 {len(missing)} 项必需组件："]
+        for r in missing:
+            lines.append(f"   · {r.dep.name}（{r.dep.purpose}）")
+        if optional:
+            lines.append(
+                f"   另有 {len(optional)} 项可选组件未安装。"
+            )
+        lines.append("点击「安装组件」自动安装。")
+
+        self.lbl_dep.setText("\n".join(lines))
+        self.lbl_dep.setStyleSheet("color: #e74c3c;")
+        self._fail(
+            f"缺少 {len(missing)} 项必需组件，无法创建虚拟机。"
+            "点击「安装组件」自动安装。"
+        )
 
     def _install_deps(self) -> None:
         distro = deps.detect_distro()
@@ -540,114 +376,15 @@ class VMWizard(QDialog):
         return self._specs[row]
 
     def _on_image_changed(self, _row: int) -> None:
-        spec = self._current_spec()
-        if spec is None:
-            return
+        # 界面不再显示镜像详情，选中变化只需刷新按钮状态
+        if self._current_spec() is not None:
+            self.btn_next.setEnabled(True)
 
-        p = images.image_path(spec)
-        size = ""
-        if p.exists():
-            size = f"（本地 {fmt_size(p.stat().st_size)}）"
 
-        self.lbl_img_detail.setText(
-            f"<b>{spec.name}</b>{size}<br>"
-            f"架构：{spec.family} 家族 · 默认用户：{spec.default_user}<br>"
-            f"来源：{spec.url()}"
-        )
-        self.lbl_img_note.setText(spec.note or "")
-        self.btn_next.setEnabled(True)
-
-    def _apply_image_defaults(self) -> None:
-        """按所选镜像调整默认资源配置"""
-        spec = self._current_spec()
-        if spec is None:
-            return
-        self.sp_cpu.setValue(max(1, spec.default_cpus))
-        self.sp_mem.setValue(max(256, spec.default_mem_mb))
-        self.sp_disk.setValue(max(4, spec.default_disk_gb))
-
-        # 名称默认用镜像 key 简化形式
-        if not self.ed_name.text().strip():
-            self.ed_name.setText(spec.key.replace(".", "-").replace("_", "-"))
-
-    # ─────────────────────────────────────────
-    # 步骤 3：资源
-    # ─────────────────────────────────────────
-    def _on_mem_changed(self) -> None:
-        self._update_mem_hint()
-
-    def _update_mem_hint(self) -> None:
-        from core.vm import memory as vm_memory
-
-        want = self.sp_mem.value()
-        try:
-            hm = vm_memory.host_memory()
-            avail = hm.available_mb
-            if want > avail:
-                self.lbl_mem_hint.setText(
-                    f"⚠ 宿主机当前可用 {avail} MB，分配 {want} MB 可能失败。"
-                )
-                self.lbl_mem_hint.setObjectName("statusError")
-            else:
-                self.lbl_mem_hint.setText(
-                    f"宿主机可用 {avail} MB / 共 {hm.total_mb} MB，分配后剩余约 "
-                    f"{avail - want} MB。"
-                )
-                self.lbl_mem_hint.setObjectName("hintLabel")
-            self.lbl_mem_hint.style().unpolish(self.lbl_mem_hint)
-            self.lbl_mem_hint.style().polish(self.lbl_mem_hint)
-        except Exception:
-            self.lbl_mem_hint.setText("")
-
-    def _validate(self) -> bool:
-        name = self.ed_name.text().strip()
-        if not name:
-            self._fail("请填写虚拟机名称。")
-            return False
-        if "/" in name or name.startswith(".") or " " in name:
-            self._fail("名称不能包含空格、/ 或以 . 开头。")
-            return False
-        if vm_manager.name_taken(name):
-            self._fail(f"名称「{name}」已被占用，请换一个。")
-            return False
-        if not self.ed_user.text().strip():
-            self._fail("请填写用户名。")
-            return False
-        if not cloudinit.iso_tool_available():
-            self._fail(
-                "缺少 ISO 生成工具（xorriso / genisoimage），无法生成 cloud-init 配置。"
-            )
-            return False
-        return True
 
     # ─────────────────────────────────────────
     # 步骤 4：确认
     # ─────────────────────────────────────────
-    def _build_summary(self) -> None:
-        spec = self._current_spec()
-        img = spec.name if spec else "-"
-        downloaded = images.is_downloaded(spec) if spec else False
-
-        rows = [
-            ("名称", self.ed_name.text().strip()),
-            ("操作系统", img + ("" if downloaded else "（需下载）")),
-            ("处理器", f"{self.sp_cpu.value()} vCPU"),
-            ("内存", f"{self.sp_mem.value()} MB"),
-            ("磁盘", f"{self.sp_disk.value()} GB"),
-            ("用户名", self.ed_user.text().strip()),
-            ("初始密码", self.ed_pass.text()),
-            ("时区 / 语言", f"{self._host.timezone} · {self._host.locale}"),
-            ("DNS", "、".join(self._host.dns) or "（自动）"),
-        ]
-
-        html = "<table cellspacing='0' cellpadding='4'>"
-        for k, val in rows:
-            html += (
-                f"<tr><td style='color:gray'>{k}</td>"
-                f"<td><b>{val}</b></td></tr>"
-            )
-        html += "</table>"
-        self.lbl_summary.setText(html)
 
     # ─────────────────────────────────────────
     # 创建
@@ -678,12 +415,10 @@ class VMWizard(QDialog):
                 self.prog.setValue(cur)
 
         def work():
+            # 只传名称、镜像、用户名 —— 磁盘与内存全部用默认值
             return vm_manager.create_vm(
                 name=name,
                 image_key=spec.key,
-                memory_mb=self.sp_mem.value(),
-                cpus=self.sp_cpu.value(),
-                disk_gb=self.sp_disk.value(),
                 username=self.ed_user.text().strip(),
                 on_log=on_log,
                 on_progress=on_progress,

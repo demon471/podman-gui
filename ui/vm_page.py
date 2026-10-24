@@ -253,6 +253,14 @@ class VMPage(QWidget):
         self.act_reclaim.triggered.connect(self._reclaim_selected)
         tb.addAction(self.act_reclaim)
 
+        self.act_purge = QAction(icon("delete", danger=True), "清空所有", self)
+        self.act_purge.setProperty("iconName", "delete")
+        self.act_purge.setToolTip(
+            "删除所有虚拟机及其磁盘，并清理已下载的镜像缓存"
+        )
+        self.act_purge.triggered.connect(self._purge_all)
+        tb.addAction(self.act_purge)
+
         spacer = QWidget()
         spacer.setSizePolicy(
             spacer.sizePolicy().Policy.Expanding,
@@ -537,6 +545,7 @@ class VMPage(QWidget):
         self.act_stop.setEnabled(has and running and not self._busy)
         self.act_ssh.setEnabled(has and running)
         self.act_reclaim.setEnabled(has and running and not self._busy)
+        self.act_purge.setEnabled(bool(self._vms) and not self._busy)
 
     # ─────────────────────────────────────────
     # 操作
@@ -704,6 +713,75 @@ class VMPage(QWidget):
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _purge_all(self) -> None:
+        """一键清空：删除所有 VM + 镜像缓存"""
+        from core.vm import images as vm_images
+
+        try:
+            vm_bytes, img_bytes = vm_manager.vm_data_size()
+        except Exception:
+            vm_bytes = img_bytes = 0
+
+        vm_count = len(self._vms)
+        img_count = sum(
+            1 for spec in vm_images.list_images()
+            if vm_images.is_downloaded(spec)
+        )
+
+        ret = QMessageBox.warning(
+            self,
+            "清空所有虚拟机",
+            f"将删除以下内容，且无法恢复：\n\n"
+            f"  · {vm_count} 台虚拟机（含各自磁盘和配置）\n"
+            f"  · {img_count} 个已下载的镜像缓存"
+            f"（{fmt_size(img_bytes)}，之后可重新下载）\n"
+            f"  · 共享磁盘基础\n\n"
+            f"合计释放约 {fmt_size(vm_bytes + img_bytes)}。\n\n"
+            "确定继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        # 二次确认（不可恢复操作）
+        ret2 = QMessageBox.warning(
+            self,
+            "再次确认",
+            "此操作不可恢复，虚拟机内未备份的数据将永久丢失。\n\n"
+            "确定要清空吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret2 != QMessageBox.StandardButton.Yes:
+            return
+
+        def work():
+            return vm_manager.purge_all(include_images=True)
+
+        def done(res):
+            count, freed, err = res
+            self._mem_cache.clear()
+            self._vms = []
+            self._rebuild()
+            if err:
+                QMessageBox.warning(
+                    self, "部分清理失败",
+                    f"已删除 {count} 台虚拟机，释放 {fmt_size(freed)}。\n\n"
+                    f"以下项清理失败：\n{err}",
+                )
+            else:
+                QMessageBox.information(
+                    self, "已清空",
+                    f"已删除 {count} 台虚拟机，释放 {fmt_size(freed)}。",
+                )
+                self.status_message.emit(f"已清空虚拟机，释放 {fmt_size(freed)}")
+
+        self.run_op(
+            "清空", work, busy_text="正在删除所有虚拟机…",
+            on_success=done,
+        )
+
     def _delete_selected(self) -> None:
         vm = self._selected_vm()
         if not vm:
@@ -743,8 +821,9 @@ class VMPage(QWidget):
             (self.act_stop, "stop"),
             (self.act_ssh, "terminal"),
             (self.act_reclaim, "clean"),
+            (self.act_purge, "delete"),
         ]:
-            act.setIcon(icon(nm))
+            act.setIcon(icon(nm, danger=(nm == "delete")))
         self._rebuild()
 
     def on_disconnected(self) -> None:
