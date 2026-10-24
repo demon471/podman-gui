@@ -93,13 +93,58 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
+def _socket_usable(path: str) -> bool:
+    """判断 socket 路径是否存在且可连接
+
+    注意：Path.exists() 在父目录无读权限时会抛 PermissionError
+    （例如 rootful 的 /run/podman/ 对普通用户不可读），必须捕获。
+    """
+    try:
+        st = os.stat(path)
+    except (OSError, PermissionError):
+        # 不存在 / 无权限 / 路径无效，一律视为不可用
+        return False
+
+    # 必须是 socket 类型（防止误匹配普通文件）
+    import stat as _stat
+
+    if not _stat.S_ISSOCK(st.st_mode):
+        return False
+
+    # 检查当前进程是否有读写权限
+    if not os.access(path, os.R_OK | os.W_OK):
+        return False
+
+    return True
+
+
 def find_socket() -> str | None:
-    """探测可用的 Podman socket"""
-    uid = os.getuid()
+    """探测可用的 Podman socket
+
+    按 SOCKET_CANDIDATES 顺序尝试，返回第一个存在且可连接的路径。
+    全程捕获异常：权限不足、路径不存在、符号链接失效等都跳过而非崩溃。
+    """
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        uid = 0
+
     for tmpl in SOCKET_CANDIDATES:
-        p = tmpl.format(uid=uid)
-        if Path(p).exists():
-            return p
+        try:
+            candidate = tmpl.format(uid=uid)
+        except (KeyError, IndexError):
+            continue
+
+        if _socket_usable(candidate):
+            return candidate
+
+    # 环境变量覆盖（Podman 官方支持 CONTAINER_HOST）
+    env_host = os.environ.get("CONTAINER_HOST", "")
+    if env_host.startswith("unix://"):
+        path = env_host[len("unix://"):]
+        if _socket_usable(path):
+            return path
+
     return None
 
 

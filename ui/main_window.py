@@ -249,13 +249,9 @@ class MainWindow(QMainWindow):
                 "  systemctl --user start podman.socket",
             )
             if show_error:
-                QMessageBox.critical(
-                    self, "无法连接 Podman",
-                    "未找到 Podman socket。\n\n"
-                    "请确认 Podman 正在运行：\n"
-                    "  systemctl --user start podman.socket\n\n"
-                    "然后重启本程序。",
-                )
+                # 非阻塞提示：用户可能在无 Podman 的环境（如 CI）启动，
+                # 阻塞式弹窗会导致程序挂死
+                QTimer.singleShot(200, lambda: self._warn_no_socket())
             return
 
         if self.client.ping():
@@ -268,6 +264,25 @@ class MainWindow(QMainWindow):
                 f"Socket 存在但无响应：\n{sock}\n\n"
                 f"尝试重启：systemctl --user restart podman.socket",
             )
+
+    def _warn_no_socket(self) -> None:
+        """提示未找到 socket（非模态，不阻塞主循环）"""
+        from PyQt6.QtWidgets import QMessageBox as _MB
+
+        box = _MB(self)
+        box.setIcon(_MB.Icon.Critical)
+        box.setWindowTitle("无法连接 Podman")
+        box.setText("未找到 Podman socket。")
+        box.setInformativeText(
+            "请确认 Podman 正在运行：\n"
+            "  systemctl --user start podman.socket\n\n"
+            "然后重启本程序。\n\n"
+            "（此提示不影响程序继续运行）"
+        )
+        box.setStandardButtons(_MB.StandardButton.Ok)
+        # 非模态：不阻塞事件循环
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        box.show()
 
     def _set_conn_state(self, text: str, color: str, tooltip: str) -> None:
         self.lbl_conn.setText(f"● {text}")
