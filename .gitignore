@@ -1,0 +1,111 @@
+# ══════════════════════════════════════════
+# Python
+# ══════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+.build-venv/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+*.cover
+
+# 类型检查 / 缓存
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# ══════════════════════════════════════════
+# PyInstaller 打包产物
+# ══════════════════════════════════════════
+build/
+dist/
+*.spec.bak
+# 注意：podman-gui.spec 需要提交，不忽略
+
+# ══════════════════════════════════════════
+# 编辑器 / IDE
+# ══════════════════════════════════════════
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ══════════════════════════════════════════
+# 操作系统
+# ══════════════════════════════════════════
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ══════════════════════════════════════════
+# 运行时生成（程序运行产生的缓存）
+# ══════════════════════════════════════════
+# 通知图标缓存（运行时渲染生成）
+resources/icons/notify-*.png
+# 应用图标的多尺寸 PNG 是构建产物，由脚本从源图生成
+# 但为了仓库可用，保留它们（如不想提交可取消下面注释）
+# resources/appicon/podman-gui-*.png
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# 配置文件备份（本程序会生成 .bak）
+*.conf.bak
+
+# ══════════════════════════════════════════
+# 本地开发辅助（不上传）
+# ══════════════════════════════════════════
+# 本地测试脚本
+test_*.py
+scratch/
+notes/
+TODO.md

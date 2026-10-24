@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Podman 管理器
+Name[en]=Podman Manager
+GenericName=容器管理
+GenericName[en]=Container Manager
+Comment=KDE 原生 Podman 容器、镜像、卷、网络、Pod 管理工具
+Comment[en]=Native KDE GUI for Podman containers, images, volumes, networks and pods
+Exec=podman-gui
+Icon=podman-gui
+Terminal=false
+Categories=System;Monitor;
+Keywords=podman;container;docker;docker-compose;kde;qt;
+StartupNotify=true
+StartupWMClass=podman-gui
+X-KDE-StartupNotify=true

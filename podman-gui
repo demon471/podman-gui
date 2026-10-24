@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Podman 管理器启动脚本
+set -e
+
+# 定位脚本所在目录（解析软链接）
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+APP_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+export QT_QPA_PLATFORMTHEME=kde
+export QT_ENABLE_HIGHDPI_SCALING=1
+
+exec python3 "$APP_DIR/main.py" "$@"
