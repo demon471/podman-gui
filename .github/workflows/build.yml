@@ -161,9 +161,16 @@ jobs:
           cp dist/podman-gui "release/${NAME}"
           chmod +x "release/${NAME}"
 
-          # 桌面集成附件（desktop 文件 + 全尺寸图标）
-          tar -czf "release/${NAME}-desktop.tar.gz" \
-            -C resources podman-gui.desktop appicon
+          # 安装脚本 + 桌面文件 + 图标，打成一个可解压即安装的包
+          STAGE=$(mktemp -d)
+          cp dist/podman-gui "$STAGE/${NAME}"
+          chmod +x "$STAGE/${NAME}"
+          cp install.sh "$STAGE/"
+          chmod +x "$STAGE/install.sh"
+          cp resources/podman-gui.desktop "$STAGE/"
+          cp -r resources/appicon "$STAGE/"
+          tar -czf "release/${NAME}.tar.gz" -C "$STAGE" .
+          rm -rf "$STAGE"
 
           # 校验和
           ( cd release && sha256sum "${NAME}" > "${NAME}.sha256" )
@@ -192,18 +199,44 @@ jobs:
           files: |
             release/${{ steps.pkg.outputs.name }}
             release/${{ steps.pkg.outputs.name }}.sha256
-            release/${{ steps.pkg.outputs.name }}-desktop.tar.gz
+            release/${{ steps.pkg.outputs.name }}.tar.gz
           body: |
-            ## 直接运行
+            ## 两种安装方式
+
+            ### 方式一：一键安装（推荐）
+
+            下载 `.tar.gz` 压缩包，解压后运行 `install.sh`：
+
+            ```bash
+            tar -xzf ${{ steps.pkg.outputs.name }}.tar.gz -C podman-gui-install
+            cd podman-gui-install
+            ./install.sh
+            ```
+
+            脚本会完成三件事：
+            - 复制可执行文件到 `~/.local/bin/podman-gui`
+            - 安装桌面入口到应用菜单
+            - 安装图标到当前 KDE 主题目录（自动检测主题）
+
+            之后在应用菜单搜索「Podman」或终端执行 `podman-gui` 即可。
+
+            **卸载**：`./install.sh --uninstall`
+            **系统级安装**：`./install.sh --system`（需 sudo，装到 `/usr/local`）
+
+            ### 方式二：直接运行（不安装）
+
+            下载单个可执行文件，加执行权限后直接跑：
 
             ```bash
             chmod +x ${{ steps.pkg.outputs.name }}
             ./${{ steps.pkg.outputs.name }}
             ```
 
-            ## 前置条件
+            这样不会出现在应用菜单里，也不会装图标，适合临时试用。
 
-            Podman socket 必须运行：
+            ---
+
+            ## 前置条件：Podman socket
 
             ```bash
             systemctl --user enable --now podman.socket
@@ -227,35 +260,18 @@ jobs:
             | Ubuntu / Debian | `sudo apt install libqt6svg6` |
             | Fedora | `sudo dnf install qt6-qtsvg` |
 
-            ## 桌面集成（可选）
+            `install.sh` 会自动检查，缺失时给出对应命令。
 
-            ```bash
-            tar -xzf ${{ steps.pkg.outputs.name }}-desktop.tar.gz
-
-            mkdir -p ~/.local/bin ~/.local/share/applications
-            ln -sf "$PWD/${{ steps.pkg.outputs.name }}" ~/.local/bin/podman-gui
-            cp podman-gui.desktop ~/.local/share/applications/
-
-            # 图标必须装到当前 KDE 图标主题目录
-            THEME=$(kreadconfig6 --file kdeglobals --group Icons --key Theme)
-            for dir in hicolor "$THEME" "${THEME}-dark"; do
-                for size in 16 22 24 32 48 64 128 256 512; do
-                    if [ "$dir" = "hicolor" ]; then
-                        dest="$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
-                    else
-                        dest="$HOME/.local/share/icons/$dir/apps/$size"
-                    fi
-                    mkdir -p "$dest"
-                    cp "appicon/podman-gui-${size}.png" "$dest/podman-gui.png"
-                done
-            done
-
-            gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
-            kbuildsycoca6 --noincremental
-            ```
-
-            ## 校验
+            ## 校验下载
 
             ```bash
             sha256sum -c ${{ steps.pkg.outputs.name }}.sha256
             ```
+
+            ## 文件说明
+
+            | 文件 | 用途 |
+            |---|---|
+            | `${{ steps.pkg.outputs.name }}` | 可执行文件（82 MB，直接运行） |
+            | `${{ steps.pkg.outputs.name }}.tar.gz` | 完整安装包（含 install.sh + 图标） |
+            | `${{ steps.pkg.outputs.name }}.sha256` | 校验和 |
