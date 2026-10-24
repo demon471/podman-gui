@@ -546,6 +546,29 @@ class ContainerPage(QWidget):
         if hasattr(win, "sidebar"):
             win.sidebar.select("images")
 
+    def on_disconnected(self) -> None:
+        """Podman 断开：清空容器列表"""
+        self._containers = []
+        self.model.removeRows(0, self.model.rowCount())
+        self._table_stack.setCurrentWidget(self._empty)
+        self._empty.set_text(
+            "Podman 服务已断开",
+            "无法连接到 Podman，正在等待重连…\n"
+            "可尝试：systemctl --user restart podman.socket",
+        )
+        self._set_actions_enabled(False)
+        self.lbl_stats.setText("连接已断开")
+
+    def on_reconnected(self) -> None:
+        """重连后恢复"""
+        self._empty.set_text(
+            "还没有容器",
+            "当前没有任何容器。\n"
+            "可以点下方按钮查看可用镜像，或用 podman run 创建容器。",
+        )
+        self._set_actions_enabled(True)
+        self.refresh_silent()
+
     def _on_filter(self, text: str) -> None:
         self.proxy.setFilterFixedString(text)
 

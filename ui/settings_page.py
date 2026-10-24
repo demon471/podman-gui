@@ -1576,6 +1576,13 @@ class SettingsPage(QWidget):
 
         if res.returncode == 0:
             self.status_message.emit(f"用户级服务{label}成功")
+
+            # 主动更新连接状态：不等定时器轮询
+            if action == "stop":
+                self.client._set_connected(False)
+            elif action in ("start", "restart"):
+                # 等服务起来再探测
+                QTimer.singleShot(800, self.client.check_connection)
         else:
             QMessageBox.warning(
                 self, f"{label}失败",

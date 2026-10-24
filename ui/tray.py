@@ -246,6 +246,11 @@ class TrayIcon(QObject):
 
         return out
 
+    def on_disconnected(self) -> None:
+        """Podman 断开：清空容器列表"""
+        self._containers = []
+        self.tray.setToolTip("Podman 管理器 · 连接已断开")
+
     def _open_url(self, url: str) -> None:
         """用默认浏览器打开"""
         from PyQt6.QtCore import QUrl

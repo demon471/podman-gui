@@ -70,8 +70,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._setup_theme_watcher()
-        self._check_connection()
         self._setup_tray()
+
+        # 必须先注册回调，再做首次检查
+        # （否则首次检查的状态变化无法触发 UI 更新）
+        self.client.on_state_change(self._on_conn_state_changed)
+        self._check_connection()
 
     # ─────────────────────────────────────────
     # UI
@@ -140,7 +144,7 @@ class MainWindow(QMainWindow):
         # 每 10 秒检测一次连接状态
         self._conn_timer = QTimer(self)
         self._conn_timer.timeout.connect(lambda: self._check_connection(False))
-        self._conn_timer.start(10000)
+        self._conn_timer.start(3000)
 
         # 不建菜单栏：所有功能都在侧边栏和工具栏中
 
@@ -254,16 +258,52 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(200, lambda: self._warn_no_socket())
             return
 
-        if self.client.ping():
+        # check_connection 会通过回调统一处理 UI 更新
+        self.client.check_connection()
+
+    def _on_conn_state_changed(self, connected: bool) -> None:
+        """连接状态变化（由 PodmanClient 在请求失败/成功时触发）
+
+        断连时立即：
+          · 状态栏变红
+          · 所有页面清空数据（避免显示过期的「运行中」）
+          · 禁用操作按钮
+        """
+        if connected:
+            sock = find_socket() or ""
             self._set_conn_state(
-                "已连接", "#27ae60", f"Socket: {sock}"
+                "已连接", "#27ae60",
+                f"Socket: {sock}" if sock else "",
             )
-        else:
-            self._set_conn_state(
-                "连接异常", "#f39c12",
-                f"Socket 存在但无响应：\n{sock}\n\n"
-                f"尝试重启：systemctl --user restart podman.socket",
-            )
+            self._set_status("Podman 服务已恢复")
+
+            # 所有页面恢复（不只是当前页，避免切回去还是空的）
+            for page in self._pages.values():
+                if hasattr(page, "on_reconnected"):
+                    page.on_reconnected()
+                elif hasattr(page, "refresh_silent"):
+                    page.refresh_silent()
+
+            if self.tray is not None:
+                self.tray.refresh()
+            return
+
+        # ── 断连 ──
+        self._set_conn_state(
+            "连接异常", "#f39c12",
+            "Podman 服务无响应。\n\n"
+            "尝试重启：systemctl --user restart podman.socket",
+        )
+        self._set_status("Podman 服务已断开，正在等待重连…")
+
+        # 所有页面清空（显示空状态而不是旧数据）
+        for page in self._pages.values():
+            if hasattr(page, "on_disconnected"):
+                page.on_disconnected()
+
+        # 托盘也清空
+        if self.tray is not None:
+            self.tray.on_disconnected()
 
     def _warn_no_socket(self) -> None:
         """提示未找到 socket（非模态，不阻塞主循环）"""

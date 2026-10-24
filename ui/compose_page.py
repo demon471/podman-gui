@@ -847,6 +847,28 @@ class ComposePage(QWidget):
         self._tasks = [t for t in self._tasks if t._thread is not None]
         self._tasks.append(task)
 
+    def on_disconnected(self) -> None:
+        """Podman 断开：所有服务状态标记为未知"""
+        # 项目列表保留（来自文件系统），但状态清空
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            item.setText(1, "—")
+            item.setForeground(1, QColor("#95a5a6"))
+            for j in range(item.childCount()):
+                child = item.child(j)
+                child.setText(1, "未知")
+                child.setForeground(1, QColor("#95a5a6"))
+                child.setIcon(1, state_icon("exited", 14))
+
+        self.lbl_stats.setText(
+            f"{len(self.projects)} 个项目 · Podman 服务已断开"
+        )
+        self._update_actions()
+
+    def on_reconnected(self) -> None:
+        """重连后重新扫描状态"""
+        self.refresh()
+
     def _tree_context_menu(self, pos) -> None:
         """项目树右键菜单"""
         item = self.tree.itemAt(pos)

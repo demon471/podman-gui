@@ -156,6 +156,40 @@ class PodmanClient:
         self.timeout = timeout
         self._api_version: str | None = None
 
+        # 连接状态：None=未知, True=正常, False=断开
+        self._connected: bool | None = None
+        # 状态变化回调（由 UI 注册）
+        self._on_state_change: list = []
+
+    # ─────────────────────────────────────────
+    # 连接状态
+    # ─────────────────────────────────────────
+    def on_state_change(self, callback) -> None:
+        """注册连接状态变化回调（callback(connected: bool)）"""
+        if callback not in self._on_state_change:
+            self._on_state_change.append(callback)
+
+    def _set_connected(self, connected: bool) -> None:
+        """更新连接状态，变化时通知所有回调"""
+        if self._connected == connected:
+            return
+        self._connected = connected
+        for cb in list(self._on_state_change):
+            try:
+                cb(connected)
+            except Exception:
+                pass
+
+    @property
+    def connected(self) -> bool | None:
+        return self._connected
+
+    def check_connection(self) -> bool:
+        """主动探测并更新状态（返回是否连接）"""
+        ok = self.ping()
+        self._set_connected(ok)
+        return ok
+
     # ─────────────────────────────────────────
     # 底层请求
     # ─────────────────────────────────────────
@@ -183,9 +217,14 @@ class PodmanClient:
         except PodmanError:
             raise
         except (OSError, http.client.HTTPException) as e:
+            # 连接层失败 → 标记断开（UI 会立即清空数据）
+            self._set_connected(False)
             raise PodmanError(f"请求失败: {e}") from e
         finally:
             conn.close()
+
+        # 收到响应 → 连接正常
+        self._set_connected(True)
 
         if status >= 400:
             detail = data.decode(errors="replace")[:500]
@@ -203,11 +242,24 @@ class PodmanClient:
     # ─────────────────────────────────────────
     # 连接检测
     # ─────────────────────────────────────────
-    def ping(self) -> bool:
-        """测试连接是否可用"""
+    # 连接探测专用超时（服务停止后 socket 仍存在，
+    # 但连接无响应，用默认 30s 会让 UI 卡很久）
+    PING_TIMEOUT = 1.5
+
+    def ping(self, timeout: float | None = None) -> bool:
+        """测试连接是否可用
+
+        默认用短超时（1.5s），避免服务停止后长时间等待。
+        """
         try:
-            return self._request("GET", "/v5.0.0/libpod/_ping", raw=True) == b"OK"
+            return self._request(
+                "GET", "/v5.0.0/libpod/_ping",
+                raw=True,
+                timeout=timeout or self.PING_TIMEOUT,
+            ) == b"OK"
         except PodmanError:
+            return False
+        except Exception:
             return False
 
     def version(self) -> dict:

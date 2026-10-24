@@ -456,6 +456,28 @@ class ResourcePage(QWidget):
         """删除单个资源（子类必须实现，供批量删除调用）"""
         raise NotImplementedError(f"{self.__class__.__name__} 未实现 delete_item")
 
+    def on_disconnected(self) -> None:
+        """Podman 断开：清空列表，显示空状态"""
+        self._rows = []
+        self.model.removeRows(0, self.model.rowCount())
+        self._table_stack.setCurrentWidget(self._empty)
+        self._empty.set_text(
+            "Podman 服务已断开",
+            "无法连接到 Podman，正在等待重连…\n"
+            "可尝试：systemctl --user restart podman.socket",
+        )
+        if hasattr(self, "act_delete"):
+            self.act_delete.setEnabled(False)
+        self.lbl_stats.setText("连接已断开")
+
+    def on_reconnected(self) -> None:
+        """重连后恢复空状态文案并刷新"""
+        self._empty.set_text(
+            f"还没有{self.unit}",
+            self.empty_hint(),
+        )
+        self.refresh_silent()
+
     def empty_hint(self) -> str:
         """空状态副说明（子类可覆盖）"""
         return f"当前没有{self.unit}。可以点下方按钮创建。"

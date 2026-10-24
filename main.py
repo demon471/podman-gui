@@ -40,8 +40,37 @@ def _app_icon() -> QIcon:
     return icon("seal", 256)
 
 
+def _load_translations(app: QApplication) -> None:
+    """加载 Qt 中文翻译（让 Yes/No 等标准按钮显示中文）
+
+    Qt 内置按钮文案由 qtbase_*.qm 提供。不加载时，
+    即使系统是中文环境，QMessageBox 仍显示英文 Yes/No。
+    """
+    from PyQt6.QtCore import QLibraryInfo, QLocale, QTranslator
+
+    translator = QTranslator(app)
+
+    # 搜索路径：PyQt6 自带 + 系统 Qt6
+    candidates = [
+        QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath),
+        "/usr/share/qt6/translations",
+        "/usr/share/qt/translations",
+    ]
+
+    for path in candidates:
+        if not path:
+            continue
+        # 优先中文，其次用系统 locale
+        for locale in ("zh_CN", QLocale.system().name()):
+            if translator.load(f"qtbase_{locale}", path):
+                app.installTranslator(translator)
+                app._qt_translator = translator   # 保持引用，防止被回收
+                return
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    _load_translations(app)
     app.setApplicationName(APP_ID)
     # 不设 DisplayName：Qt 会把它拼到窗口标题后面，造成重复
     app.setApplicationVersion(APP_VERSION)
