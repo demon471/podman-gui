@@ -48,9 +48,9 @@ SHARED_DIR_NAME = "shared"
 
 def shared_base_path(spec: images.ImageSpec, arch: str = "amd64") -> Path:
     """共享基础磁盘路径"""
-    from core.config import vm_data_dir
+    from core.vm.manager import VM_ROOT
 
-    return vm_data_dir() / SHARED_DIR_NAME / f"{spec.key}-{arch}.qcow2"
+    return VM_ROOT / SHARED_DIR_NAME / f"{spec.key}-{arch}.qcow2"
 
 
 def ensure_shared_base(
@@ -86,6 +86,13 @@ def ensure_shared_base(
     # 转成内部快照形式的 qcow2，作为只读 backing file。
     # 不做完整复制：直接基于原始镜像创建引用，
     # 写入只发生在各 VM 的增量层。
+    #
+    # 关键：不能指定 size 参数。
+    # qemu-img create 带 backing file 时，overlay 的虚拟大小若小于
+    # backing 的大小，虽然命令成功，但实际只能看到指定的大小
+    # （例如写 "1M" 就只剩 1MB），UEFI 会因找不到启动项而
+    # 回落到 PXE / 报 "No bootable option"。
+    # 省略 size 时 qemu-img 自动继承 backing 的大小。
     tmp = target.with_suffix(".tmp.qcow2")
     r = subprocess.run(
         [
@@ -94,7 +101,6 @@ def ensure_shared_base(
             "-F", "qcow2",
             "-b", str(source),
             str(tmp),
-            "1M",            # 占位大小，实际按需增长
         ],
         capture_output=True, text=True, timeout=120,
     )

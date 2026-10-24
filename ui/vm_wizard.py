@@ -316,9 +316,7 @@ class VMWizard(QDialog):
         if ret != QMessageBox.StandardButton.Yes:
             return
 
-        self.dep_log.show()
-        self.dep_log.clear()
-        self.dep_log.append(f"$ {cmd}\n")
+        self.lbl_dep.setText("正在安装组件…（需要输入 sudo 密码）")
         self.btn_install.setEnabled(False)
 
         def work():
@@ -333,17 +331,20 @@ class VMWizard(QDialog):
 
         def done(res):
             rc, out = res
-            self.dep_log.append(out[-4000:])
             self.btn_install.setEnabled(True)
             if rc == 0:
-                self.dep_log.append("\n✓ 安装完成，重新检测…")
+                self.lbl_dep.setText("✓ 安装完成，正在重新检测…")
                 self._check_deps()
             else:
-                self.dep_log.append(f"\n✗ 安装失败（退出码 {rc}）")
+                tail = out.strip().splitlines()[-3:]
+                self.lbl_dep.setText(
+                    f"✗ 安装失败（退出码 {rc}）\n"
+                    + "\n".join(tail)
+                )
 
         def error(msg):
             self.btn_install.setEnabled(True)
-            self.dep_log.append(f"\n✗ {msg}")
+            self.lbl_dep.setText(f"✗ {msg}")
 
         self._spawn(work, done, error)
 
@@ -400,7 +401,6 @@ class VMWizard(QDialog):
 
         self._busy = True
         self.btn_next.setEnabled(False)
-        self.btn_back.setEnabled(False)
         self.btn_cancel.setEnabled(False)
         self.prog.show()
         self.prog.setRange(0, 0)
@@ -432,7 +432,6 @@ class VMWizard(QDialog):
 
             if vm is None:
                 self.btn_next.setEnabled(True)
-                self.btn_back.setEnabled(True)
                 self._fail(f"创建失败：{err}")
                 QMessageBox.warning(self, "创建失败", err)
                 return
@@ -444,7 +443,6 @@ class VMWizard(QDialog):
             self._busy = False
             self.prog.hide()
             self.btn_next.setEnabled(True)
-            self.btn_back.setEnabled(True)
             self.btn_cancel.setEnabled(True)
             self._fail(f"创建失败：{msg}")
             QMessageBox.warning(self, "创建失败", msg)
