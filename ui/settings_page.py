@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from core import podman_config as cfg
 from core.podman_client import PodmanClient, PodmanError
+from core.vm import dns as vm_dns
 from core.vm import memory as vm_memory
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 
@@ -51,6 +52,13 @@ class SettingsPage(QWidget):
     def __init__(self, client: PodmanClient, parent: QWidget | None = None):
         super().__init__(parent)
         self.client = client
+        self._tasks: list = []   # 后台任务句柄，防止被 GC
+        # 域名状态检测的防重入标志。
+        # 之前的问题：_refresh_vm_memory 会被 tab 切换和 singleShot
+        # 各触发一次，每次都新建后台任务，短时间内堆积多个 QThread
+        # 同时跑 vm_dns.status()（内含多条 subprocess），
+        # 导致 Qt 内部状态损坏而 abort。
+        self._dns_checking = False
         self._build_ui()
         self.load_config()
 
@@ -94,6 +102,7 @@ class SettingsPage(QWidget):
 
         layout.addWidget(self._build_ksm_group())
         layout.addWidget(self._build_balloon_group())
+        layout.addWidget(self._build_domain_group())
         layout.addStretch()
 
         scroll.setWidget(w)
@@ -218,6 +227,254 @@ class SettingsPage(QWidget):
 
         return grp
 
+    def _build_domain_group(self) -> QWidget:
+        """VM 域名解析（一次性配置，后续零维护）"""
+        grp = QGroupBox("网络与域名")
+        v = QVBoxLayout(grp)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(10)
+
+        hint = QLabel(
+            "配置后，所有虚拟机都能用 "
+            f"http://<虚拟机名>.{vm_dns.DOMAIN_SUFFIX}:<端口> 访问。\n"
+            "这是一次性配置：之后新建、删除虚拟机都不需要再改宿主机。"
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        # 状态行
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        self.lbl_dns_state = QLabel("检测中…")
+        self.lbl_dns_state.setObjectName("serviceState")
+        row.addWidget(self.lbl_dns_state, 1)
+
+        self.btn_dns_refresh = QPushButton("刷新")
+        self.btn_dns_refresh.setIcon(
+            icon("refresh", ICON_SIZE_TOOLBAR.width())
+        )
+        self.btn_dns_refresh.clicked.connect(self._refresh_vm_memory)
+        row.addWidget(self.btn_dns_refresh)
+
+        v.addLayout(row)
+
+        # 详情
+        self.lbl_dns_detail = QLabel("")
+        self.lbl_dns_detail.setObjectName("hintLabel")
+        self.lbl_dns_detail.setWordWrap(True)
+        v.addWidget(self.lbl_dns_detail)
+
+        # 操作按钮
+        row2 = QHBoxLayout()
+        row2.setSpacing(10)
+
+        self.btn_dns_setup = QPushButton("一键配置…")
+        self.btn_dns_setup.setIcon(
+            icon("settings", ICON_SIZE_TOOLBAR.width())
+        )
+        self.btn_dns_setup.clicked.connect(self._dns_setup)
+        row2.addWidget(self.btn_dns_setup)
+
+        self.btn_dns_remove = QPushButton("撤销配置…")
+        self.btn_dns_remove.setIcon(
+            icon("delete", ICON_SIZE_TOOLBAR.width(), danger=True)
+        )
+        self.btn_dns_remove.clicked.connect(self._dns_remove)
+        row2.addWidget(self.btn_dns_remove)
+
+        row2.addStretch()
+        v.addLayout(row2)
+
+        return grp
+
+    def _dns_setup(self) -> None:
+        """一键配置域名解析（需要 root）"""
+        st = vm_dns.status()
+
+        if not st.dnsmasq_installed:
+            QMessageBox.warning(
+                self,
+                "缺少 dnsmasq",
+                "域名解析需要 dnsmasq。\n\n"
+                "请先安装：\n"
+                "  Arch:         sudo pacman -S dnsmasq\n"
+                "  Debian/Ubuntu: sudo apt install dnsmasq\n"
+                "  Fedora:       sudo dnf install dnsmasq",
+            )
+            return
+
+        if st.ready:
+            QMessageBox.information(
+                self,
+                "已配置",
+                f"域名解析已启用，*"
+                f"{vm_dns.DOMAIN_SUFFIX} 会解析到 127.0.0.1。",
+            )
+            return
+
+        # 说明要做什么，并询问 sudo 密码
+        dlg = QDialog(self)
+        dlg.setWindowTitle("配置虚拟机域名")
+        dlg.setMinimumWidth(600)
+        dv = QVBoxLayout(dlg)
+        dv.setContentsMargins(18, 16, 18, 14)
+        dv.setSpacing(10)
+
+        intro = QLabel(
+            f"将执行以下操作，为所有 *"
+            f"{vm_dns.DOMAIN_SUFFIX} 域名启用通配解析：\n\n"
+            f"  1. 写入 {vm_dns.DNSMASQ_CONF}\n"
+            f"  2. 写入 {vm_dns.RESOLVED_CONF}\n"
+            f"  3. 创建并启动 systemd 服务 podman-gui-dnsmasq\n\n"
+            "只需配置这一次。之后新建 / 删除虚拟机都无需再改宿主机。"
+        )
+        intro.setWordWrap(True)
+        dv.addWidget(intro)
+
+        pwd_row = QHBoxLayout()
+        pwd_row.addWidget(QLabel("sudo 密码"))
+        ed_pwd = QLineEdit()
+        ed_pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        ed_pwd.setMinimumWidth(300)
+        pwd_row.addWidget(ed_pwd)
+        pwd_row.addStretch()
+        dv.addLayout(pwd_row)
+
+        self.lbl_dns_progress = QLabel("")
+        self.lbl_dns_progress.setObjectName("hintLabel")
+        self.lbl_dns_progress.setWordWrap(True)
+        dv.addWidget(self.lbl_dns_progress)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("开始配置")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        dv.addWidget(btns)
+
+        ed_pwd.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        pwd = ed_pwd.text()
+        if not pwd:
+            return
+
+        self.btn_dns_setup.setEnabled(False)
+        self.lbl_dns_state.setText("正在配置…")
+
+        def work():
+            vm_dns.set_sudo_password(pwd)
+            try:
+                return vm_dns.configure()
+            finally:
+                vm_dns.set_sudo_password(None)
+
+        def done(res):
+            ok, err = res
+            self.btn_dns_setup.setEnabled(True)
+            if ok:
+                QMessageBox.information(
+                    self,
+                    "配置完成",
+                    f"域名解析已启用。\n\n"
+                    f"现在可以访问 http://<虚拟机名>."
+                    f"{vm_dns.DOMAIN_SUFFIX}:<端口>",
+                )
+                self.status_message.emit("虚拟机域名解析已启用")
+            else:
+                QMessageBox.warning(self, "配置失败", err)
+                self.status_message.emit(f"域名配置失败: {err[:80]}")
+            self._refresh_vm_memory()
+
+        def error(msg):
+            self.btn_dns_setup.setEnabled(True)
+            QMessageBox.warning(self, "配置失败", msg)
+            self._refresh_vm_memory()
+
+        task = run_async(work, on_done=done, on_error=error, parent=self)
+        self._tasks.append(task)
+
+    def _dns_remove(self) -> None:
+        """撤销域名解析配置"""
+        ret = QMessageBox.question(
+            self,
+            "撤销配置",
+            "将删除域名解析相关配置并停止服务。\n\n"
+            "撤销后虚拟机只能通过 localhost 端口访问。\n"
+            "确定继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        # 询问密码
+        pwd, ok = self._ask_sudo_password("撤销需要管理员权限")
+        if not ok or not pwd:
+            return
+
+        self.btn_dns_remove.setEnabled(False)
+        self.lbl_dns_state.setText("正在撤销…")
+
+        def work():
+            vm_dns.set_sudo_password(pwd)
+            try:
+                return vm_dns.unconfigure()
+            finally:
+                vm_dns.set_sudo_password(None)
+
+        def done(res):
+            ok, err = res
+            self.btn_dns_remove.setEnabled(True)
+            if ok:
+                self.status_message.emit("已撤销域名解析配置")
+            else:
+                QMessageBox.warning(self, "撤销失败", err)
+            self._refresh_vm_memory()
+
+        task = run_async(work, on_done=done,
+                         on_error=lambda m: (
+                             setattr(self.btn_dns_remove, "enabled", True),
+                             QMessageBox.warning(self, "撤销失败", m),
+                         ), parent=self)
+        self._tasks.append(task)
+
+    def _ask_sudo_password(self, title: str) -> tuple[str, bool]:
+        """询问 sudo 密码"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumWidth(420)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(18, 16, 18, 14)
+        v.setSpacing(10)
+
+        v.addWidget(QLabel("请输入 sudo 密码："))
+        ed = QLineEdit()
+        ed.setEchoMode(QLineEdit.EchoMode.Password)
+        ed.setMinimumHeight(32)
+        v.addWidget(ed)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+
+        ed.setFocus()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return "", False
+        return ed.text(), True
+
     def _refresh_vm_memory(self) -> None:
         """刷新 KSM 状态与 VM 内存汇总"""
         # KSM
@@ -271,6 +528,40 @@ class SettingsPage(QWidget):
         self.lbl_vm_hints.setText(
             "\n".join(f"· {h}" for h in hints) if hints else ""
         )
+
+        # 域名解析状态
+        # 注意：这里刻意用 UI 线程 + 延迟执行，而不是 run_async。
+        # 实测 vm_dns.status()（内含多条 subprocess 调用与
+        # socket.getaddrinfo）若放在 BackgroundTask 的工作线程里执行，
+        # 会与 Qt 的事件循环冲突并触发 QMessageLogger::fatal
+        # （整个进程 abort）。改为在 UI 线程里延迟到界面渲染完成后再读，
+        # 状态读取本身有超时保护，不会明显卡顿。
+        QTimer.singleShot(0, self._refresh_dns_status)
+
+    def _refresh_dns_status(self) -> None:
+        """读取并显示域名解析状态（必须在 UI 线程调用）"""
+        try:
+            ds = vm_dns.status()
+        except Exception:
+            self.lbl_dns_state.setText("检测失败")
+            return
+
+        self.lbl_dns_state.setText(ds.display())
+        self.btn_dns_setup.setEnabled(not ds.ready)
+        self.btn_dns_remove.setEnabled(
+            bool(ds.dnsmasq_conf or ds.resolved_conf)
+        )
+
+        parts = [
+            "dnsmasq 已安装" if ds.dnsmasq_installed else "未安装 dnsmasq"
+        ]
+        if ds.dnsmasq_running:
+            parts.append("服务运行中")
+        if ds.dnsmasq_conf and ds.resolved_conf:
+            parts.append("配置文件已写入")
+        if ds.wildcard_works:
+            parts.append("通配解析正常")
+        self.lbl_dns_detail.setText(" · ".join(parts))
 
     def _ksm_set(self, enabled: bool) -> None:
         """启用 / 禁用 KSM（需 sudo，用 sudo -n 尝试免密）"""

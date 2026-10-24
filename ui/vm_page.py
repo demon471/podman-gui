@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 
 from core.async_task import run_async
 from core.notify import notifier
+from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
 from core.vm import memory as vm_memory
 from core.vm import network as vm_network
@@ -188,6 +189,9 @@ class VMPage(QWidget):
         super().__init__(parent)
         self._vms: list = []
         self._mem_cache: dict[str, dict] = {}
+        # 域名解析是否就绪（后台检测，避免阻塞 UI）
+        self._dns_ready = True
+        self._dns_checked = False
         self._busy = False
         self._tasks: list = []
 
@@ -338,6 +342,25 @@ class VMPage(QWidget):
             return
         self._refresh_memory()
         self._rebuild()
+        self._check_dns_once()
+
+    def _check_dns_once(self) -> None:
+        """首次刷新时后台检测域名解析状态（只做一次）"""
+        if self._dns_checked:
+            return
+        self._dns_checked = True
+
+        def work():
+            st = vm_dns.status()
+            return st.ready
+
+        def done(ready):
+            self._dns_ready = bool(ready)
+            self._rebuild()
+
+        task = run_async(work, on_done=done,
+                         on_error=lambda _m: None, parent=self)
+        self._tasks.append(task)
 
     def _refresh_memory(self) -> None:
         """刷新内存占用（轻量，3s 一次）"""
@@ -457,6 +480,14 @@ class VMPage(QWidget):
             parts.append(f"宿主机可用 {hm.available_mb / 1024:.1f} GB")
         except Exception:
             pass
+
+        # 域名解析状态：未配置时明确提示，避免用户疑惑为何域名打不开
+        if not self._dns_ready:
+            parts.append(
+                f"⚠ *.{vm_dns.DOMAIN_SUFFIX} 域名未配置"
+                "（设置 → 虚拟机内存 → 网络与域名）"
+            )
+
         self.lbl_stats.setText(" · ".join(parts))
 
         self._update_actions()

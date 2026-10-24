@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 
 from core.async_task import run_async
 from core.notify import notifier
+from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
 from core.vm import memory as vm_memory
 from core.vm import network as vm_network
@@ -189,8 +190,11 @@ class VMDetailDialog(QDialog):
         v.setSpacing(8)
 
         hint = QLabel(
-            "端口转发把宿主机端口映射到 VM 端口，可在 localhost 或域名访问 VM 内服务。"
-            "修改后需重启虚拟机生效。"
+            "端口转发把宿主机端口映射到 VM 端口。\n"
+            f"访问方式：http://127.0.0.1:<宿主机端口> 或 "
+            f"http://{vm_dns.vm_domain(self.vm.spec.name)}:<宿主机端口>"
+            "（域名需一次性配置，见设置页）。\n"
+            "修改端口后需重启虚拟机生效。"
         )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)

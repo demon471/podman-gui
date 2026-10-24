@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 
 from core.config import APP_NAME, APP_VERSION
 from core.kde_theme import ThemeWatcher
-from core.podman_client import PodmanClient, PodmanError, find_socket
+from core.podman_client import PodmanClient, PodmanError, find_socket, drain_state_callbacks
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 from ui.compose_page import ComposePage
 from ui.container_page import ContainerPage
@@ -151,6 +151,14 @@ class MainWindow(QMainWindow):
         self._conn_timer = QTimer(self)
         self._conn_timer.timeout.connect(lambda: self._check_connection(False))
         self._conn_timer.start(3000)
+
+        # 驱动跨线程状态回调派发。
+        # 后台任务里 podman 连接状态变化时不能直接调 UI 回调
+        # （Qt fatal），会投递到队列等这里取出执行。
+        self._state_timer = QTimer(self)
+        self._state_timer = QTimer(self)
+        self._state_timer.timeout.connect(drain_state_callbacks)
+        self._state_timer.start(200)
 
         # 不建菜单栏：所有功能都在侧边栏和工具栏中
 

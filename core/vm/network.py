@@ -1,13 +1,16 @@
-"""VM 网络：端口转发管理 + hosts 域名
+"""VM 网络：端口转发管理 + 访问地址生成
 
-OrbStack 用自研 DNS 实现 `machine.orb.local`。
-我们做不到（需要 root 绑定 53 端口 + 改 resolv.conf），
-改用 /etc/hosts 写入固定域名：
+域名方案见 core/vm/dns.py：
+  宿主机一次性配置 dnsmasq 通配规则后，所有 *.<vm-name>.vm.local
+  都解析到 127.0.0.1，VM 增删不需要再改宿主机。
 
-    127.0.0.1  ubuntu-dev.local
-    127.0.0.1  alpine.local
+本模块负责：
+  - 端口占用检测
+  - 生成访问地址（localhost / 域名 两种形式）
+  - 按场景推荐端口转发
 
-配合端口转发，访问 `http://ubuntu-dev.local:8080`。
+旧的 /etc/hosts 方案已废弃，保留 sync_hosts / read_managed_hosts
+仅为兼容历史数据，新代码请用 dns.vm_domain()。
 """
 
 from __future__ import annotations
@@ -31,10 +34,13 @@ MARKER = "# podman-gui-vm"
 # 域名
 # ─────────────────────────────────────────
 def vm_domain(vm_name: str) -> str:
-    """VM 域名，如 ubuntu-dev.local"""
-    # 域名不能含下划线，统一转连字符
-    safe = re.sub(r"[^a-z0-9-]", "-", vm_name.lower()).strip("-")
-    return f"{safe}{DOMAIN_SUFFIX}"
+    """VM 域名，如 alpine-dev.vm.local
+
+    实际规则由 core.vm.dns 统一定义（通配后缀 + 名称清洗）。
+    """
+    from core.vm.dns import vm_domain as _vm_domain
+
+    return _vm_domain(vm_name)
 
 
 def hosts_writable() -> bool:
@@ -187,18 +193,18 @@ def access_urls(vm) -> list[tuple[str, str, str]]:
             ))
             continue
 
-        # Web 类端口：给两个地址
+        # Web 类端口：域名优先（更直观），localhost 兜底
         if fwd.guest_port in (80, 443, 3000, 8080, 8000, 5000, 9000):
             scheme = "https" if fwd.guest_port == 443 else "http"
             out.append((
                 f"Web (VM:{fwd.guest_port})",
-                f"{scheme}://127.0.0.1:{fwd.host_port}",
-                "localhost 访问",
+                f"{scheme}://{domain}:{fwd.host_port}",
+                "域名访问",
             ))
             out.append((
-                f"Web 域名 (VM:{fwd.guest_port})",
-                f"{scheme}://{domain}:{fwd.host_port}",
-                "域名访问（需 hosts 生效）",
+                f"Web (VM:{fwd.guest_port})",
+                f"{scheme}://127.0.0.1:{fwd.host_port}",
+                "localhost 访问",
             ))
         else:
             out.append((
