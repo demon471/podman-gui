@@ -303,6 +303,12 @@ class HostProfile:
     search_domain: str = ""
     hostname: str = ""
     ntp: bool = False
+    # 宿主机当前用户的 UID / GID。
+    # 9p 共享用 passthrough 时，VM 内用户必须与宿主机 UID 一致，
+    # 否则 VM 内写共享目录会 Permission denied（连 root 都不行，
+    # 因为 9p passthrough 不做权限提升）。
+    uid: int = -1
+    gid: int = -1
 
     def to_dict(self) -> dict:
         return {
@@ -315,6 +321,8 @@ class HostProfile:
             "search_domain": self.search_domain,
             "hostname": self.hostname,
             "ntp": self.ntp,
+            "uid": self.uid,
+            "gid": self.gid,
         }
 
 
@@ -330,6 +338,8 @@ def host_profile() -> HostProfile:
         search_domain=search_domain(),
         hostname=hostname(),
         ntp=ntp_enabled(),
+        uid=os.getuid(),
+        gid=os.getgid(),
     )
 
 

@@ -274,19 +274,29 @@ def get_ip(vm) -> str:
 # 挂载共享目录（9p）
 # ─────────────────────────────────────────
 def mount_share(vm, tag: str, mount_point: str) -> tuple[bool, str]:
-    """在 VM 内挂载 9p 共享目录"""
+    """在 VM 内挂载 9p 共享目录
+
+    msize 用 262144（256KB）：默认 8KB 会在大文件传输时频繁分片，
+    提升后拷贝大文件快数倍。version=9p2000.L 是 Linux 客户端专用，
+    支持 symlink / 硬链接 / 扩展属性。
+    """
     cmd = (
         f"sudo mkdir -p {shlex.quote(mount_point)} && "
-        f"sudo mount -t 9p -o trans=virtio,version=9p2000.L "
+        f"sudo modprobe 9pnet_virtio 2>/dev/null; "
+        f"sudo mount -t 9p "
+        f"-o trans=virtio,version=9p2000.L,msize=262144 "
         f"{shlex.quote(tag)} {shlex.quote(mount_point)}"
     )
     return run_command(vm, cmd, timeout=30)
 
 
 def mount_all_shares(vm) -> list[tuple[str, bool, str]]:
-    """挂载所有共享目录到 /mnt/<tag>"""
+    """挂载所有共享目录到 /mnt/host/<tag>
+
+    与详情对话框里展示的路径保持一致。
+    """
     results = []
     for _host_path, tag in vm.spec.shares:
-        ok, msg = mount_share(vm, tag, f"/mnt/{tag}")
+        ok, msg = mount_share(vm, tag, f"/mnt/host/{tag}")
         results.append((tag, ok, msg))
     return results

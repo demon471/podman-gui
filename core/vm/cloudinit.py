@@ -80,6 +80,12 @@ def build_user_data(
     locale: str = "",
     dns: list[str] | None = None,
     search_domain: str = "",
+    # 注意：uid/gid 默认 -1（不指定）。
+    # 部分 cloud image 已占用 UID 1000，强行指定宿主机 UID 会让
+    # cloud-init 报 "Failed to create user" 并中断 users_groups 模块，
+    # 导致 SSH 认证全部失败。共享目录权限改由宿主机侧 chmod 处理。
+    uid: int = -1,
+    gid: int = -1,
     extra_packages: list[str] | None = None,
     runcmd: list[str] | None = None,
     family: str = "debian",
@@ -145,8 +151,18 @@ def build_user_data(
         f"    plain_text_passwd: '{password}'",
         "    ssh_authorized_keys:",
         f"      - {ssh_pubkey.strip()}",
-        "",
     ]
+    # 显式指定 UID/GID 与宿主机一致。
+    # 9p 共享用 passthrough 安全模型时，VM 内 UID 必须与宿主机相同，
+    # 否则 VM 内用户写共享目录会 Permission denied（连 root 也不行）。
+    # 只在宿主机能取到有效 UID 时才写，避免与镜像已有 UID 冲突。
+    if uid >= 0 and gid >= 0:
+        lines += [
+            f"    uid: {uid}",
+            f"    gid: {gid}",
+        ]
+    lines.append("")
+    
 
     # ── SSH 认证 ──
     lines.append(
@@ -332,6 +348,8 @@ def build_seed_iso(
     timezone: str = DEFAULT_TZ,
     locale: str = "",
     dns: list[str] | None = None,
+    uid: int = -1,
+    gid: int = -1,
     extra_packages: list[str] | None = None,
     runcmd: list[str] | None = None,
     family: str = "debian",
@@ -359,6 +377,8 @@ def build_seed_iso(
         timezone=timezone,
         locale=locale,
         dns=dns,
+        uid=uid,
+        gid=gid,
         extra_packages=extra_packages,
         runcmd=runcmd,
         family=family,

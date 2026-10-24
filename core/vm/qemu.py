@@ -247,14 +247,27 @@ def build_command(
         ]
 
     # ── 系统盘 ──
+    # 必须用 -blockdev + -device virtio-blk-pci 而不是 -drive if=virtio，
+    # 因为只有 -device 形式能指定 bootindex。
+    #
+    # 背景：启用 9p 共享（-virtfs）后，QEMU 会自动插入 virtio-9p-pci 设备，
+    # 改变 PCI 设备枚举顺序，导致 OVMF 的启动项失效、回落到 PXE 网络启动。
+    # 给磁盘显式 bootindex=1、seed bootindex=2 后启动顺序即恢复确定。
     cmd += [
-        "-drive", f"file={disk},if=virtio,format=qcow2,cache=writeback",
+        "-blockdev", f"driver=file,node-name=disk_file,filename={disk}",
+        "-blockdev", "driver=qcow2,node-name=disk_disk,file=disk_file",
+        "-device", "virtio-blk-pci,drive=disk_disk,bootindex=1",
     ]
 
     # ── cloud-init seed ──
     if seed.exists():
         cmd += [
-            "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
+            "-blockdev",
+            f"driver=file,node-name=seed_file,read-only=on,"
+            f"filename={seed}",
+            "-blockdev",
+            "driver=raw,node-name=seed_disk,file=seed_file,read-only=on",
+            "-device", "virtio-blk-pci,drive=seed_disk,bootindex=2",
         ]
 
     # ── 内存气球（动态回收空闲内存）──
@@ -274,14 +287,33 @@ def build_command(
     ]
 
     # ── 共享目录（9p）──
+    # 用 passthrough 而非 mapped-xattr：
+    #   mapped-xattr 会把 VM 内用户映射到宿主机某 UID，导致 VM 内
+    #   非 root 用户写宿主机文件时 Permission denied。
+    #   passthrough 让 VM 内直接以宿主机 UID/GID 访问，
+    #   宿主机与 VM 双向读写都正常（需 VM 内 UID 与宿主机一致时才最直观）。
     for i, (host_path, mount_tag) in enumerate(spec.shares):
         if not Path(host_path).is_dir():
             continue
         cmd += [
             "-virtfs",
             f"local,path={host_path},mount_tag={mount_tag},"
-            f"security_model=mapped-xattr,id=fsdev{i}",
+            f"security_model=none,id=fsdev{i}",
         ]
+        # security_model 三种取值的区别（实测结论）：
+        #   mapped-xattr（默认）→ VM 内 UID 被映射到宿主机未占用 UID，
+        #     VM 内非 root 用户写宿主机文件 Permission denied。
+        #   passthrough        → VM 内客户端创建文件时 QEMU 会 chown 成
+        #     VM 内 UID；VM 内 UID 与宿主机不一致时 QEMU 无 CAP_CHOWN，
+        #     报 EPERM（Operation not permitted），连 root 都写不了。
+        #   none               → 不做 UID 映射、不 chown，文件统一归
+        #     运行 QEMU 的宿主机用户。读写都正常，是唯一跨发行版通用的选择。
+        #
+        # 宿主机侧仍放开目录权限，避免 QEMU 用户无写权限的场景。
+        try:
+            os.chmod(host_path, 0o777)
+        except OSError:
+            pass
 
     # ── 显示 ──
     if vnc_display is not None:
