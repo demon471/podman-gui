@@ -326,39 +326,18 @@ class VMDetailDialog(QDialog):
         f1.addRow("占用效率", self.lbl_mem_eff)
         v.addWidget(g1)
 
-        g2 = QGroupBox("气球回收（virtio-balloon）")
+        g2 = QGroupBox("自动内存管理")
         v2 = QVBoxLayout(g2)
         v2.setSpacing(8)
 
         hint = QLabel(
-            "气球回收会把 guest 内空闲内存归还宿主机，降低 VM 的实际占用。"
-            "guest 需要活动时内存会自动取回，不会导致 OOM。"
+            "内存回收已自动开启，无需配置。\n"
+            "虚拟机空闲时，guest 内的空闲内存会归还宿主机；"
+            "有操作时自动取回，不会导致虚拟机内存不足。"
         )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         v2.addWidget(hint)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("目标保留"))
-        self.sp_keep = QSpinBox()
-        self.sp_keep.setRange(64, 65536)
-        self.sp_keep.setSingleStep(64)
-        self.sp_keep.setValue(256)
-        self.sp_keep.setSuffix(" MB")
-        row.addWidget(self.sp_keep)
-
-        btn_reclaim = QPushButton("立即回收")
-        btn_reclaim.setIcon(icon("clean", ICON_SIZE_BUTTON.width()))
-        btn_reclaim.clicked.connect(self._reclaim)
-        row.addWidget(btn_reclaim)
-
-        btn_restore = QPushButton("恢复满额")
-        btn_restore.setIcon(icon("up", ICON_SIZE_BUTTON.width()))
-        btn_restore.clicked.connect(self._restore)
-        row.addWidget(btn_restore)
-
-        row.addStretch()
-        v2.addLayout(row)
 
         self.lbl_balloon = QLabel("")
         self.lbl_balloon.setObjectName("hintLabel")
@@ -466,10 +445,9 @@ class VMDetailDialog(QDialog):
                 f"{u.efficiency:.0f}%（RSS / 已分配 {u.guest_mb} MB）"
             )
             self.lbl_usage.setText(f"{u.rss_mb:.0f} MB（配置 {u.guest_mb} MB）")
-            self.sp_keep.setMaximum(max(64, u.guest_mb))
             self.lbl_balloon.setText(
-                "提示：回收后 guest 空闲内存归还宿主机，"
-                "效果可在列表的内存条上看到。"
+                "当前实际占用 "f"{u.rss_mb:.0f} MB / 已分配 {u.guest_mb} MB。"
+                "占用数值可在列表页的内存条上实时查看。"
             )
         else:
             self.lbl_mem_eff.setText("-")
@@ -673,7 +651,7 @@ class VMDetailDialog(QDialog):
         except Exception:
             pass
 
-        keep = self.sp_keep.value()
+        keep = 128   # 自动管理，保留 128MB 下限
         self.lbl_status.setText("正在回收内存…")
 
         def work():
@@ -697,13 +675,6 @@ class VMDetailDialog(QDialog):
             )
 
         self._spawn(work, done, lambda m: self.lbl_status.setText(f"失败: {m}"))
-
-    def _restore(self) -> None:
-        if not self.vm.running:
-            return
-        ok, msg = vm_memory.balloon_restore(self.vm)
-        self.lbl_status.setText("已恢复满额" if ok else f"失败: {msg}")
-        self._update_memory()
 
     # ─────────────────────────────────────────
     def _spawn(self, work, done, error) -> None:

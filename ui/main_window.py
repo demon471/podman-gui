@@ -152,6 +152,17 @@ class MainWindow(QMainWindow):
         self._conn_timer.timeout.connect(lambda: self._check_connection(False))
         self._conn_timer.start(3000)
 
+        # 虚拟机功能自动初始化（KSM / 域名解析）。
+        # 全部默认启用，不暴露配置项：后台静默执行，
+        # 免密 sudo 可用时直接配好；需要密码的项留待用户在
+        # 虚拟机页面按提示一次处理。
+        try:
+            from core.vm import autoconfig
+
+            autoconfig.ensure_once()
+        except Exception:
+            pass
+
         # 驱动跨线程状态回调派发。
         # 后台任务里 podman 连接状态变化时不能直接调 UI 回调
         # （Qt fatal），会投递到队列等这里取出执行。

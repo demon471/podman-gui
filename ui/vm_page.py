@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 
 from core.async_task import run_async
 from core.notify import notifier
+from core.vm import autoconfig as vm_autoconfig
 from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
 from core.vm import memory as vm_memory
@@ -192,6 +193,8 @@ class VMPage(QWidget):
         # 域名解析是否就绪（后台检测，避免阻塞 UI）
         self._dns_ready = True
         self._dns_checked = False
+        # 自动初始化状态（KSM 等需要权限的项）
+        self._init_pending = False
         self._busy = False
         self._tasks: list = []
 
@@ -345,17 +348,20 @@ class VMPage(QWidget):
         self._check_dns_once()
 
     def _check_dns_once(self) -> None:
-        """首次刷新时后台检测域名解析状态（只做一次）"""
+        """首次刷新时后台检测状态（只做一次）"""
         if self._dns_checked:
             return
         self._dns_checked = True
 
         def work():
             st = vm_dns.status()
-            return st.ready
+            need, _msg = vm_autoconfig.needs_attention()
+            return st.ready, need
 
-        def done(ready):
+        def done(res):
+            ready, need = res
             self._dns_ready = bool(ready)
+            self._init_pending = bool(need)
             self._rebuild()
 
         task = run_async(work, on_done=done,
@@ -481,12 +487,16 @@ class VMPage(QWidget):
         except Exception:
             pass
 
-        # 域名解析状态：未配置时明确提示，避免用户疑惑为何域名打不开
+        # 需要权限的优化项未启用时提示一次（不弹窗，只写在统计栏）
         if not self._dns_ready:
             parts.append(
-                f"⚠ *.{vm_dns.DOMAIN_SUFFIX} 域名未配置"
-                "（设置 → 虚拟机内存 → 网络与域名）"
+                f"⚠ *.{vm_dns.DOMAIN_SUFFIX} 域名未启用，"
+                "仅能用 127.0.0.1:<端口> 访问"
             )
+        elif self._init_pending:
+            _, msg = vm_autoconfig.needs_attention()
+            if msg:
+                parts.append("⚠ " + msg)
 
         self.lbl_stats.setText(" · ".join(parts))
 
