@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from core import podman_config as cfg
 from core.podman_client import PodmanClient, PodmanError
+from core.vm import memory as vm_memory
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 
 
@@ -75,8 +76,306 @@ class SettingsPage(QWidget):
         self.tabs.addTab(self._build_service_tab(), "服务")
         self.tabs.addTab(self._build_mirror_tab(), "镜像加速")
         self.tabs.addTab(self._build_storage_tab(), "存储")
+        self.tabs.addTab(self._build_vm_memory_tab(), "虚拟机内存")
         self.tabs.addTab(self._build_about_tab(), "关于")
         layout.addWidget(self.tabs)
+
+    # ── 虚拟机内存优化 ──
+    def _build_vm_memory_tab(self) -> QWidget:
+        """KSM 与内存优化选项"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        layout.addWidget(self._build_ksm_group())
+        layout.addWidget(self._build_balloon_group())
+        layout.addStretch()
+
+        scroll.setWidget(w)
+        QTimer.singleShot(80, self._refresh_vm_memory)
+        return scroll
+
+    def _build_ksm_group(self) -> QWidget:
+        """KSM 内核同页合并"""
+        grp = QGroupBox("KSM（内核同页合并）")
+        v = QVBoxLayout(grp)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(10)
+
+        hint = QLabel(
+            "多个虚拟机运行时，KSM 会把相同的内存页合并成一份，"
+            "显著降低总内存占用。属于系统级设置，需要 sudo 权限，"
+            "且会增加少量 CPU 开销。"
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        self.lbl_ksm_state = QLabel("检测中…")
+        self.lbl_ksm_state.setObjectName("serviceState")
+        row.addWidget(self.lbl_ksm_state, 1)
+
+        self.btn_ksm_refresh = QPushButton("刷新")
+        self.btn_ksm_refresh.setIcon(
+            icon("refresh", ICON_SIZE_TOOLBAR.width())
+        )
+        self.btn_ksm_refresh.clicked.connect(self._refresh_vm_memory)
+        row.addWidget(self.btn_ksm_refresh)
+
+        self.btn_ksm_on = QPushButton("启用")
+        self.btn_ksm_on.setIcon(icon("play", ICON_SIZE_TOOLBAR.width()))
+        self.btn_ksm_on.clicked.connect(lambda: self._ksm_set(True))
+        row.addWidget(self.btn_ksm_on)
+
+        self.btn_ksm_off = QPushButton("禁用")
+        self.btn_ksm_off.setIcon(icon("stop", ICON_SIZE_TOOLBAR.width()))
+        self.btn_ksm_off.clicked.connect(lambda: self._ksm_set(False))
+        row.addWidget(self.btn_ksm_off)
+
+        v.addLayout(row)
+
+        # 开机自启
+        row2 = QHBoxLayout()
+        row2.setSpacing(10)
+
+        self.chk_ksm_autostart = QCheckBox("开机自启 KSM（安装 systemd 服务）")
+        self.chk_ksm_autostart.setToolTip(
+            "写入 /etc/systemd/system/ksm.service 并 enable，重启后仍然生效"
+        )
+        self.chk_ksm_autostart.toggled.connect(self._on_ksm_autostart_toggled)
+        row2.addWidget(self.chk_ksm_autostart)
+
+        row2.addStretch()
+        v.addLayout(row2)
+
+        # 状态详情
+        self.lbl_ksm_detail = QLabel("")
+        self.lbl_ksm_detail.setObjectName("hintLabel")
+        self.lbl_ksm_detail.setWordWrap(True)
+        v.addWidget(self.lbl_ksm_detail)
+
+        return grp
+
+    def _build_balloon_group(self) -> QWidget:
+        """气球回收策略"""
+        grp = QGroupBox("virtio-balloon 自动回收")
+        v = QVBoxLayout(grp)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(10)
+
+        hint = QLabel(
+            "气球回收把 guest 内空闲内存归还宿主机。"
+            "guest 需要内存时会自动取回，不会导致 guest OOM。"
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        self.chk_balloon_auto = QCheckBox("启用空闲虚拟机自动回收")
+        self.chk_balloon_auto.setToolTip(
+            "虚拟机持续空闲达到设定时长后，自动回收到目标内存"
+        )
+        v.addWidget(self.chk_balloon_auto)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setSpacing(8)
+
+        self.sp_balloon_idle = QSpinBox()
+        self.sp_balloon_idle.setRange(1, 1440)
+        self.sp_balloon_idle.setValue(15)
+        self.sp_balloon_idle.setSuffix(" 分钟")
+        form.addRow("空闲判定时长", self.sp_balloon_idle)
+
+        self.sp_balloon_keep = QSpinBox()
+        self.sp_balloon_keep.setRange(64, 16384)
+        self.sp_balloon_keep.setSingleStep(64)
+        self.sp_balloon_keep.setValue(256)
+        self.sp_balloon_keep.setSuffix(" MB")
+        form.addRow("目标保留内存", self.sp_balloon_keep)
+
+        v.addLayout(form)
+
+        # 总占用
+        self.lbl_vm_total = QLabel("")
+        self.lbl_vm_total.setObjectName("hintLabel")
+        self.lbl_vm_total.setWordWrap(True)
+        v.addWidget(self.lbl_vm_total)
+
+        # 优化建议
+        self.lbl_vm_hints = QLabel("")
+        self.lbl_vm_hints.setObjectName("hintLabel")
+        self.lbl_vm_hints.setWordWrap(True)
+        v.addWidget(self.lbl_vm_hints)
+
+        return grp
+
+    def _refresh_vm_memory(self) -> None:
+        """刷新 KSM 状态与 VM 内存汇总"""
+        # KSM
+        avail = vm_memory.ksm_available()
+        if not avail:
+            self.lbl_ksm_state.setText("KSM 不可用（内核未编译 KSM）")
+            self.btn_ksm_on.setEnabled(False)
+            self.btn_ksm_off.setEnabled(False)
+            self.chk_ksm_autostart.setEnabled(False)
+            self.lbl_ksm_detail.setText("")
+        else:
+            st = vm_memory.ksm_status()
+            self.lbl_ksm_state.setText(st.display())
+            self.btn_ksm_on.setEnabled(not st.enabled)
+            self.btn_ksm_off.setEnabled(st.enabled)
+
+            installed = vm_memory.ksm_service_installed()
+            self.chk_ksm_autostart.setEnabled(True)
+            self.chk_ksm_autostart.blockSignals(True)
+            self.chk_ksm_autostart.setChecked(installed)
+            self.chk_ksm_autostart.blockSignals(False)
+
+            parts = []
+            if st.enabled:
+                parts.append(f"已合并页面 {st.pages_shared}")
+                parts.append(f"合并引用 {st.pages_sharing}")
+                parts.append(f"扫描间隔 {st.sleep_ms} ms")
+                if st.saved_mb > 0:
+                    parts.append(f"已节省 {st.saved_mb:.0f} MB")
+            self.lbl_ksm_detail.setText(" · ".join(parts) if parts else "")
+
+        # VM 内存汇总
+        try:
+            total_mb, count = vm_memory.total_vm_memory()
+            hm = vm_memory.host_memory()
+            if count > 0:
+                self.lbl_vm_total.setText(
+                    f"当前 {count} 台运行中虚拟机共占用 {total_mb:.0f} MB；"
+                    f"宿主机内存 {hm.used_mb / 1024:.1f} / "
+                    f"{hm.total_mb / 1024:.1f} GB"
+                )
+            else:
+                self.lbl_vm_total.setText(
+                    f"当前没有运行中的虚拟机；宿主机内存 "
+                    f"{hm.used_mb / 1024:.1f} / {hm.total_mb / 1024:.1f} GB"
+                )
+        except Exception:
+            self.lbl_vm_total.setText("")
+
+        hints = vm_memory.optimization_hints()
+        self.lbl_vm_hints.setText(
+            "\n".join(f"· {h}" for h in hints) if hints else ""
+        )
+
+    def _ksm_set(self, enabled: bool) -> None:
+        """启用 / 禁用 KSM（需 sudo，用 sudo -n 尝试免密）"""
+        if enabled:
+            ok, msg = vm_memory.enable_ksm()
+        else:
+            ok, msg = vm_memory.disable_ksm()
+
+        if ok:
+            self.status_message.emit(f"KSM 已{'启用' if enabled else '禁用'}")
+            self._refresh_vm_memory()
+            return
+
+        # 免密失败：给出可复制的命令让用户手动执行
+        if enabled:
+            cmd = (
+                "echo 1 | sudo tee /sys/kernel/mm/ksm/run && "
+                "echo 1000 | sudo tee /sys/kernel/mm/ksm/sleep_millisecs"
+            )
+        else:
+            cmd = "echo 0 | sudo tee /sys/kernel/mm/ksm/run"
+
+        QMessageBox.warning(
+            self,
+            "需要管理员权限",
+            f"自动{'启用' if enabled else '禁用'}失败："
+            f"{msg or '无法使用 sudo -n'}\n\n"
+            "请在终端手动执行：\n"
+            f"{cmd}",
+        )
+
+    def _on_ksm_autostart_toggled(self, on: bool) -> None:
+        if on:
+            ok, msg = vm_memory.install_ksm_service()
+            if ok:
+                self.status_message.emit("KSM 开机自启已安装")
+                QMessageBox.information(
+                    self,
+                    "已安装",
+                    "已创建 systemd 服务，KSM 将随系统启动。\n\n" + msg,
+                )
+                return
+        else:
+            ok, msg = self._remove_ksm_service()
+            if ok:
+                self.status_message.emit("KSM 开机自启已移除")
+                self._refresh_vm_memory()
+                return
+
+        # 失败：给出手动命令
+        if on:
+            cmd = (
+                "sudo tee /etc/systemd/system/ksm.service <<'EOF'\n"
+                "[Unit]\n"
+                "Description=Kernel Samepage Merging\n\n"
+                "[Service]\n"
+                "Type=oneshot\n"
+                "RemainAfterExit=yes\n"
+                "ExecStart=/bin/sh -c 'echo 1 > /sys/kernel/mm/ksm/run'\n"
+                "ExecStart=/bin/sh -c "
+                "'echo 1000 > /sys/kernel/mm/ksm/sleep_millisecs'\n"
+                "ExecStop=/bin/sh -c 'echo 0 > /sys/kernel/mm/ksm/run'\n\n"
+                "[Install]\n"
+                "WantedBy=multi-user.target\n"
+                "EOF\n"
+                "sudo systemctl daemon-reload && "
+                "sudo systemctl enable --now ksm.service"
+            )
+            QMessageBox.warning(
+                self, "安装失败",
+                f"{msg}\n\n请在终端手动执行：\n{cmd}",
+            )
+        else:
+            QMessageBox.warning(
+                self, "移除失败",
+                f"{msg}\n\n请手动执行：\n"
+                "sudo systemctl disable --now ksm.service && "
+                "sudo rm /etc/systemd/system/ksm.service && "
+                "sudo systemctl daemon-reload",
+            )
+
+        # 回滚复选框状态
+        self.chk_ksm_autostart.blockSignals(True)
+        self.chk_ksm_autostart.setChecked(not on)
+        self.chk_ksm_autostart.blockSignals(False)
+
+    def _remove_ksm_service(self) -> tuple[bool, str]:
+        """移除 KSM systemd 服务"""
+        import subprocess
+
+        cmd = (
+            "systemctl disable --now ksm.service 2>/dev/null; "
+            "rm -f /etc/systemd/system/ksm.service; "
+            "systemctl daemon-reload"
+        )
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "sh", "-c", cmd],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                return True, ""
+            return False, (r.stderr or "").strip()[:200]
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return False, str(e)
 
     # ── 概览 ──
     # ── 镜像加速 ──

@@ -330,11 +330,16 @@ def build_seed_iso(
     hostname: str = "vm",
     instance_id: str = "iid-1",
     timezone: str = DEFAULT_TZ,
+    locale: str = "",
+    dns: list[str] | None = None,
     extra_packages: list[str] | None = None,
     runcmd: list[str] | None = None,
     family: str = "debian",
 ) -> tuple[bool, str]:
     """生成 cloud-init seed ISO
+
+    timezone / locale / dns 建议从宿主机继承（core.vm.hostinfo），
+    这样 VM 与宿主机行为一致，不写死任何区域设置。
 
     返回 (成功, 错误信息)
     """
@@ -352,6 +357,8 @@ def build_seed_iso(
         ssh_pubkey=ssh_pubkey,
         hostname=hostname,
         timezone=timezone,
+        locale=locale,
+        dns=dns,
         extra_packages=extra_packages,
         runcmd=runcmd,
         family=family,

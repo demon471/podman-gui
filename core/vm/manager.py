@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from core.vm import cloudinit, images, qemu
+from core.vm import cloudinit, hostinfo, images, qemu
 
 # 数据根目录
 VM_ROOT = Path.home() / ".local" / "share" / "podman-gui" / "vm"
@@ -263,14 +263,21 @@ def create_vm(
         fwd_list.insert(0, qemu.PortForward(ssh_port, 22))
 
     # ── 4. 生成 cloud-init seed ──
+    # 用户名 / 时区 / locale / DNS 全部从宿主机继承（不写死），
+    # 让 VM 与宿主机保持一致的使用习惯。
     log("生成 cloud-init 配置…")
+    host = hostinfo.host_profile()
+    vm_user = username or host.username
     ok, err = cloudinit.build_seed_iso(
         vm_dir / "seed.iso",
-        username=username or spec_img.default_user,
+        username=vm_user,
         ssh_pubkey=pubkey,
         hostname=name,
         instance_id=f"{name}-{int(time.time())}",
         family=spec_img.family,
+        timezone=host.timezone,
+        locale=host.locale,
+        dns=host.dns,
     )
     if not ok:
         shutil.rmtree(vm_dir, ignore_errors=True)
@@ -292,7 +299,7 @@ def create_vm(
         memory_mb=memory_mb,
         cpus=cpus,
         disk_gb=disk_gb,
-        username=username or spec_img.default_user,
+        username=vm_user,
         hostname=name,
         forwards=fwd_list,
         shares=list(shares or []),

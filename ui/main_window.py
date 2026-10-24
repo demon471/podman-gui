@@ -46,6 +46,7 @@ from ui.tray import TrayIcon
 from ui.sidebar import NAV_LABELS, Sidebar
 from ui.style import build_stylesheet
 from ui.volume_page import VolumePage
+from ui.vm_page import VMPage
 
 
 def _window_icon() -> QIcon:
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
         self.page_pods = PodPage(self.client)
         self.page_compose = ComposePage(self.client)
         self.page_settings = SettingsPage(self.client)
+        self.page_vms = VMPage()
 
         self._pages = {
             "containers": self.page_containers,
@@ -115,6 +117,7 @@ class MainWindow(QMainWindow):
             "networks": self.page_networks,
             "pods": self.page_pods,
             "compose": self.page_compose,
+            "vms": self.page_vms,
             "settings": self.page_settings,
         }
         for p in self._pages.values():
@@ -126,6 +129,9 @@ class MainWindow(QMainWindow):
         self.page_containers.request_logs.connect(self._open_logs)
         self.page_containers.request_terminal.connect(self._open_terminal)
         self.page_compose.request_logs.connect(self._open_compose_logs)
+
+        # 虚拟机页：SSH 连接请求
+        self.page_vms.request_terminal.connect(self._open_vm_ssh)
 
         # 状态栏
         sb = QStatusBar()
@@ -378,6 +384,54 @@ class MainWindow(QMainWindow):
         dlg = TerminalDialog(self.client, cid, name, self)
         dlg.exec()
         self._set_status(f"已关闭 {name} 的终端")
+
+    def _open_vm_ssh(self, vm) -> None:
+        """打开虚拟机 SSH 连接
+
+        优先在系统终端里运行 ssh（用户可直接交互，且能输入密码）。
+        SSH 密钥已由应用生成，使用密钥免密登录。
+        """
+        import shutil
+        import subprocess
+
+        if not vm.running:
+            self._set_status("虚拟机未运行")
+            return
+
+        cmd = vm.ssh_command()
+
+        # 找可用终端
+        candidates = [
+            ("konsole", ["-e", "bash", "-c", cmd + '; echo; read -p "按回车关闭…"']),
+            ("gnome-terminal", ["--", "bash", "-c", cmd + '; read -p "按回车关闭…"']),
+            ("xfce4-terminal", ["-e", "bash -c " + repr(cmd)]),
+            ("alacritty", ["-e", "bash", "-c", cmd]),
+            ("kitty", ["bash", "-c", cmd]),
+            ("xterm", ["-e", "bash", "-c", cmd]),
+        ]
+
+        for term, args in candidates:
+            if shutil.which(term):
+                try:
+                    subprocess.Popen([term] + args)
+                    self._set_status(f"已在 {term} 中打开 {vm.spec.name} 的 SSH 连接")
+                    return
+                except OSError:
+                    continue
+
+        # 没有终端：复制命令到剪贴板并提示
+        from PyQt6.QtGui import QGuiApplication
+
+        QGuiApplication.clipboard().setText(cmd)
+        QMessageBox.information(
+            self, "未找到终端程序",
+            "未检测到可用的终端模拟器。\n\n"
+            "SSH 命令已复制到剪贴板，可在任意终端中粘贴执行：\n\n"
+            f"{cmd}",
+        )
+
+
+
 
     # ─────────────────────────────────────────
     # 关于

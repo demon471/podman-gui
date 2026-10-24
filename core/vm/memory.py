@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# QEMU 进程的固定内存开销（MB）：QEMU 基线约 30MB + OVMF 固件约 50MB。
+# 计算 guest 真实占用、内存压力、占用效率时需剔除，否则小内存 VM
+# 会显示超过 100% 的读数，造成误判。
+QEMU_OVERHEAD_MB = 90
+
+
 # ─────────────────────────────────────────
 # 进程内存
 # ─────────────────────────────────────────
@@ -35,10 +41,16 @@ class MemUsage:
 
     @property
     def efficiency(self) -> float:
-        """RSS / guest 配置（越低越好）"""
+        """(RSS - QEMU 固定开销) / guest 配置（越低越好）
+
+        QEMU 进程 RSS 含约 90MB 固定开销（QEMU 基线 + UEFI 固件），
+        这部分不受 balloon 影响。不剔除的话，小内存 VM 会算出 115%
+        这类超过 100% 的读数，用户无法判断是否真的紧张。
+        """
         if self.guest_mb <= 0:
             return 0.0
-        return self.rss_mb / self.guest_mb * 100
+        usable = max(0.0, self.rss_mb - QEMU_OVERHEAD_MB)
+        return usable / self.guest_mb * 100
 
     def display(self) -> str:
         return (

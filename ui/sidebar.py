@@ -31,6 +31,9 @@ NAV_GROUPS: list[tuple[str | None, list[tuple[str, str, str]]]] = [
     ("编排", [
         ("compose", "Compose", "compose"),
     ]),
+    ("虚拟机", [
+        ("vms", "虚拟机", "container"),
+    ]),
     ("系统", [
         ("settings", "设置", "settings"),
     ]),
