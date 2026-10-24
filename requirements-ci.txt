@@ -1,0 +1,16 @@
+# CI 打包依赖（版本范围固定，避免上游破坏性更新导致构建失败）
+# 本地开发可直接用系统包，此文件仅供 GitHub Actions 使用
+
+# GUI 框架
+PyQt6>=6.6,<7
+PyQt6-Qt6>=6.6,<7
+
+# Compose 文件解析（core/compose_manager.py）
+PyYAML>=6.0,<7
+
+# 终端模拟（ui/terminal.py）
+pyte>=0.8,<1
+pexpect>=4.9,<5
+
+# 打包
+pyinstaller>=6.0,<7

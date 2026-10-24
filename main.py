@@ -32,8 +32,9 @@ from ui.style import build_stylesheet
 
 def _app_icon() -> QIcon:
     """应用图标：优先用 PNG 文件，回退到内置 SVG"""
-    from pathlib import Path as _P
-    png = _P(__file__).parent / "resources" / "appicon" / "podman-gui-256.png"
+    from core.config import RESOURCES
+
+    png = RESOURCES / "appicon" / "podman-gui-256.png"
     if png.exists():
         return QIcon(str(png))
     return icon("seal", 256)

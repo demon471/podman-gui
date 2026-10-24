@@ -13,6 +13,8 @@ PROJECT = Path(SPECPATH).resolve()
 datas = [
     # 桌面文件随包分发（可选，安装时用）
     (str(PROJECT / "resources" / "podman-gui.desktop"), "resources"),
+    # 应用图标（多尺寸 PNG，运行时用于窗口/任务栏图标）
+    (str(PROJECT / "resources" / "appicon"), "resources/appicon"),
 ]
 
 # ── 需要收集的 PyQt6 模块 ──
@@ -20,9 +22,7 @@ hiddenimports = [
     "PyQt6.QtCore",
     "PyQt6.QtGui",
     "PyQt6.QtWidgets",
-    "PyQt6.QtNetwork",
     "PyQt6.QtSvg",
-    "PyQt6.QtDBus",
     # 终端依赖
     "pexpect",
     "ptyprocess",
