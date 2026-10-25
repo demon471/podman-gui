@@ -412,6 +412,30 @@ def _download_one(
     return True, ""
 
 
+def _make_progress_proxy(on_progress):
+    """进度回调节流包装
+
+    下载每 512KB 调一次 on_progress，593MB 镜像 ≈ 1200 次。
+    每次都跨线程 emit 信号会堆积分纽事件（UI 卡顿），
+    节流到 100ms 一次，肉眼无感差别。
+    """
+    if on_progress is None:
+        return None
+
+    import time as _t
+
+    last = [0.0]
+
+    def proxy(done, total):
+        now = _t.monotonic()
+        # 完成/总数变化/首次 都立即发；其余 100ms 节流
+        if total <= 0 or done >= total or now - last[0] >= 0.1:
+            last[0] = now
+            on_progress(done, total)
+
+    return proxy
+
+
 def download_image(
     spec: ImageSpec,
     arch: str = "amd64",
@@ -429,6 +453,7 @@ def download_image(
     cancel_flag() 返回 True 时中止
     """
     log = on_log or (lambda _m: None)
+    on_progress = _make_progress_proxy(on_progress)
 
     if spec.family == "alpine":
         urls = _resolve_alpine_url(spec, arch, on_log=log)

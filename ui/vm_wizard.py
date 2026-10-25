@@ -467,6 +467,17 @@ class VMWizard(QDialog):
             if ret != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
+
+        # 关键：等后台任务结束再销毁窗口。
+        # 任务 parent=self，若窗口先死，工作线程随后 emit 的
+        # 进度信号会命中已销毁的 QObject → Qt fatal → abort（闪退）。
+        # 断点续传场景必现：下载慢，用户等不住关窗口。
+        # 下载线程内已有 cancel_flag 检查，最多等 2 秒。
+        from core.async_task import shutdown_tasks
+
+        shutdown_tasks(self._tasks, timeout_ms=2000)
+        self._tasks.clear()
+
         super().closeEvent(e)
 
 

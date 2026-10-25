@@ -46,9 +46,25 @@ def shutdown_all(timeout_ms: int = 3000) -> None:
     Qt 在解释器关闭时若仍有 QThread 在运行，会强制终止并 abort，
     因此退出前必须等它们跑完。
     """
-    for task in list(_ACTIVE):
-        task.wait(timeout_ms)
-    _ACTIVE.clear()
+    shutdown_tasks(list(_ACTIVE), timeout_ms=timeout_ms)
+
+
+def shutdown_tasks(tasks, timeout_ms: int = 3000) -> None:
+    """等待指定的一批任务结束
+
+    窗口/对话框关闭时调用：parent 即将销毁，
+    必须保证工作线程先停，否则后续 emit 命中已销毁对象。
+    """
+    import time as _t
+
+    deadline = _t.monotonic() + timeout_ms / 1000
+    for task in list(tasks):
+        remaining = max(0, int((deadline - _t.monotonic()) * 1000))
+        if not task.wait(remaining):
+            # 超时未完：让线程自然跑完（detach），
+            # 但对象由 _ACTIVE 继续持有防 GC，
+            # 回调 parent 已死则信号自动丢弃（Queued 安全）
+            task.setParent(None)
 
 
 class BackgroundTask(QObject):
@@ -77,9 +93,20 @@ class BackgroundTask(QObject):
         self._worker = _Worker(self._fn)
         self._worker.moveToThread(self._thread)
 
+        # 显式 QueuedConnection：worker 在工作线程 emit，
+        # 接收者（self）在创建线程。Auto 在接收者线程相同时
+        # 会选 Direct，一旦 parent 已销毁就变野指针调用
+        # → Qt fatal → abort（断点续传闪退的根因）。
+        # Queued 保证 emit 只投递事件，接收者销毁则事件丢弃，安全。
+        from PyQt6.QtCore import Qt as _Qt
+
         self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._handle_done)
-        self._worker.failed.connect(self._handle_error)
+        self._worker.finished.connect(
+            self._handle_done, _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.failed.connect(
+            self._handle_error, _Qt.ConnectionType.QueuedConnection
+        )
         # 无论成功失败都退出线程
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
