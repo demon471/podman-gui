@@ -475,7 +475,8 @@ class VMDetailDialog(QDialog):
 
             # 访问地址
             if f.guest_port == 22:
-                addr = f"ssh -p {f.host_port} {self.vm.spec.username}@127.0.0.1"
+                # 域名方式（~/.ssh/config 已自动映射端口，无需 -p）
+                addr = f"ssh {vm_dns.vm_domain(self.vm.spec.name)}"
             elif f.guest_port == 443:
                 addr = f"https://127.0.0.1:{f.host_port}"
             else:

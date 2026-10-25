@@ -63,9 +63,43 @@ def port_available(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
-def find_free_port(start: int = SSH_PORT_BASE, count: int = SSH_PORT_RANGE) -> int:
-    """找一个可用端口"""
+def _sync_ssh_config() -> None:
+    """把 VM 列表同步到 ~/.ssh/config（失败不影响主流程）"""
+    try:
+        from core.vm import sshconfig
+
+        sshconfig.sync_config(load_all())
+    except Exception:
+        pass
+
+
+def used_host_ports() -> set[int]:
+    """所有 VM 已占用的宿主机端口
+
+    端口冲突检测不能只靠 bind() 探测：QEMU 的 hostfwd 是在用户态
+    转发的，另一个 VM 已经用了 2222 时，本机 bind(2222) 依然成功
+    （QEMU 监听的是它自己的 socket），所以必须显式收集已分配端口。
+    """
+    used: set[int] = set()
+    try:
+        for vm in load_all():
+            for fwd in vm.spec.forwards:
+                used.add(fwd.host_port)
+    except Exception:
+        pass
+    return used
+
+
+def find_free_port(
+    start: int = SSH_PORT_BASE,
+    count: int = SSH_PORT_RANGE,
+    exclude: set[int] | None = None,
+) -> int:
+    """找一个可用端口（排除已被其它 VM 占用的）"""
+    skip = exclude if exclude is not None else used_host_ports()
     for port in range(start, start + count):
+        if port in skip:
+            continue
         if port_available(port):
             return port
     raise RuntimeError(f"{start}~{start + count} 范围内无可用端口")
@@ -261,10 +295,16 @@ def create_vm(
         return None, "读取公钥失败"
 
     # ── 3. 分配 SSH 端口 ──
+    # 必须排除其它 VM 已占用的宿主机端口，否则多台 VM 会分到同一个
+    # 端口（QEMU hostfwd 是用户态转发，bind() 探测不到已占用）。
     fwd_list = list(forwards or [])
     if not any(f.guest_port == 22 for f in fwd_list):
+        taken = used_host_ports()
+        # 用户显式指定的端口也要算占用
+        for f in fwd_list:
+            taken.add(f.host_port)
         try:
-            ssh_port = find_free_port()
+            ssh_port = find_free_port(exclude=taken)
         except RuntimeError as e:
             shutil.rmtree(vm_dir, ignore_errors=True)
             return None, str(e)
@@ -321,6 +361,9 @@ def create_vm(
     )
     vm = VM(spec=spec, dir=vm_dir)
     vm.save()
+
+    # 同步 SSH 客户端配置，让外部能直接 ssh <名字>.vm.local
+    _sync_ssh_config()
 
     log(f"创建完成：{name}")
     return vm, ""
@@ -394,13 +437,17 @@ def delete_vm(vm: VM, *, remove_disk: bool = True) -> tuple[bool, str]:
             return False, f"无法停止: {err}"
 
     if remove_disk:
-        return vm.delete_files()
+        ok, err = vm.delete_files()
+        if ok:
+            _sync_ssh_config()
+        return ok, err
 
     # 只删配置，保留磁盘
     try:
         vm.config_file.unlink(missing_ok=True)
         (vm.dir / "seed.iso").unlink(missing_ok=True)
         (vm.dir / "qemu.pid").unlink(missing_ok=True)
+        _sync_ssh_config()
         return True, ""
     except OSError as e:
         return False, str(e)
@@ -423,6 +470,7 @@ def add_forward(vm: VM, host_port: int, guest_port: int,
         qemu.PortForward(host_port, guest_port, protocol)
     )
     vm.save()
+    _sync_ssh_config()
     return True, ""
 
 
@@ -435,6 +483,7 @@ def remove_forward(vm: VM, host_port: int) -> tuple[bool, str]:
     if len(vm.spec.forwards) == before:
         return False, "未找到该端口"
     vm.save()
+    _sync_ssh_config()
     return True, ""
 
 
@@ -549,6 +598,8 @@ def purge_all(*, include_images: bool = True) -> tuple[int, int, str]:
                     _images.delete_image(spec)
         except Exception as e:
             errors.append(f"清理镜像缓存: {e}")
+
+    _sync_ssh_config()
 
     return len(vms), freed, "；".join(errors)
 

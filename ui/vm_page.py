@@ -184,7 +184,7 @@ class VMPage(QWidget):
     # 请求主窗口打开外部终端执行 SSH 命令
     request_terminal = pyqtSignal(object)
 
-    COLUMNS = ["名称", "状态", "内存占用", "CPU / 内存", "磁盘", "SSH", "地址"]
+    COLUMNS = ["名称", "状态", "内存占用", "CPU / 内存", "磁盘", "SSH 地址", "访问地址"]
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -312,7 +312,7 @@ class VMPage(QWidget):
         hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(2, 210)
-        self.table.setColumnWidth(5, 108)
+        self.table.setColumnWidth(5, 150)
         self.table.setColumnWidth(2, 210)
 
         self._mem_delegate = MemoryBarDelegate(self, self.table)
@@ -447,18 +447,18 @@ class VMPage(QWidget):
             except Exception:
                 c4 = QStandardItem(f"{vm.spec.disk_gb} GB")
 
-            # 列 5：SSH（只显示端口，完整命令在详情里给）
-            c5 = QStandardItem(f"127.0.0.1:{vm.ssh_port}")
+            # 列 5：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
+            c5 = QStandardItem(vm_dns.vm_domain(name))
 
-            # 列 6：访问地址（域名，VM 内服务可经此访问）
-            addr = vm_network.vm_domain(name)
+            # 列 6：Web 访问地址（有 Web 端口转发才显示，否则留空）
+            addr = ""
             if running:
                 for fwd in vm.spec.forwards:
                     if fwd.guest_port in (80, 443, 3000, 8000, 8080, 5000, 9000):
                         scheme = "https" if fwd.guest_port == 443 else "http"
-                        addr = f"{scheme}://{addr}:{fwd.host_port}"
+                        addr = f"{scheme}://{vm_network.vm_domain(name)}:{fwd.host_port}"
                         break
-            c6 = QStandardItem(addr)
+            c6 = QStandardItem(addr or "—")
 
             for it in (c0, c1, c2, c3, c4, c5, c6):
                 it.setEditable(False)
