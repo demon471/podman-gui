@@ -18,7 +18,10 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QIcon,
     QPainter,
+    QPalette,
+    QPen,
     QStandardItem,
     QStandardItemModel,
 )
@@ -80,6 +83,14 @@ class VMPage(QWidget):
         # 自动初始化状态（KSM 等需要权限的项）
         self._init_pending = False
         self._busy = False
+        # 正在启动/重启中的 VM 名：行显示 loading、禁用一切交互
+        self._pending_vms: set[str] = set()
+        self._starting: set[str] = set()      # 区分「启动中」/「重启中」
+        # loading 图标旋转帧（0-7，对应 8 个角度）
+        self._spin_frame = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(120)
+        self._spin_timer.timeout.connect(self._spin_tick)
         self._tasks: list = []
 
         self._build_ui()
@@ -307,6 +318,13 @@ class VMPage(QWidget):
                     self._maybe_hide_for_leave(pos)
                     return False
 
+                # 启动/重启中的行：无悬停效果
+                name_item = self.model.item(idx.row(), 0)
+                if name_item and name_item.text() in self._pending_vms:
+                    self._card_timer.stop()
+                    self._hide_card()
+                    return False
+
                 # 移到不同行 → 重新计时
                 if idx.row() != getattr(self, "_pending_row", -1):
                     self._card_timer.stop()
@@ -381,6 +399,55 @@ class VMPage(QWidget):
         if hasattr(self, "_info_card"):
             self._info_card.hide_card()
 
+    # ─────────────────────────────────────────
+    # 启动/重启 loading 状态
+    # ─────────────────────────────────────────
+    def _pending_label(self, name: str) -> str:
+        """pending 行的状态文字"""
+        return "启动中…" if name in self._starting else "重启中…"
+
+    def _spin_icon(self) -> QIcon:
+        """旋转 loading 图标（当前帧）"""
+        import math
+
+        from PyQt6.QtGui import (
+            QColor,
+            QPainter,
+            QPixmap,
+        )
+
+        size = 16
+        pm = QPixmap(size * 2, size * 2)   # 2x 高 DPI
+        pm.setDevicePixelRatio(2)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 灰色弧线：从当前帧角度画 270° 弧
+        pen_color = self.palette().color(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text
+        )
+        pen = QPen(pen_color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+
+        margin = 3
+        rect = QRectF(margin, margin, size - margin * 2, size - margin * 2)
+        start = self._spin_frame * 45     # 每帧转 45°
+        p.drawArc(rect, int(start * 16), int(270 * 16))
+        p.end()
+
+        return QIcon(pm)
+
+    def _spin_tick(self) -> None:
+        """动画帧推进：只重绘 pending 行的状态列"""
+        self._spin_frame = (self._spin_frame + 1) % 8
+        for r in range(self.model.rowCount()):
+            name = self.model.item(r, 0).text()
+            if name in self._pending_vms:
+                self.model.item(r, 1).setIcon(self._spin_icon())
+
     def _rebuild(self) -> None:
         selected = self._selected_name()
 
@@ -389,7 +456,18 @@ class VMPage(QWidget):
         for vm in self._vms:
             name = vm.spec.name
             running = vm.running
-            state = "running" if running else "stopped"
+
+            # 该 VM 是否正在启动/重启（等待后台操作完成）
+            pending = name in self._pending_vms
+            if pending:
+                state = "pending"
+                state_text = self._pending_label(name)
+            elif running:
+                state = "running"
+                state_text = "运行中"
+            else:
+                state = "stopped"
+                state_text = "已停止"
 
             # 列 0：名称
             c0 = QStandardItem(name)
@@ -397,8 +475,11 @@ class VMPage(QWidget):
             c0.setData(name, Qt.ItemDataRole.UserRole)
 
             # 列 1：状态
-            c1 = QStandardItem("运行中" if running else "已停止")
-            c1.setIcon(state_icon_for(state))
+            c1 = QStandardItem(state_text)
+            if pending:
+                c1.setIcon(self._spin_icon())
+            else:
+                c1.setIcon(state_icon_for(state))
 
             # 列 2：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
             c2 = QStandardItem(vm_dns.vm_domain(name))
@@ -407,6 +488,18 @@ class VMPage(QWidget):
                 it.setEditable(False)
                 # 不用 setToolTip：Qt 的 QToolTip HTML 子集太弱，
                 # 做不出卡片样式。改用自定义卡片（见 _show_info_card）。
+                if pending:
+                    # 整行灰色：禁止一切交互的视觉信号
+                    it.setForeground(
+                        self.palette().color(
+                            QPalette.ColorGroup.Disabled,
+                            QPalette.ColorRole.Text,
+                        )
+                    )
+
+            if pending:
+                # 该行不可选中（右键/双击/详情全部无从触发）
+                c0.setFlags(c0.flags() & ~Qt.ItemFlag.ItemIsSelectable)
 
             self.model.appendRow([c0, c1, c2])
 
@@ -466,19 +559,37 @@ class VMPage(QWidget):
         vm = self._selected_vm()
         has = vm is not None
         running = bool(vm and vm.running)
+        # 选中行正在启动/重启 → 全部动作禁用
+        pending_sel = bool(vm and vm.spec.name in self._pending_vms)
 
-        self.act_start.setEnabled(has and not running and not self._busy)
-        self.act_stop.setEnabled(has and running and not self._busy)
-        self.act_restart.setEnabled(has and running and not self._busy)
-        self.act_ssh.setEnabled(has and running)
-        self.act_purge.setEnabled(bool(self._vms) and not self._busy)
+        self.act_start.setEnabled(
+            has and not running and not self._busy and not pending_sel
+        )
+        self.act_stop.setEnabled(
+            has and running and not self._busy and not pending_sel
+        )
+        self.act_restart.setEnabled(
+            has and running and not self._busy and not pending_sel
+        )
+        self.act_ssh.setEnabled(
+            has and running and not pending_sel
+        )
+        self.act_purge.setEnabled(
+            bool(self._vms) and not self._busy and not pending_sel
+        )
 
     # ─────────────────────────────────────────
     # 操作
     # ─────────────────────────────────────────
     def run_op(self, label: str, fn, *args, busy_text: str = "",
-               on_success=None, **kwargs) -> None:
-        """后台线程执行（避免冻结 UI）"""
+               on_success=None, pending_vm: str | None = None,
+               **kwargs) -> None:
+        """后台线程执行（避免冻结 UI）
+
+        pending_vm：该操作是针对某台 VM 的启动/重启。
+        该行会进入 loading 状态（灰字 + 转圈 + 禁止交互），
+        直到操作完成（无论成败）才恢复。
+        """
         if self._busy:
             self.status_message.emit("上一个操作还未完成，请稍候…")
             return
@@ -488,13 +599,30 @@ class VMPage(QWidget):
         self.act_new.setEnabled(False)
         self.status_message.emit(busy_text or f"正在{label}…")
 
+        # 行级 loading：直到操作结束（成功或失败）才移除
+        if pending_vm:
+            self._pending_vms.add(pending_vm)
+            if label == "启动":
+                self._starting.add(pending_vm)
+            self._spin_timer.start()
+            self._hide_card()
+            self._rebuild()
+
         def work():
             return fn(*args, **kwargs)
+
+        def _finish_pending():
+            if pending_vm:
+                self._pending_vms.discard(pending_vm)
+                self._starting.discard(pending_vm)
+                if not self._pending_vms:
+                    self._spin_timer.stop()
 
         def done(result):
             self._busy = False
             self.act_new.setEnabled(True)
             self.status_message.emit(f"{label}完成")
+            _finish_pending()
             if on_success:
                 on_success(result)
             self.refresh_silent()
@@ -503,6 +631,7 @@ class VMPage(QWidget):
             self._busy = False
             self.act_new.setEnabled(True)
             self.status_message.emit(f"{label}失败: {msg}")
+            _finish_pending()
             QMessageBox.warning(self, f"{label}失败", msg)
             notifier().op_failed(label, "", msg)
             self.refresh_silent()
@@ -537,6 +666,7 @@ class VMPage(QWidget):
 
         self.run_op(
             "启动", vm_manager.start_vm, vm,
+            pending_vm=vm.spec.name,
             busy_text=f"正在启动 {vm.spec.name}（首次启动需初始化系统）…",
             on_success=lambda r: notifier().info(
                 "虚拟机已启动" if r[0] else "启动失败",
@@ -592,6 +722,7 @@ class VMPage(QWidget):
 
         self.run_op(
             "重启", vm_manager.restart_vm, vm,
+            pending_vm=vm.spec.name,
             busy_text=f"正在重启 {vm.spec.name}…",
             on_success=lambda r: notifier().info(
                 "虚拟机已重启" if r[0] else "重启失败", vm.spec.name
@@ -611,6 +742,11 @@ class VMPage(QWidget):
         vm = self._selected_vm()
         if not vm:
             return
+
+        # 启动/重启中的行：不可打开
+        if vm.spec.name in self._pending_vms:
+            return
+
         from ui.vm_detail import VMDetailDialog
 
         dlg = VMDetailDialog(vm, self)
@@ -623,6 +759,10 @@ class VMPage(QWidget):
     def _context_menu(self, pos) -> None:
         vm = self._selected_vm()
         if not vm:
+            return
+
+        # 启动/重启中的行：不做任何操作
+        if vm.spec.name in self._pending_vms:
             return
 
         menu = QMenu(self)
@@ -750,6 +890,7 @@ class VMPage(QWidget):
             (self.act_new, "add"),
             (self.act_start, "play"),
             (self.act_stop, "stop"),
+            (self.act_restart, "restart"),
             (self.act_ssh, "terminal"),
             (self.act_purge, "delete"),
         ]:
