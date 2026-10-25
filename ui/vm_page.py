@@ -45,9 +45,9 @@ from PyQt6.QtWidgets import (
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import autoconfig as vm_autoconfig
+from core.vm import budget as vm_budget
 from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
-from core.vm import memory as vm_memory
 from core.vm import network as vm_network
 from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
@@ -57,121 +57,6 @@ from ui.widgets import EmptyState
 
 ROW_HEIGHT = 28
 
-# QEMU 进程的固定内存开销（不受 balloon 影响）：
-#   QEMU 基线约 30 MB + OVMF UEFI 固件约 50 MB
-# 用于内存条显示上限，避免读数超过 100% 造成困惑。
-QEMU_OVERHEAD_MB = 90
-
-
-# ─────────────────────────────────────────
-# 内存条委托
-# ─────────────────────────────────────────
-class MemoryBarDelegate(QStyledItemDelegate):
-    """在单元格内画内存占用条
-
-    显示两段：
-      实心段 = 当前实际占用（RSS）
-      空槽   = 已分配但未使用（balloon 可回收部分）
-    文本叠加在条上，显示 "159 / 1024 MB"
-    """
-
-    def __init__(self, page: "VMPage", parent=None):
-        super().__init__(parent)
-        self.page = page
-
-    def paint(self, painter: QPainter, option, index) -> None:
-        data = index.data(Qt.ItemDataRole.UserRole)
-        if not data:
-            super().paint(painter, option, index)
-            return
-
-        used_mb = float(data.get("used_mb", 0))
-        total_mb = float(data.get("total_mb", 0)) or 1.0
-        guest_mb = float(data.get("guest_mb", 0)) or total_mb
-        running = data.get("running", False)
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        from core.kde_theme import is_dark_mode
-
-        dark = is_dark_mode()
-
-        r = option.rect.adjusted(6, 6, -6, -6)
-        bar_h = min(14.0, r.height())
-        bar_y = r.y() + (r.height() - bar_h) / 2.0
-        bar = QRectF(float(r.x()), bar_y, float(r.width()), bar_h)
-
-        # 槽背景
-        bg = QColor("#3a3d41" if dark else "#dcdfe4")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(bg))
-        painter.drawRoundedRect(bar, bar_h / 2, bar_h / 2)
-
-        if running and total_mb > 0:
-            # 压力 = (进程 RSS - QEMU 固定开销) / guest 分配
-            # QEMU 进程 RSS 含约 90MB 固定开销（QEMU 基线 + UEFI 固件），
-            # 不受 balloon 影响。不剔除的话，刚启动、guest 很空的 VM
-            # 也会算出 100% 满格红色，形成误报。
-            guest_used = max(0.0, used_mb - QEMU_OVERHEAD_MB)
-            ratio = max(0.0, min(1.0, guest_used / max(1.0, guest_mb)))
-
-            # 颜色按压力分级。小内存 VM（<=512MB）阈值更高：
-            # 这类 VM 通常只跑轻量服务，页面缓存本身就能轻松吃掉 50%，
-            # 用统一阈值会长期显示红色，反而失去告警意义。
-            if guest_mb <= 512:
-                warn, alarm = 0.80, 0.93
-            elif guest_mb <= 2048:
-                warn, alarm = 0.70, 0.88
-            else:
-                warn, alarm = 0.60, 0.82
-
-            if ratio < warn:
-                fill = QColor(STATE_COLORS.get("running", "#2ecc71"))
-            elif ratio < alarm:
-                fill = QColor("#f39c12")
-            else:
-                fill = QColor("#e74c3c")
-
-            # 选中行时不改色（保持语义），但加亮
-            if option.state & QStyle.StateFlag.State_Selected:
-                fill = fill.lighter(115)
-
-            w = bar.width() * ratio
-            if w > 1:
-                filled = QRectF(bar.x(), bar.y(), max(w, bar_h), bar_h)
-                painter.setBrush(QBrush(fill))
-                painter.drawRoundedRect(filled, bar_h / 2, bar_h / 2)
-
-            if total_mb > guest_mb:
-                text = f"{used_mb:.0f} MB 实际 / {guest_mb:.0f} MB 已分配"
-            else:
-                text = f"{used_mb:.0f} / {total_mb:.0f} MB"
-        else:
-            text = "已停止"
-
-        # 文本
-        f = QFont(option.font)
-        f.setPointSizeF(max(7.5, option.font.pointSizeF() - 1.0))
-        painter.setFont(f)
-
-        if option.state & QStyle.StateFlag.State_Selected:
-            fg = QColor(option.palette.highlightedText().color())
-        else:
-            fg = QColor(option.palette.text().color())
-
-        # 条内文字用白色（深色条上可读），条外部分用前景色
-        painter.setPen(fg)
-        painter.drawText(
-            option.rect.adjusted(10, 0, -6, 0),
-            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            text,
-        )
-        painter.restore()
-
-    def sizeHint(self, option, index) -> QSize:
-        s = super().sizeHint(option, index)
-        return QSize(s.width(), ROW_HEIGHT)
 
 
 # ─────────────────────────────────────────
@@ -184,12 +69,11 @@ class VMPage(QWidget):
     # 请求主窗口打开外部终端执行 SSH 命令
     request_terminal = pyqtSignal(object)
 
-    COLUMNS = ["名称", "状态", "内存占用", "CPU / 内存", "磁盘", "SSH 地址", "访问地址"]
+    COLUMNS = ["名称", "状态", "SSH 地址"]
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._vms: list = []
-        self._mem_cache: dict[str, dict] = {}
         # 域名解析是否就绪（后台检测，避免阻塞 UI）
         self._dns_ready = True
         self._dns_checked = False
@@ -200,11 +84,6 @@ class VMPage(QWidget):
 
         self._build_ui()
         self.refresh_silent()
-
-        # 内存占用轮询（3s，实时反映 balloon 回收效果）
-        self._mem_timer = QTimer(self)
-        self._mem_timer.timeout.connect(self._refresh_memory)
-        self._mem_timer.start(3000)
 
         # 列表状态轮询（5s）
         self._list_timer = QTimer(self)
@@ -246,12 +125,6 @@ class VMPage(QWidget):
         self.act_ssh.setToolTip("在终端中打开 SSH 连接（外部客户端）")
         self.act_ssh.triggered.connect(self._open_ssh)
         tb.addAction(self.act_ssh)
-
-        self.act_reclaim = QAction(icon("clean"), "回收内存", self)
-        self.act_reclaim.setProperty("iconName", "clean")
-        self.act_reclaim.setToolTip("立即用 virtio-balloon 回收空闲内存到宿主机")
-        self.act_reclaim.triggered.connect(self._reclaim_selected)
-        tb.addAction(self.act_reclaim)
 
         self.act_purge = QAction(icon("delete", danger=True), "清空所有", self)
         self.act_purge.setProperty("iconName", "delete")
@@ -305,18 +178,11 @@ class VMPage(QWidget):
         hdr = self.table.horizontalHeader()
         hdr.setFixedHeight(26)
         hdr.setHighlightSections(False)
-        hdr.setStretchLastSection(True)
+        hdr.setStretchLastSection(False)
         for i in range(len(self.COLUMNS)):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        # 名称列拉伸占满剩余空间，其它列按内容宽度
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(2, 210)
-        self.table.setColumnWidth(5, 150)
-        self.table.setColumnWidth(2, 210)
-
-        self._mem_delegate = MemoryBarDelegate(self, self.table)
-        self.table.setItemDelegateForColumn(2, self._mem_delegate)
 
         # 空状态叠加
         self._table_stack = QStackedLayout()
@@ -351,7 +217,6 @@ class VMPage(QWidget):
         except Exception as e:
             self.status_message.emit(f"读取虚拟机失败: {e}")
             return
-        self._refresh_memory()
         self._rebuild()
         self._check_dns_once()
 
@@ -376,52 +241,18 @@ class VMPage(QWidget):
                          on_error=lambda _m: None, parent=self)
         self._tasks.append(task)
 
-    def _refresh_memory(self) -> None:
-        """刷新内存占用（轻量，3s 一次）"""
-        changed = False
-        for vm in self._vms:
-            if vm.spec.name in self._mem_cache:
-                old = self._mem_cache[vm.spec.name]
-            else:
-                old = None
-            try:
-                u = vm_memory.vm_mem_usage(vm)
-                # QEMU 进程 RSS 含固定开销（QEMU 基线约 30MB + UEFI 固件约 50MB），
-                # 这部分不受 balloon 影响。用 guest 分配 + 固定开销作为显示上限，
-                # 否则会出现「287 / 256 MB」这种让人困惑的读数。
-                overhead = QEMU_OVERHEAD_MB if vm.running else 0
-                cur = {
-                    "used_mb": u.rss_mb,
-                    "total_mb": vm.spec.memory_mb + overhead if vm.running else 0,
-                    "running": vm.running,
-                    "guest_mb": vm.spec.memory_mb if vm.running else 0,
-                }
-            except Exception:
-                cur = {
-                    "used_mb": 0, "total_mb": 0,
-                    "running": False, "guest_mb": 0,
-                }
-            if old != cur:
-                changed = True
-            self._mem_cache[vm.spec.name] = cur
-
-        if changed:
-            self._rebuild()
 
     def _rebuild(self) -> None:
         selected = self._selected_name()
 
         self.model.removeRows(0, self.model.rowCount())
-        total_mem = 0.0
 
         for vm in self._vms:
             name = vm.spec.name
-            mem = self._mem_cache.get(name, {})
-
-            running = mem.get("running", False)
+            running = vm.running
             state = "running" if running else "stopped"
 
-            # 列 0：名称 + 状态图标
+            # 列 0：名称
             c0 = QStandardItem(name)
             c0.setIcon(icon("container"))
             c0.setData(name, Qt.ItemDataRole.UserRole)
@@ -430,43 +261,13 @@ class VMPage(QWidget):
             c1 = QStandardItem("运行中" if running else "已停止")
             c1.setIcon(state_icon_for(state))
 
-            # 列 2：内存条（委托绘制）
-            c2 = QStandardItem("")
-            c2.setData(mem, Qt.ItemDataRole.UserRole)
-            c2.setTextAlignment(
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-            )
+            # 列 2：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
+            c2 = QStandardItem(vm_dns.vm_domain(name))
 
-            # 列 3：CPU / 内存配置
-            c3 = QStandardItem(f"{vm.spec.cpus} vCPU · {vm.spec.memory_mb} MB")
-
-            # 列 4：磁盘实际占用（disk_usage 返回字节）
-            try:
-                du = vm_manager.disk_usage(vm)
-                c4 = QStandardItem(f"{fmt_size(du)} / {vm.spec.disk_gb} GB")
-            except Exception:
-                c4 = QStandardItem(f"{vm.spec.disk_gb} GB")
-
-            # 列 5：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
-            c5 = QStandardItem(vm_dns.vm_domain(name))
-
-            # 列 6：Web 访问地址（有 Web 端口转发才显示，否则留空）
-            addr = ""
-            if running:
-                for fwd in vm.spec.forwards:
-                    if fwd.guest_port in (80, 443, 3000, 8000, 8080, 5000, 9000):
-                        scheme = "https" if fwd.guest_port == 443 else "http"
-                        addr = f"{scheme}://{vm_network.vm_domain(name)}:{fwd.host_port}"
-                        break
-            c6 = QStandardItem(addr or "—")
-
-            for it in (c0, c1, c2, c3, c4, c5, c6):
+            for it in (c0, c1, c2):
                 it.setEditable(False)
 
-            self.model.appendRow([c0, c1, c2, c3, c4, c5, c6])
-
-            if running:
-                total_mem += mem.get("used_mb", 0.0)
+            self.model.appendRow([c0, c1, c2])
 
         # 恢复选中
         if selected:
@@ -475,7 +276,7 @@ class VMPage(QWidget):
                     self.table.selectRow(r)
                     break
 
-        for i in (0, 1, 3, 4, 6):
+        for i in range(len(self.COLUMNS)):
             self.table.resizeColumnToContents(i)
 
         if not self._vms:
@@ -483,30 +284,14 @@ class VMPage(QWidget):
         else:
             self._table_stack.setCurrentWidget(self.table)
 
-        # 统计
+        # 统计：只报数量，不暴露内存/磁盘等技术细节
         running_n = sum(1 for vm in self._vms if vm.running)
-        parts = [f"共 {len(self._vms)} 台虚拟机"]
         if running_n:
-            parts.append(f"{running_n} 台运行中")
-            parts.append(f"VM 内存合计 {total_mem:.0f} MB")
-        try:
-            hm = vm_memory.host_memory()
-            parts.append(f"宿主机可用 {hm.available_mb / 1024:.1f} GB")
-        except Exception:
-            pass
-
-        # 需要权限的优化项未启用时提示一次（不弹窗，只写在统计栏）
-        if not self._dns_ready:
-            parts.append(
-                f"⚠ *.{vm_dns.DOMAIN_SUFFIX} 域名未启用，"
-                "仅能用 127.0.0.1:<端口> 访问"
+            self.lbl_stats.setText(
+                f"共 {len(self._vms)} 台虚拟机 · {running_n} 台运行中"
             )
-        elif self._init_pending:
-            _, msg = vm_autoconfig.needs_attention()
-            if msg:
-                parts.append("⚠ " + msg)
-
-        self.lbl_stats.setText(" · ".join(parts))
+        else:
+            self.lbl_stats.setText(f"共 {len(self._vms)} 台虚拟机")
 
         self._update_actions()
 
@@ -544,7 +329,6 @@ class VMPage(QWidget):
         self.act_start.setEnabled(has and not running and not self._busy)
         self.act_stop.setEnabled(has and running and not self._busy)
         self.act_ssh.setEnabled(has and running)
-        self.act_reclaim.setEnabled(has and running and not self._busy)
         self.act_purge.setEnabled(bool(self._vms) and not self._busy)
 
     # ─────────────────────────────────────────
@@ -571,7 +355,6 @@ class VMPage(QWidget):
             self.status_message.emit(f"{label}完成")
             if on_success:
                 on_success(result)
-            self._mem_cache.clear()
             self.refresh_silent()
 
         def error(msg):
@@ -605,7 +388,7 @@ class VMPage(QWidget):
             return
 
         # 启动前内存预检查
-        ok, msg = vm_memory.check_memory_before_start(vm.spec.memory_mb)
+        ok, msg = vm_budget.check_vm_start(None, vm.spec.memory_mb)
         if not ok:
             QMessageBox.warning(self, "内存不足", msg)
             return
@@ -643,29 +426,6 @@ class VMPage(QWidget):
             ),
         )
 
-    def _reclaim_selected(self) -> None:
-        vm = self._selected_vm()
-        if not vm or not vm.running:
-            return
-
-        before = self._mem_cache.get(vm.spec.name, {}).get("used_mb", 0)
-
-        def after(r):
-            ok, msg = r
-            if ok:
-                after_mb = vm_memory.vm_mem_usage(vm).rss_mb
-                saved = max(0.0, before - after_mb)
-                notifier().info(
-                    "内存已回收",
-                    f"{vm.spec.name}\n{before:.0f} MB → {after_mb:.0f} MB"
-                    f"（释放 {saved:.0f} MB）",
-                )
-
-        self.run_op(
-            "回收内存", vm_memory.balloon_reclaim, vm,
-            busy_text=f"正在回收 {vm.spec.name} 的空闲内存…",
-            on_success=after,
-        )
 
     def _open_ssh(self) -> None:
         vm = self._selected_vm()
@@ -702,7 +462,6 @@ class VMPage(QWidget):
         else:
             menu.addAction(icon("stop"), "停止", self._stop_selected)
             menu.addAction(icon("terminal"), "SSH 连接", self._open_ssh)
-            menu.addAction(icon("clean"), "回收内存", self._reclaim_selected)
 
         menu.addSeparator()
         menu.addAction(icon("info"), "详情…", self._open_detail)
@@ -790,7 +549,7 @@ class VMPage(QWidget):
         ret = QMessageBox.warning(
             self, "确认删除",
             f"确定要删除虚拟机「{vm.spec.name}」吗？\n\n"
-            f"磁盘文件将被删除，占用约 {fmt_mb(vm_manager.disk_usage(vm))}。\n"
+
             "此操作不可恢复！",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -820,7 +579,6 @@ class VMPage(QWidget):
             (self.act_start, "play"),
             (self.act_stop, "stop"),
             (self.act_ssh, "terminal"),
-            (self.act_reclaim, "clean"),
             (self.act_purge, "delete"),
         ]:
             act.setIcon(icon(nm, danger=(nm == "delete")))
@@ -831,7 +589,6 @@ class VMPage(QWidget):
         pass
 
     def stop_timers(self) -> None:
-        self._mem_timer.stop()
         self._list_timer.stop()
 
 
@@ -844,8 +601,3 @@ def state_icon_for(state: str):
 
     return state_icon(state, 16)
 
-
-def fmt_mb(n: float) -> str:
-    if n >= 1024:
-        return f"{n / 1024:.1f} GB"
-    return f"{n:.0f} MB"

@@ -38,9 +38,14 @@ from pathlib import Path
 from core.vm import images
 
 # 增量层容量上限（GB）。
-# 共享基础只读，所有写入都落在各 VM 的增量层，
-# 这个上限是防止 guest 内误写大文件把宿主机磁盘撑满。
-DEFAULT_INCREMENTAL_GB = 32
+#
+# 设为 1T 是为了让用户感知不到「磁盘大小」这个技术概念：
+# 开箱即用，不需要在创建时选磁盘容量，也不会因为默认值太小
+# 在 guest 内装几个包就报 "No space left on device"。
+#
+# qcow2 是稀疏格式，这个上限只是逻辑容量，实际占用按写入量增长
+# （一台只装了基础系统的 VM 通常只占几十 MB）。
+DEFAULT_INCREMENTAL_GB = 1024      # 1 TB
 
 # 共享基础的存放目录（与 images 缓存分开，明确职责）
 SHARED_DIR_NAME = "shared"

@@ -105,7 +105,6 @@ class VMDetailDialog(QDialog):
         self.tabs.addTab(self._build_overview(), "概览")
         self.tabs.addTab(self._build_ports(), "端口转发")
         self.tabs.addTab(self._build_shares(), "共享目录")
-        self.tabs.addTab(self._build_memory(), "内存")
         self.tabs.addTab(self._build_console(), "控制台")
         v.addWidget(self.tabs, 1)
 
@@ -140,19 +139,13 @@ class VMDetailDialog(QDialog):
         v.setContentsMargins(10, 12, 10, 10)
         v.setSpacing(10)
 
-        g1 = QGroupBox("配置")
+        g1 = QGroupBox("系统")
         f1 = QFormLayout(g1)
         f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         f1.setSpacing(8)
         self.lbl_os = QLabel("-")
-        self.lbl_cpu = QLabel("-")
-        self.lbl_mem_cfg = QLabel("-")
-        self.lbl_disk = QLabel("-")
         self.lbl_created = QLabel("-")
         f1.addRow("操作系统", self.lbl_os)
-        f1.addRow("处理器", self.lbl_cpu)
-        f1.addRow("内存", self.lbl_mem_cfg)
-        f1.addRow("磁盘", self.lbl_disk)
         f1.addRow("创建时间", self.lbl_created)
         v.addWidget(g1)
 
@@ -162,14 +155,10 @@ class VMDetailDialog(QDialog):
         f2.setSpacing(8)
         self.lbl_state = QLabel("-")
         self.lbl_uptime = QLabel("-")
-        self.lbl_usage = QLabel("-")
         self.lbl_host = QLabel("-")
-        self.lbl_host_mem = QLabel("-")
         f2.addRow("状态", self.lbl_state)
         f2.addRow("运行时长", self.lbl_uptime)
-        f2.addRow("内存占用", self.lbl_usage)
         f2.addRow("guest 系统", self.lbl_host)
-        f2.addRow("宿主机内存", self.lbl_host_mem)
         v.addWidget(g2)
 
         row = QHBoxLayout()
@@ -305,48 +294,6 @@ class VMDetailDialog(QDialog):
         v.addLayout(row)
         return w
 
-    # ── 内存 ──
-    def _build_memory(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(10, 12, 10, 10)
-        v.setSpacing(10)
-
-        g1 = QGroupBox("当前占用")
-        f1 = QFormLayout(g1)
-        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        f1.setSpacing(8)
-        self.lbl_mem_rss = QLabel("-")
-        self.lbl_mem_vsz = QLabel("-")
-        self.lbl_mem_swap = QLabel("-")
-        self.lbl_mem_eff = QLabel("-")
-        f1.addRow("物理内存 (RSS)", self.lbl_mem_rss)
-        f1.addRow("虚拟内存 (VSZ)", self.lbl_mem_vsz)
-        f1.addRow("换出 (Swap)", self.lbl_mem_swap)
-        f1.addRow("占用效率", self.lbl_mem_eff)
-        v.addWidget(g1)
-
-        g2 = QGroupBox("自动内存管理")
-        v2 = QVBoxLayout(g2)
-        v2.setSpacing(8)
-
-        hint = QLabel(
-            "内存回收已自动开启，无需配置。\n"
-            "虚拟机空闲时，guest 内的空闲内存会归还宿主机；"
-            "有操作时自动取回，不会导致虚拟机内存不足。"
-        )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        v2.addWidget(hint)
-
-        self.lbl_balloon = QLabel("")
-        self.lbl_balloon.setObjectName("hintLabel")
-        self.lbl_balloon.setWordWrap(True)
-        v2.addWidget(self.lbl_balloon)
-
-        v.addWidget(g2)
-        v.addStretch()
-        return w
 
     # ── 控制台 ──
     def _build_console(self) -> QWidget:
@@ -385,16 +332,10 @@ class VMDetailDialog(QDialog):
         vm = self.vm
         spec = vm.spec
 
-        self.lbl_sub.setText(
-            f"{spec.image_key} · {spec.cpus} vCPU · {spec.memory_mb} MB 内存 · "
-            f"{spec.disk_gb} GB 磁盘"
-        )
+        self.lbl_sub.setText(spec.image_key)
 
         # 概览
         self.lbl_os.setText(spec.image_key)
-        self.lbl_cpu.setText(f"{spec.cpus} vCPU")
-        self.lbl_mem_cfg.setText(f"{spec.memory_mb} MB")
-        self.lbl_disk.setText(f"{spec.disk_gb} GB")
         import time as _t
 
         self.lbl_created.setText(
@@ -414,9 +355,6 @@ class VMDetailDialog(QDialog):
         else:
             self.lbl_uptime.setText("-")
 
-        # 内存
-        self._update_memory()
-
         # 表格
         self._fill_ports()
         self._fill_shares()
@@ -427,42 +365,8 @@ class VMDetailDialog(QDialog):
     def _tick(self) -> None:
         if not self.isVisible():
             return
-        self._update_memory()
         self.lbl_state.setText("运行中" if self.vm.running else "已停止")
 
-    def _update_memory(self) -> None:
-        try:
-            u = vm_memory.vm_mem_usage(self.vm)
-        except Exception:
-            return
-
-        self.lbl_mem_rss.setText(f"{u.rss_mb:.0f} MB")
-        self.lbl_mem_vsz.setText(f"{u.vsz_mb:.0f} MB")
-        self.lbl_mem_swap.setText(f"{u.swap_mb:.0f} MB")
-
-        if self.vm.running and u.guest_mb:
-            self.lbl_mem_eff.setText(
-                f"{u.efficiency:.0f}%（RSS / 已分配 {u.guest_mb} MB）"
-            )
-            self.lbl_usage.setText(f"{u.rss_mb:.0f} MB（配置 {u.guest_mb} MB）")
-            self.lbl_balloon.setText(
-                "当前实际占用 "f"{u.rss_mb:.0f} MB / 已分配 {u.guest_mb} MB。"
-                "占用数值可在列表页的内存条上实时查看。"
-            )
-        else:
-            self.lbl_mem_eff.setText("-")
-            self.lbl_usage.setText("-")
-            self.lbl_balloon.setText("")
-
-        # 宿主机内存写在专用标签，避免覆盖 _load_guest_info 读到的 guest 信息
-        try:
-            hm = vm_memory.host_memory()
-            self.lbl_host_mem.setText(
-                f"宿主机内存 {hm.used_mb / 1024:.1f} / "
-                f"{hm.total_mb / 1024:.1f} GB"
-            )
-        except Exception:
-            pass
 
     def _fill_ports(self) -> None:
         forwards = self.vm.spec.forwards
@@ -536,8 +440,6 @@ class VMDetailDialog(QDialog):
             parts = [f"内核 {info.get('kernel', '-')}"]
             if info.get("cpus"):
                 parts.append(f"{info['cpus']} 核")
-            if info.get("mem_total_mb"):
-                parts.append(f"guest {info['mem_total_mb']} MB")
             if info.get("disk"):
                 parts.append(f"磁盘 {info['disk']}")
             self.lbl_host.setText(" · ".join(parts))
@@ -643,37 +545,22 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setText("已删除，重启虚拟机后生效")
 
     def _reclaim(self) -> None:
+        """立即回收空闲内存（用户主动触发，正常情况自动进行）"""
         if not self.vm.running:
             return
 
-        before = 0.0
-        try:
-            before = vm_memory.vm_mem_usage(self.vm).rss_mb
-        except Exception:
-            pass
-
-        keep = 128   # 自动管理，保留 128MB 下限
         self.lbl_status.setText("正在回收内存…")
 
         def work():
-            return vm_memory.balloon_reclaim(self.vm, keep)
+            return vm_memory.balloon_reclaim(self.vm, keep_mb=128)
 
         def done(res):
             ok, msg = res
             if not ok:
                 self.lbl_status.setText(f"回收失败: {msg}")
-                QMessageBox.warning(self, "回收失败", msg)
                 return
-            after = vm_memory.vm_mem_usage(self.vm).rss_mb
-            saved = max(0.0, before - after)
-            self._update_memory()
-            self.lbl_status.setText(
-                f"已回收：{before:.0f} MB → {after:.0f} MB（释放 {saved:.0f} MB）"
-            )
-            notifier().info(
-                "内存已回收",
-                f"{self.vm.spec.name}\n{before:.0f} MB → {after:.0f} MB",
-            )
+            self.lbl_status.setText("内存已回收")
+            notifier().info("内存已回收", self.vm.spec.name)
 
         self._spawn(work, done, lambda m: self.lbl_status.setText(f"失败: {m}"))
 
