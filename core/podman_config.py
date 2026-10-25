@@ -689,12 +689,16 @@ def compute_usage(client) -> dict:
     返回:
         {
             "limit_gb":   阈值（GB，0=不限制）,
-            "declared_gb": 所有运行容器 mem_limit 之和（GB）,
-            "actual_gb":  实际占用（GB，来自 cgroup）,
+            "declared_gb": 运行容器 mem_limit 之和 + 运行中 VM memory_mb 之和（GB）,
+            "actual_gb":  实际占用（容器 cgroup + VM RSS）（GB）,
             "host_gb":    整机内存（GB）,
             "containers": [{"name","state","limit_gb","actual_gb"}...],
+            "vms":        [{"name","state","limit_gb","actual_gb"}...],
             "unlimited":  [无 mem_limit 的容器名],
         }
+
+    容器与虚拟机共用同一份内存预算（设置 → 服务 → 启动阈值），
+    所以这里把两者合起来算，VM 不再是隐形占用。
     """
     out = {
         "limit_gb": get_memory_limit_gb(),
@@ -702,6 +706,7 @@ def compute_usage(client) -> dict:
         "actual_gb": 0.0,
         "host_gb": 0.0,
         "containers": [],
+        "vms": [],
         "unlimited": [],
     }
 
@@ -716,11 +721,49 @@ def compute_usage(client) -> dict:
     except (OSError, ValueError, IndexError):
         pass
 
+    vm_declared = 0.0
+    vm_actual = 0.0
+
+    # 各虚拟机（内存预算与容器共用，一并统计）
+    try:
+        from core.vm import budget as vm_budget
+        from core.vm.manager import load_all
+
+        for vm in load_all():
+            running = vm.running
+            limit_gb = vm.spec.memory_mb / 1024
+            actual_gb = 0.0
+            if running:
+                # RSS 从 QEMU 进程读（balloon 回收后的真实占用）
+                try:
+                    pid = int((vm.dir / "qemu.pid").read_text().strip())
+                    with open(f"/proc/{pid}/status") as f:
+                        for line in f:
+                            if line.startswith("VmRSS:"):
+                                actual_gb = (
+                                    int(line.split()[1]) / 1024 / 1024
+                                )
+                                break
+                except (OSError, ValueError, ProcessLookupError):
+                    pass
+                vm_declared += limit_gb
+                vm_actual += actual_gb
+
+            out["vms"].append({
+                "name": vm.spec.name,
+                "state": "running" if running else "stopped",
+                "limit_gb": limit_gb,
+                "actual_gb": actual_gb,
+                "unlimited": False,
+            })
+    except Exception:
+        pass
+
     # 各容器
     try:
         ctrs = client.list_containers(all=True)
     except Exception:
-        return out
+        ctrs = []
 
     for c in ctrs:
         name = (c.get("Names") or ["?"])[0]
@@ -759,6 +802,10 @@ def compute_usage(client) -> dict:
             out["actual_gb"] += actual_gb
             if limit == 0:
                 out["unlimited"].append(name)
+
+    # VM 的声明/实际并入总量（与容器同一预算）
+    out["declared_gb"] += vm_declared
+    out["actual_gb"] += vm_actual
 
     return out
 

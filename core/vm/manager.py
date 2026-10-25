@@ -263,7 +263,14 @@ def load(name: str) -> VM | None:
 
 
 def name_taken(name: str) -> bool:
-    return (MACHINES_DIR / name).exists()
+    """名称是否已被一台**有效**的虚拟机占用
+
+    只认有 vm.json 的目录。创建中途失败可能留下空壳目录，
+    旧版把空壳也算占用，导致用户换个名字也没用（每次都报
+    「名称已被占用」），且无法自愈。
+    空壳目录会在 create_vm 里被复用并重新填充。
+    """
+    return (MACHINES_DIR / name / "vm.json").exists()
 
 
 # ─────────────────────────────────────────
@@ -309,6 +316,11 @@ def create_vm(
         return None, "缺少 ISO 生成工具（xorriso），无法生成 cloud-init 配置"
 
     vm_dir = MACHINES_DIR / name
+    # 已存在说明是上次创建失败留下的空壳（无 vm.json，
+    # name_taken 已确认不是有效 VM）。直接复用，rmtree 清底
+    # 避免残留半个 seed.iso / disk 干扰本次创建。
+    if vm_dir.exists():
+        shutil.rmtree(vm_dir, ignore_errors=True)
     vm_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. 准备 base image ──
@@ -410,6 +422,37 @@ def create_vm(
 
     log(f"创建完成：{name}")
     return vm, ""
+
+
+def cleanup_orphan_dirs() -> int:
+    """清理没有 vm.json 的空壳目录（历史失败残留）
+
+    启动时调一次。返回清理的目录数。
+    不碰正在运行 VM 的目录（它们一定有 vm.json）。
+    """
+    if not MACHINES_DIR.exists():
+        return 0
+
+    n = 0
+    for d in MACHINES_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        # 有效 VM：有 vm.json 或有 QEMU 进程（异常情况保底）
+        if (d / "vm.json").exists():
+            continue
+        pid_file = d / "qemu.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 0)   # 探活，不杀
+                continue          # 进程还在，别动
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass              # 进程已死，按空壳处理
+            except OSError:
+                continue
+        shutil.rmtree(d, ignore_errors=True)
+        n += 1
+    return n
 
 
 def _create_disk(base: Path, target: Path, size_gb: int) -> tuple[bool, str]:

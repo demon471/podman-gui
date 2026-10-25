@@ -82,7 +82,7 @@ class VMDetailDialog(QDialog):
         head.setSpacing(12)
 
         self.lbl_icon = QLabel()
-        self.lbl_icon.setPixmap(icon("container", 48).pixmap(48, 48))
+        self.lbl_icon.setPixmap(icon("vm", 48).pixmap(48, 48))
         head.addWidget(self.lbl_icon)
 
         col = QVBoxLayout()

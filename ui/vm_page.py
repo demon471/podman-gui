@@ -238,7 +238,7 @@ class VMPage(QWidget):
         self._table_stack = QStackedLayout()
         self._table_stack.addWidget(self.table)
         self._empty = EmptyState(
-            icon_name="container",
+            icon_name="vm",
             title="还没有虚拟机",
             subtitle=(
                 "虚拟机基于 QEMU + KVM，可直接加载各发行版云镜像。\n"
@@ -516,7 +516,7 @@ class VMPage(QWidget):
 
             # 列 0：名称
             c0 = QStandardItem(name)
-            c0.setIcon(icon("container"))
+            c0.setIcon(icon("vm"))
             c0.setData(name, Qt.ItemDataRole.UserRole)
 
             # 列 1：状态

@@ -85,7 +85,7 @@ class VMInfoCard(QFrame):
         head.setSpacing(8)
 
         self.lbl_icon = QLabel()
-        self.lbl_icon.setPixmap(icon("container", 20).pixmap(20, 20))
+        self.lbl_icon.setPixmap(icon("vm", 20).pixmap(20, 20))
         head.addWidget(self.lbl_icon)
 
         self.lbl_name = QLabel()

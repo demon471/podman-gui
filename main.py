@@ -92,6 +92,17 @@ def main() -> int:
     except Exception as e:
         print(f"[main] 状态迁移失败: {e}")
 
+    # 清理历史创建失败留下的空壳 VM 目录
+    # （无 vm.json 的目录会导致同名再创建永远报「名称已被占用」）
+    try:
+        from core.vm import manager as vm_manager
+
+        n = vm_manager.cleanup_orphan_dirs()
+        if n:
+            print(f"[main] 已清理 {n} 个残留 VM 目录")
+    except Exception as e:
+        print(f"[main] 清理残留目录失败: {e}")
+
     client = PodmanClient()
     win = MainWindow(client)
     win.show()

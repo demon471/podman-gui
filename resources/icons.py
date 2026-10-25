@@ -18,7 +18,13 @@ from core.kde_theme import is_dark_mode
 # ─────────────────────────────────────────────
 
 SVG = {
-    "seal": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 644 644" width="100%" height="100%" fill="none"><circle cx="322" cy="322" r="315" stroke="currentColor" stroke-width="48" /><path d="M 122 418 C 145 365, 148 310, 154 255 C 165 165, 232 109, 322 109 C 412 109, 479 165, 490 255 C 496 310, 499 365, 525 422" stroke="currentColor" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" /><circle cx="241.6" cy="252" r="34" fill="currentColor" /><circle cx="401.4" cy="252" r="34" fill="currentColor" /><path d="M 322 277 C 302 277, 293 283, 293 292 C 293 302, 310 314, 322 314 C 334 314, 351 302, 351 292 C 351 283, 342 277, 322 277 Z" fill="currentColor" /><path d="M 249 321 C 251 344, 268 351, 285 351 C 304 351, 319 337, 322 313 C 325 337, 340 351, 359 351 C 376 351, 393 344, 395 321" stroke="currentColor" stroke-width="50" stroke-linecap="round" stroke-linejoin="round" /><path d="M 85 430 C 138 405, 195 401, 250 413 C 295 424, 338 446, 385 459 C 435 471, 492 470, 540 459" stroke="currentColor" stroke-width="54" stroke-linecap="round" /><path d="M 390 424 C 445 438, 508 434, 564 413" stroke="currentColor" stroke-width="54" stroke-linecap="round" /><path d="M 113 475 C 162 456, 212 454, 262 470 C 308 485, 350 504, 398 512 C 432 516, 466 515, 497 509" stroke="currentColor" stroke-width="54" stroke-linecap="round" /><path d="M 155 518 C 192 509, 228 510, 264 522 C 300 535, 334 550, 370 556 C 390 559, 410 559, 429 557" stroke="currentColor" stroke-width="54" stroke-linecap="round" /></svg>""",
+    "seal": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4 16.5l8-4 8 4-8 4-8-4z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 9.5l6-3 3.5 1.8-6 3-3.5-1.8z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M17 8.3v4.2"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 9.5v4.2l6 3.1v-4.3"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M13.5 12.3l3.5-1.8"/>
+</svg>""",
     "podman": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
 <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h18v4a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5v-4z"/>
 <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6.5 9.5V6M10.5 9.5V5M14.5 9.5V6M18 9.5V7.5"/>
@@ -27,7 +33,18 @@ SVG = {
 </svg>""",
 
     "container": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="currentColor" d="M3 7l9-4 9 4v10l-9 4-9-4V7zm9 2.2L5.2 6 3.6 6.7l7.2 3.2 7.2-3.2-1.6-.7L12 9.2zM4.5 8.4v8l6.7 3v-8l-6.7-3zm15 0l-6.7 3v8l6.7-3v-8z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4.5 17.5l7.5-3.8 7.5 3.8-7.5 3.8-7.5-3.8z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 11l4.5-2.3 4.5 2.3-4.5 2.3L7.5 11z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M16.5 11v3.6"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 11v3.6l4.5 2.4v-3.7"/>
+</svg>""",
+    "vm": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M3 5.5h18v11H3v-11z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M9 20.5h6"/>
+<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M12 16.5v4"/>
+<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M8.5 11.3l3.5-1.8 3.5 1.8-3.5 1.8-3.5-1.8z"/>
+<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M8.5 11.3v1.9l3.5 1.8v-1.9"/>
+<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M15.5 11.3v1.9l-3.5 1.8v-1.9"/>
 </svg>""",
 
     "image": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -178,6 +195,7 @@ KDE_ICON_MAP = {
     "podman": "utilities-terminal",
     "seal": "applications-system",
     "container": "application-x-executable",
+    "vm": "computer",
     "image": "application-x-executable",
     "volume": "drive-harddisk",
     "network": "network-workgroup",

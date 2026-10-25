@@ -52,7 +52,7 @@ class MemorySummary(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setMinimumHeight(88)
+        self.setMinimumHeight(102)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -185,16 +185,22 @@ class MemorySummary(QWidget):
 
         p.drawText(m, bar_y + bar_h + 16, "  ·  ".join(parts))
 
+        # 第四行：预算范围说明（容器与 VM 共用，用户常困惑的点）
+        f5 = p.font()
+        f5.setPointSize(max(7, f5.pointSize() - 1))
+        p.setFont(f5)
+        p.drawText(
+            m, bar_y + bar_h + 30,
+            "容器与虚拟机共用此预算 · 启动前会预检，防止宿主机 OOM",
+        )
+
         p.end()
 
 
 class ContainerRows(QWidget):
-    """容器内存列表（两列网格布局）
+    """容器 + 虚拟机内存列表（两列网格布局）
 
-    ┌────────────────────────┬────────────────────────┐
-    │ ● elasticsearch  90%   │ ● rocketmq-broker 77%  │
-    │   ████████████░        │   ██████████░░░        │
-    └────────────────────────┴────────────────────────┘
+    VM 与容器同屏展示（同一份内存预算），VM 项名称前带 VM 前缀。
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -205,9 +211,17 @@ class ContainerRows(QWidget):
         self._items: list[dict] = []
         self._host_gb = 1.0
 
-    def set_items(self, items, scale_gb: float = 0, host_gb: float = 0) -> None:
+    def set_items(self, items, scale_gb: float = 0, host_gb: float = 0,
+                  vms=None) -> None:
+        """items：容器列表；vms：虚拟机列表（同构 dict，标记 is_vm）"""
+        merged = list(items or [])
+        for v in (vms or []):
+            v = dict(v)
+            v["is_vm"] = True
+            merged.append(v)
+
         self._items = sorted(
-            [i for i in items if i.get("state") == "running"],
+            [i for i in merged if i.get("state") == "running"],
             key=lambda x: (
                 -(x.get("actual_gb", 0) / x.get("limit_gb", 1)
                   if x.get("limit_gb", 0) > 0 else 0)
@@ -232,7 +246,11 @@ class ContainerRows(QWidget):
 
         if not self._items:
             p.setPen(QPen(dim))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "无运行中的容器")
+            p.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "无运行中的容器 / 虚拟机",
+            )
             p.end()
             return
 
@@ -280,6 +298,9 @@ class ContainerRows(QWidget):
             p.drawEllipse(QRectF(cx, cy + 5, 6, 6))
 
             p.setPen(QPen(fg))
+            # VM 项加前缀，与容器区分（同一预算里的两类资源）
+            if it.get("is_vm"):
+                name = "VM · " + name
             name_max = cell_w - 60
             elided = fm.elidedText(name, Qt.TextElideMode.ElideRight, int(name_max))
             p.drawText(int(cx + dot + 2), int(cy + 11), elided)

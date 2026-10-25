@@ -1399,6 +1399,7 @@ class SettingsPage(QWidget):
             u["containers"],
             max(u["limit_gb"], u["host_gb"], 1.0),
             u["host_gb"],
+            vms=u.get("vms"),
         )
 
         # 首次拿到物理内存后生成预设
