@@ -1,33 +1,26 @@
 """虚拟机信息卡片（悬停弹窗）
 
+行为对齐系统 tooltip：
+  · 悬停约 500ms 后出现（同 QToolTip 的 wake-up 延迟）
+  · 出现在行的右侧垂直居中（不跟鼠标移动，位置固定）
+  · 移开即消失
+  · 不抢焦点、不进任务栏
+
 为什么不用 QToolTip
 ──────────────────
 Qt 的 QToolTip 只支持 HTML 的一个子集：div 的 background-color、
-border-radius、box-shadow、flex 布局全部无效。所以再怎么调
-HTML/CSS 都做不出「卡片」质感，永远是一块扁平文字。
+border-radius、box-shadow、flex 布局全部无效，做不出卡片质感。
+这里用自定义 QFrame + QSS 完整控制样式。
 
-这里改用自定义 QFrame + QSS：
-  · 完整 CSS（圆角、边框、内边距、分隔线、字体颜色）
-  · 真实 QLabel 控件，字体/颜色精确可控
-  · Qt.WindowType.ToolTip 标志：行为与系统 tooltip 一致
-    （不抢焦点、失焦自动消失、不进任务栏）
-
-布局
-────
-  名称  ....................  ● 状态
-  ──────────────────────────────
-  系统            alpine-3.22
-  账户            john
-  初始密码        12345
-  ──────────────────────────────
-  SSH 连接
-  ssh test.vm.local
-  ssh -p 2222 john@127.0.0.1
+为什么不做阴影
+──────────────────
+用户反馈：不要花哨的，正常悬上去显示即可。阴影在 Wayland 下
+还会有半透明边缘发灰的问题。就去掉。
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -45,6 +38,9 @@ from resources.icons import icon
 RUNNING_COLOR = "#35a45e"
 STOPPED_COLOR = "#8a8d91"
 
+# 悬停多久后显示（ms），与系统 tooltip 手感一致
+SHOW_DELAY_MS = 500
+
 
 class VMInfoCard(QFrame):
     """悬停信息卡片（单例复用，不反复创建）"""
@@ -57,35 +53,13 @@ class VMInfoCard(QFrame):
         self.setObjectName("vmInfoCard")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        # ToolTip 窗口默认无边框，但要给它留出阴影空间：
-        # 否则阴影会被裁到边框为止，看起来像贴边
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-
-        # 柔和投影（QFrame 不支持 box-shadow，用 GraphicsEffect）
-        self._apply_shadow()
 
         self._build()
 
-    def _apply_shadow(self) -> None:
-        """柔和外阴影，让卡片从内容上「浮」起来
-
-        透明度取低值（0.18）：太重的阴影在暗色主题下很脏。
-        """
-        try:
-            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-
-            fx = QGraphicsDropShadowEffect(self)
-            fx.setBlurRadius(18)
-            fx.setOffset(0, 2)
-            # 低透明度阴影：暗色主题下过重的阴影会显脏
-            c = self.palette().color(
-                self.palette().ColorRole.Shadow
-            )
-            c.setAlpha(48)
-            fx.setColor(c)
-            self.setGraphicsEffect(fx)
-        except Exception:
-            pass
+        # 自动消失定时器：tooltip 的标准行为，悬停不动也会自己收起
+        self._auto_hide = QTimer(self)
+        self._auto_hide.setSingleShot(True)
+        self._auto_hide.timeout.connect(self.hide_card)
 
     # ─────────────────────────────────────────
     # UI
@@ -97,11 +71,11 @@ class VMInfoCard(QFrame):
 
         # ── 标题行：图标 + 名称 + 状态 ──
         head = QHBoxLayout()
-        head.setContentsMargins(12, 10, 12, 0)
-        head.setSpacing(6)
+        head.setContentsMargins(14, 10, 14, 0)
+        head.setSpacing(8)
 
         self.lbl_icon = QLabel()
-        self.lbl_icon.setPixmap(icon("container", 22).pixmap(22, 22))
+        self.lbl_icon.setPixmap(icon("container", 20).pixmap(20, 20))
         head.addWidget(self.lbl_icon)
 
         self.lbl_name = QLabel()
@@ -117,9 +91,9 @@ class VMInfoCard(QFrame):
 
         # ── 信息网格 ──
         grid = QGridLayout()
-        grid.setContentsMargins(12, 8, 12, 10)
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(3)
+        grid.setContentsMargins(14, 8, 14, 12)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
 
         self._rows: list[tuple[QLabel, QLabel]] = []
         for i, key in enumerate(("系统", "账户", "初始密码")):
@@ -127,9 +101,6 @@ class VMInfoCard(QFrame):
             k.setObjectName("cardKey")
             v = QLabel()
             v.setObjectName("cardValue")
-            v.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
             grid.addWidget(k, i, 0)
             grid.addWidget(v, i, 1)
             self._rows.append((k, v))
@@ -145,8 +116,8 @@ class VMInfoCard(QFrame):
         # ── SSH 区 ──
         ssh_wrap = QWidget()
         sv = QVBoxLayout(ssh_wrap)
-        sv.setContentsMargins(12, 10, 12, 10)
-        sv.setSpacing(3)
+        sv.setContentsMargins(14, 10, 14, 12)
+        sv.setSpacing(4)
 
         self.lbl_ssh_head = QLabel("SSH 连接")
         self.lbl_ssh_head.setObjectName("cardSection")
@@ -165,8 +136,8 @@ class VMInfoCard(QFrame):
         # ── 端口区（按需显隐）──
         self._ports_wrap = QWidget()
         pv = QVBoxLayout(self._ports_wrap)
-        pv.setContentsMargins(12, 0, 12, 10)
-        pv.setSpacing(3)
+        pv.setContentsMargins(14, 0, 14, 12)
+        pv.setSpacing(4)
 
         self.lbl_ports_head = QLabel("端口转发")
         self.lbl_ports_head.setObjectName("cardSection")
@@ -174,7 +145,6 @@ class VMInfoCard(QFrame):
 
         self.lbl_ports = QLabel()
         self.lbl_ports.setObjectName("cardCmd")
-        self.lbl_ports.setWordWrap(False)
         pv.addWidget(self.lbl_ports)
 
         self._ports_wrap.hide()
@@ -190,10 +160,7 @@ class VMInfoCard(QFrame):
     # 数据
     # ─────────────────────────────────────────
     def show_for(self, vm, running: bool) -> None:
-        """填充并显示
-
-        单例复用：内容变了只更新文本，不重建控件。
-        """
+        """填充内容（不显示，由调用方决定何时 show）"""
         from core.vm.cloudinit import DEFAULT_PASSWORD
 
         spec = vm.spec
@@ -249,6 +216,34 @@ class VMInfoCard(QFrame):
 
         self.adjustSize()
 
+    def show_at_row(self, global_x: int, global_y: int, row_height: int) -> None:
+        """在指定位置显示（行的右侧、垂直居中）
+
+        位置固定：悬停期间不跟鼠标移动，避免「追着跑」的躁动感。
+        """
+        self.adjustSize()
+
+        # 行右侧 12px，垂直居中
+        x = global_x + 12
+        y = global_y + (row_height - self.height()) // 2
+
+        # 底部越界时往上抬
+        screen = self.screen().availableGeometry()
+        if y + self.height() > screen.bottom():
+            y = screen.bottom() - self.height() - 4
+        # 右侧越界时贴右边
+        if x + self.width() > screen.right():
+            x = screen.right() - self.width() - 4
+
+        self.move(x, y)
+
+        if not self.isVisible():
+            self.show()
+
+        # 悬停 6 秒不动自动收起（同 tooltip 行为）
+        self._auto_hide.start(6000)
+
     def hide_card(self) -> None:
+        self._auto_hide.stop()
         if self.isVisible():
             self.hide()

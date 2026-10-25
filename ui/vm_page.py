@@ -120,6 +120,12 @@ class VMPage(QWidget):
         self.act_stop.triggered.connect(self._stop_selected)
         tb.addAction(self.act_stop)
 
+        self.act_restart = QAction(icon("restart"), "重启", self)
+        self.act_restart.setProperty("iconName", "restart")
+        self.act_restart.setToolTip("停止后再启动选中的虚拟机")
+        self.act_restart.triggered.connect(self._restart_selected)
+        tb.addAction(self.act_restart)
+
         self.act_ssh = QAction(icon("terminal"), "SSH", self)
         self.act_ssh.setProperty("iconName", "terminal")
         self.act_ssh.setToolTip("在终端中打开 SSH 连接（外部客户端）")
@@ -175,14 +181,21 @@ class VMPage(QWidget):
 
         # 悬停卡片（不用 QToolTip，见 ui/vm_infocard.py）
         self.table.setMouseTracking(True)
-        self.table.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.table.viewport().installEventFilter(self)
 
-        # 信息卡片（单例，挂在主窗口上，跟随鼠标显示）
-        from ui.vm_infocard import VMInfoCard
+        # 信息卡片（单例，固定显示在行的右侧，不跟鼠标）
+        from ui.vm_infocard import VMInfoCard, SHOW_DELAY_MS
 
         self._info_card = VMInfoCard(self.window())
         self._card_row = -1
+
+        # 悬停延时：和系统 tooltip 一致，停 500ms 才出现
+        self._card_timer = QTimer(self)
+        self._card_timer.setSingleShot(True)
+        self._card_timer.setInterval(SHOW_DELAY_MS)
+        self._card_timer.timeout.connect(self._show_card_now)
+        self._pending_row = -1
+        self._pending_pos = None
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
         self.table.doubleClicked.connect(lambda _i: self._open_detail())
 
@@ -263,13 +276,10 @@ class VMPage(QWidget):
     # 悬停信息卡片
     # ─────────────────────────────────────────
     def eventFilter(self, obj, ev) -> bool:
-        """鼠标在表格上移动时显示信息卡片
+        """悬停行上时调度信息卡片
 
-        为什么不用 QToolTip：
-        Qt 的 QToolTip 只支持 HTML 子集，background-color /
-        border-radius / 阴影全部无效，做不出卡片质感。
-        这里用自定义 QFrame（Qt.WindowType.ToolTip 标志），
-        行为与系统 tooltip 一致：不抢焦点、失焦自隐。
+        行为对齐系统 tooltip：停住 500ms 出现，位置固定在
+        行右侧（不跟鼠标），移开立即消失。
         """
         if obj is not self.table.viewport():
             return False
@@ -278,80 +288,60 @@ class VMPage(QWidget):
 
         t = ev.type()
 
-        if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
-            try:
-                self._card_move(ev.position().toPoint())
-            except Exception:
-                pass
-            return False
-
-        if t == QEvent.Type.Leave or t == QEvent.Type.HoverLeave:
+        # 移动/滚轮/离开：取消待显示的卡片
+        if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove,
+                 QEvent.Type.Wheel, QEvent.Type.Leave,
+                 QEvent.Type.HoverLeave):
+            self._card_timer.stop()
             self._hide_card()
-            return False
 
-        if t == QEvent.Type.Wheel:
-            # 滚轮时卡片会遮挡内容，直接隐藏
-            self._hide_card()
+            # 鼠标移到了某一行上 → 安排延时显示
+            if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
+                try:
+                    pos = ev.position().toPoint()
+                    idx = self.table.indexAt(pos)
+                    if idx.isValid() and self.model.item(idx.row(), 0):
+                        self._pending_pos = pos
+                        self._pending_row = idx.row()
+                        self._card_timer.start()
+                except Exception:
+                    pass
             return False
 
         return False
 
-    def _card_move(self, pos: QPoint) -> None:
-        """鼠标移动 → 更新卡片内容与位置"""
-        idx = self.table.indexAt(pos)
-        if not idx.isValid():
-            self._hide_card()
+    def _show_card_now(self) -> None:
+        """延时到期 → 填内容并显示在行右侧"""
+        row = getattr(self, "_pending_row", -1)
+        pos = getattr(self, "_pending_pos", None)
+        if row < 0 or pos is None:
             return
 
-        row = idx.row()
         name_item = self.model.item(row, 0)
         if name_item is None:
-            self._hide_card()
             return
 
         vm = next(
             (v for v in self._vms if v.spec.name == name_item.text()), None
         )
         if vm is None:
-            self._hide_card()
             return
 
-        # 行变化才重填内容（同一行内移动只改位置）
-        if row != self._card_row:
-            self._card_row = row
-            self._info_card.show_for(vm, vm.running)
+        self._card_row = row
+        self._info_card.show_for(vm, vm.running)
 
-        self._position_card(pos)
-
-    def _position_card(self, pos: QPoint) -> None:
-        """把卡片放到鼠标右下方，越界则翻转"""
-        card = self._info_card
-
-        # 先 show 再取真实尺寸（layout 算出最终大小）
-        if not card.isVisible():
-            card.show()
-
-        # viewport 相对坐标 → 屏幕坐标
-        pt = self.table.viewport().mapToGlobal(pos)
-
-        screen = self.window().screen().availableGeometry()
-
-        # 默认右上角对齐鼠标（略偏右下）
-        x = pt.x() + 16
-        y = pt.y() + 8
-
-        # 右边越界 → 翻到左边
-        if x + card.width() > screen.right():
-            x = pt.x() - card.width() - 8
-        # 下面越界 → 翻到上面
-        if y + card.height() > screen.bottom():
-            y = pt.y() - card.height() - 8
-
-        if x != card.x() or y != card.y():
-            card.move(x, y)
+        # 行的右边缘 + 垂直居中（屏幕坐标）
+        row_rect = self.table.visualRect(self.model.index(row, 0))
+        row_global = self.table.viewport().mapToGlobal(
+            row_rect.topRight()
+        )
+        self._info_card.show_at_row(
+            row_global.x(), row_global.y(), row_rect.height()
+        )
 
     def _hide_card(self) -> None:
         self._card_row = -1
+        self._pending_row = -1
         if hasattr(self, "_info_card"):
             self._info_card.hide_card()
 
@@ -443,6 +433,7 @@ class VMPage(QWidget):
 
         self.act_start.setEnabled(has and not running and not self._busy)
         self.act_stop.setEnabled(has and running and not self._busy)
+        self.act_restart.setEnabled(has and running and not self._busy)
         self.act_ssh.setEnabled(has and running)
         self.act_purge.setEnabled(bool(self._vms) and not self._busy)
 
@@ -542,6 +533,35 @@ class VMPage(QWidget):
         )
 
 
+    def _restart_selected(self) -> None:
+        vm = self._selected_vm()
+        if not vm:
+            return
+
+        if not vm.running:
+            QMessageBox.information(
+                self, "未运行", f"「{vm.spec.name}」未运行，直接启动即可。"
+            )
+            return
+
+        ret = QMessageBox.question(
+            self, "确认重启",
+            f"确定要重启虚拟机「{vm.spec.name}」吗？\n\n"
+            "将先停止再启动，未保存的 guest 内数据可能丢失。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        self.run_op(
+            "重启", vm_manager.restart_vm, vm,
+            busy_text=f"正在重启 {vm.spec.name}…",
+            on_success=lambda r: notifier().info(
+                "虚拟机已重启" if r[0] else "重启失败", vm.spec.name
+            ),
+        )
+
     def _open_ssh(self) -> None:
         vm = self._selected_vm()
         if not vm or not vm.running:
@@ -576,6 +596,7 @@ class VMPage(QWidget):
             menu.addAction(icon("play"), "启动", self._start_selected)
         else:
             menu.addAction(icon("stop"), "停止", self._stop_selected)
+            menu.addAction(icon("restart"), "重启", self._restart_selected)
             menu.addAction(icon("terminal"), "SSH 连接", self._open_ssh)
 
         menu.addSeparator()

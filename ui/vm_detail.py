@@ -700,7 +700,7 @@ class VMDetailDialog(QDialog):
         """重启：先停止再启动"""
         r = QMessageBox.question(
             self, "确认重启",
-            "重启虚拟机「{self.vm.spec.name}」？",
+            "重启虚拟机「" + self.vm.spec.name + "」？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -711,13 +711,7 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setText("正在重启…")
 
         def work():
-            ok, err = vm_manager.stop_vm(self.vm)
-            if not ok:
-                return False, "停止失败: " + str(err)
-            ok, err = vm_manager.start_vm(self.vm)
-            if not ok:
-                return False, "启动失败: " + str(err)
-            return True, ""
+            return vm_manager.restart_vm(self.vm)
 
         def done(res):
             self._set_busy(False)

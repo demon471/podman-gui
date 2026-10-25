@@ -472,6 +472,26 @@ def stop_vm(vm: VM, timeout: int = 30) -> tuple[bool, str]:
     return qemu.stop(vm.dir, timeout=timeout)
 
 
+def restart_vm(vm: VM, timeout: int = 30) -> tuple[bool, str]:
+    """重启虚拟机：先停止再启动
+
+    返回 (成功, 错误消息)。成功时消息为空。
+    """
+    if not vm.running:
+        # 没运行就当直接启动
+        return start_vm(vm)
+
+    ok, err = stop_vm(vm, timeout=timeout)
+    if not ok:
+        return False, f"停止失败: {err}"
+
+    ok, err = start_vm(vm)
+    if not ok:
+        return False, f"启动失败: {err}"
+
+    return True, ""
+
+
 def delete_vm(vm: VM, *, remove_disk: bool = True) -> tuple[bool, str]:
     """删除 VM"""
     if vm.running:
