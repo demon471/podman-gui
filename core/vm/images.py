@@ -42,6 +42,12 @@ class ImageSpec:
     default_disk_gb: int = 20
     # 磁盘格式
     format: str = "qcow2"
+    # 是否需要 UEFI 启动。
+    # 主流发行版的 cloud image（Alpine/Rocky/Fedora/Ubuntu/Debian/Arch）
+    # 全部是 UEFI-only 或 UEFI 优先：Alpine 官方文件名直接带 -uefi-；
+    # Rocky/Fedora 的 qcow2 只带 UEFI 引导（无 BIOS grub）。
+    # 默认 True，别再按 family 猜。
+    uefi: bool = True
     # 说明
     note: str = ""
 

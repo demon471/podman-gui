@@ -697,10 +697,16 @@ class VMDetailDialog(QDialog):
         self._spawn(work, done, self._op_error)
 
     def _restart(self) -> None:
-        """重启：先停止再启动"""
+        """重启：先停止再启动，直到 SSH 可连才算成功
+
+        与列表页的标准一致：qemu 进程起来不等于启动成功，
+        能 SSH 进去才算。等待期间底部按钮保持禁用。
+        """
         r = QMessageBox.question(
             self, "确认重启",
-            "重启虚拟机「" + self.vm.spec.name + "」？",
+            "重启虚拟机「" + self.vm.spec.name + "」？\n\n"
+            "将先停止再启动，直到 SSH 可连才算完成，"
+            "可能需要一到几分钟。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -708,16 +714,31 @@ class VMDetailDialog(QDialog):
             return
 
         self._set_busy(True)
-        self.lbl_status.setText("正在重启…")
+        self.lbl_status.setText("正在重启（等待 SSH 就绪）…")
 
         def work():
-            return vm_manager.restart_vm(self.vm)
+            ok, err = vm_manager.restart_vm(self.vm)
+            if not ok:
+                return False, err
+
+            # qemu 已起，轮询 SSH 直到可连（最多 180 秒）
+            import time as _t
+
+            t0 = _t.monotonic()
+            while _t.monotonic() - t0 < 180:
+                ok2, out = vm_ssh.run_command(
+                    self.vm, "echo SSH_OK", timeout=8
+                )
+                if ok2 and "SSH_OK" in out:
+                    return True, ""
+                _t.sleep(4)
+            return False, "180s 内 SSH 未就绪"
 
         def done(res):
             self._set_busy(False)
             ok, err = res
             if ok:
-                self.lbl_status.setText("已重启")
+                self.lbl_status.setText("已重启（SSH 可连）")
                 notifier().info("虚拟机已重启", self.vm.spec.name)
             else:
                 self.lbl_status.setText(str(err))

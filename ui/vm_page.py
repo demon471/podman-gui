@@ -49,6 +49,8 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.vm import autoconfig as vm_autoconfig
 from core.vm import budget as vm_budget
+import time as _time_mod
+
 from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
 from core.vm import network as vm_network
@@ -308,6 +310,15 @@ class VMPage(QWidget):
         t = ev.type()
 
         if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
+            # 有弹窗（右键菜单/下拉框）打开时不显示卡片：
+            # 弹窗 grab 了鼠标，此时弹卡片只会挡住弹窗
+            from PyQt6.QtWidgets import QApplication
+
+            if QApplication.activePopupWidget() is not None:
+                self._card_timer.stop()
+                self._hide_card()
+                return False
+
             try:
                 pos = ev.position().toPoint()
                 idx = self.table.indexAt(pos)
@@ -345,6 +356,13 @@ class VMPage(QWidget):
         if t in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
             # 离开表格：延迟收起，给鼠标移入卡片的时间窗口
             self._leave_timer.start()
+            return False
+
+        if t == QEvent.Type.MouseButtonPress:
+            # 按下鼠标（含右键）时收掉卡片和计时：
+            # 用户正要点东西，卡片弹出来只会挡视线
+            self._card_timer.stop()
+            self._hide_card()
             return False
 
         if t == QEvent.Type.Wheel:
@@ -599,7 +617,9 @@ class VMPage(QWidget):
         self.act_new.setEnabled(False)
         self.status_message.emit(busy_text or f"正在{label}…")
 
-        # 行级 loading：直到操作结束（成功或失败）才移除
+        # 行级 loading：qemu 进程起来后仍保持，
+        # 直到 guest 的 SSH 真正可连（_wait_ssh_ready）才解除。
+        # 「启动成功」的定义是能 SSH 进去，不是进程存在。
         if pending_vm:
             self._pending_vms.add(pending_vm)
             if label == "启动":
@@ -611,29 +631,76 @@ class VMPage(QWidget):
         def work():
             return fn(*args, **kwargs)
 
-        def _finish_pending():
-            if pending_vm:
-                self._pending_vms.discard(pending_vm)
-                self._starting.discard(pending_vm)
-                if not self._pending_vms:
-                    self._spin_timer.stop()
-
         def done(result):
             self._busy = False
             self.act_new.setEnabled(True)
             self.status_message.emit(f"{label}完成")
-            _finish_pending()
             if on_success:
                 on_success(result)
             self.refresh_silent()
+
+            # qemu 起来后，后台等 SSH 就绪再解除该行 loading。
+            # 失败也走这里（fn 返回 (False, err)），
+            # SSH 探测不了就 10 秒后解除，避免永久卡死。
+            if pending_vm:
+                self._probe_ssh_then_release(pending_vm)
 
         def error(msg):
             self._busy = False
             self.act_new.setEnabled(True)
             self.status_message.emit(f"{label}失败: {msg}")
-            _finish_pending()
+            if pending_vm:
+                self._pending_vms.discard(pending_vm)
+                self._starting.discard(pending_vm)
+                if not self._pending_vms:
+                    self._spin_timer.stop()
+                self._rebuild()
             QMessageBox.warning(self, f"{label}失败", msg)
             notifier().op_failed(label, "", msg)
+            self.refresh_silent()
+
+        task = run_async(work, on_done=done, on_error=error, parent=self)
+        self._tasks.append(task)
+
+    def _probe_ssh_then_release(self, name: str,
+                                timeout_s: int = 180) -> None:
+        """后台轮询 SSH 直到可连，才解除该行的 loading
+
+        启动成功 = 能 SSH 进去。QEMU 进程起来只是开始。
+        超时（默认 180s）也解除，但通知失败。
+        """
+        def work():
+            vm = vm_manager.load(name)
+            if vm is None:
+                return name, False, "虚拟机已不存在"
+            t0 = _time_mod.monotonic()
+            while _time_mod.monotonic() - t0 < timeout_s:
+                ok, out = vm_ssh.run_command(vm, "echo SSH_OK", timeout=8)
+                if ok and "SSH_OK" in out:
+                    return name, True, ""
+                _time_mod.sleep(4)
+            return name, False, f"{timeout_s}s 内 SSH 未就绪"
+
+        def done(res):
+            name, ok, err = res
+            self._pending_vms.discard(name)
+            self._starting.discard(name)
+            if not self._pending_vms:
+                self._spin_timer.stop()
+            self.refresh_silent()
+
+            if ok:
+                self.status_message.emit(f"{name} 已就绪（SSH 可连）")
+                notifier().info("虚拟机已就绪", name)
+            else:
+                self.status_message.emit(f"{name} 启动失败: {err}")
+                notifier().op_failed("启动", name, err)
+
+        def error(msg):
+            self._pending_vms.discard(name)
+            self._starting.discard(name)
+            if not self._pending_vms:
+                self._spin_timer.stop()
             self.refresh_silent()
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
@@ -764,6 +831,13 @@ class VMPage(QWidget):
         # 启动/重启中的行：不做任何操作
         if vm.spec.name in self._pending_vms:
             return
+
+        # 右键菜单与信息卡片冲突：菜单弹出前必须收掉卡片，
+        # 否则卡片压在菜单上面挡住菜单项。
+        # exec() 是阻塞的事件循环，期间 viewport 收不到
+        # MouseMove，卡片不会自己消失。
+        self._card_timer.stop()
+        self._hide_card()
 
         menu = QMenu(self)
         running = vm.running

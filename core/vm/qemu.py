@@ -59,15 +59,18 @@ def find_ovmf() -> str | None:
 def needs_uefi(spec: "VMSpec") -> bool:
     """判断该 VM 是否需要 UEFI 启动
 
-    Alpine 的 nocloud cloud image 是 UEFI-only（BIOS 无法启动）。
+    以镜像元数据为准（ImageSpec.uefi）。
+    主流 cloud image 全部是 UEFI-only 或 UEFI 优先——
+    之前只对 Alpine 返回 True，Rocky 被当成 BIOS 启动，
+    而 Rocky qcow2 里没有 BIOS grub，QEMU 空转卡死。
     """
     from core.vm import images
 
     img = images.get_spec(spec.image_key)
     if img is None:
-        return False
-    # Alpine 的 cloud image 全部是 UEFI
-    return img.family == "alpine"
+        # 未知镜像：保守起见用 UEFI（cloud image 事实标准）
+        return True
+    return bool(getattr(img, "uefi", True))
 
 
 @dataclass
