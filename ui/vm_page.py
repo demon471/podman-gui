@@ -88,10 +88,11 @@ class VMPage(QWidget):
         # 正在启动/重启中的 VM 名：行显示 loading、禁用一切交互
         self._pending_vms: set[str] = set()
         self._starting: set[str] = set()      # 区分「启动中」/「重启中」
+        self._stopping: set[str] = set()      # 「停止中」文案
         # loading 图标旋转帧（0-7，对应 8 个角度）
         self._spin_frame = 0
         self._spin_timer = QTimer(self)
-        self._spin_timer.setInterval(120)
+        self._spin_timer.setInterval(33)   # ~30fps，流畅
         self._spin_timer.timeout.connect(self._spin_tick)
         self._tasks: list = []
 
@@ -418,21 +419,32 @@ class VMPage(QWidget):
             self._info_card.hide_card()
 
     # ─────────────────────────────────────────
-    # 启动/重启 loading 状态
+    # 启动/重启/停止 loading 状态
     # ─────────────────────────────────────────
     def _pending_label(self, name: str) -> str:
-        """pending 行的状态文字"""
-        return "启动中…" if name in self._starting else "重启中…"
+        """pending 行的状态文字（启动中 / 重启中 / 停止中）"""
+        if name in self._starting:
+            return "启动中…"
+        if name in self._stopping:
+            return "停止中…"
+        return "重启中…"
 
     def _spin_icon(self) -> QIcon:
-        """旋转 loading 图标（当前帧）"""
-        import math
+        """旋转 loading 图标（当前帧）
 
-        from PyQt6.QtGui import (
-            QColor,
-            QPainter,
-            QPixmap,
-        )
+        动画流畅性优化（此前 8 帧 45° 每帧 120ms，卡顿）：
+        - 帧数 8 → 30，每帧 12°，角度跳跃从 45° 降到 12°
+        - 间隔 120ms → 33ms（约 30fps，与主流 spinner 一致）
+        - 帧缓存：每帧的 QPixmap 只渲染一次，之后复用，
+          避免 30fps 下反复执行 drawArc（这是之前卡的主因）
+        - 带速尾渐变（leading arc 亮，尾部淡出），视觉更顺滑
+        """
+        # 缓存命中：同帧直接返回，不重画
+        cache = getattr(self, "_spin_cache", None)
+        if cache is not None and cache[0] == self._spin_frame:
+            return cache[1]
+
+        from PyQt6.QtGui import QColor, QPainter, QPixmap
 
         size = 16
         pm = QPixmap(size * 2, size * 2)   # 2x 高 DPI
@@ -442,25 +454,40 @@ class VMPage(QWidget):
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 灰色弧线：从当前帧角度画 270° 弧
-        pen_color = self.palette().color(
+        base_color = self.palette().color(
             QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text
         )
-        pen = QPen(pen_color, 2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
 
         margin = 3
         rect = QRectF(margin, margin, size - margin * 2, size - margin * 2)
-        start = self._spin_frame * 45     # 每帧转 45°
-        p.drawArc(rect, int(start * 16), int(270 * 16))
+
+        # 速尾：沿运动反方向画三段渐淡的短弧，
+        # 加上主弧共四段，扫过角度 100°，模拟运动模糊
+        base_deg = self._spin_frame * 12          # 每帧 12°
+        segments = [
+            (0,   70, 255),   # (偏移, 扫角, alpha) 主弧：亮
+            (70,  20, 130),   # 尾巴第一段
+            (90,  18, 60),    # 尾巴第二段
+            (108, 14, 25),    # 尾巴第三段
+        ]
+        for offset, sweep, alpha in segments:
+            c = QColor(base_color)
+            c.setAlpha(alpha)
+            pen = QPen(c, 2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            # Qt 角度逆时针为正，spinner 顺时针转 → 用负角度
+            start = -(base_deg + offset) * 16
+            p.drawArc(rect, int(start), int(-sweep * 16))
         p.end()
 
-        return QIcon(pm)
+        icon = QIcon(pm)
+        self._spin_cache = (self._spin_frame, icon)
+        return icon
 
     def _spin_tick(self) -> None:
         """动画帧推进：只重绘 pending 行的状态列"""
-        self._spin_frame = (self._spin_frame + 1) % 8
+        self._spin_frame = (self._spin_frame + 1) % 30
         for r in range(self.model.rowCount()):
             name = self.model.item(r, 0).text()
             if name in self._pending_vms:
@@ -601,12 +628,17 @@ class VMPage(QWidget):
     # ─────────────────────────────────────────
     def run_op(self, label: str, fn, *args, busy_text: str = "",
                on_success=None, pending_vm: str | None = None,
-               **kwargs) -> None:
+               release_when=None, **kwargs) -> None:
         """后台线程执行（避免冻结 UI）
 
-        pending_vm：该操作是针对某台 VM 的启动/重启。
-        该行会进入 loading 状态（灰字 + 转圈 + 禁止交互），
-        直到操作完成（无论成败）才恢复。
+        pending_vm：该操作针对某台 VM 的启动/重启/停止。
+        该行进入 loading 态（灰字 + 转圈 + 禁止交互）。
+
+        release_when：可选的异步解除条件。
+          - 启动/重启：传 "ssh" —— qemu 起来后继续探针，
+            直到 SSH 可连才解除 loading（启动成功的真正标准）
+          - 停止：传 None —— stop_vm 返回即解除
+            （QEMU 进程消失 = 不可操作，无需探针）
         """
         if self._busy:
             self.status_message.emit("上一个操作还未完成，请稍候…")
@@ -617,19 +649,26 @@ class VMPage(QWidget):
         self.act_new.setEnabled(False)
         self.status_message.emit(busy_text or f"正在{label}…")
 
-        # 行级 loading：qemu 进程起来后仍保持，
-        # 直到 guest 的 SSH 真正可连（_wait_ssh_ready）才解除。
-        # 「启动成功」的定义是能 SSH 进去，不是进程存在。
+        # 行级 loading
         if pending_vm:
             self._pending_vms.add(pending_vm)
             if label == "启动":
                 self._starting.add(pending_vm)
+            elif label == "停止":
+                self._stopping.add(pending_vm)
             self._spin_timer.start()
             self._hide_card()
             self._rebuild()
 
         def work():
             return fn(*args, **kwargs)
+
+        def _release(name: str):
+            self._pending_vms.discard(name)
+            self._starting.discard(name)
+            self._stopping.discard(name)
+            if not self._pending_vms:
+                self._spin_timer.stop()
 
         def done(result):
             self._busy = False
@@ -639,21 +678,25 @@ class VMPage(QWidget):
                 on_success(result)
             self.refresh_silent()
 
-            # qemu 起来后，后台等 SSH 就绪再解除该行 loading。
-            # 失败也走这里（fn 返回 (False, err)），
-            # SSH 探测不了就 10 秒后解除，避免永久卡死。
-            if pending_vm:
+            if not pending_vm:
+                return
+
+            if release_when == "ssh":
+                # 启动/重启：qemu 起来后继续等 SSH 就绪。
+                # fn 返回 (False, err) 也走这里，探不到 SSH
+                # 就 30 秒后解除，避免永久卡死。
                 self._probe_ssh_then_release(pending_vm)
+            else:
+                # 停止：QEMU 进程已退出，直接解除
+                _release(pending_vm)
+                self._rebuild()
 
         def error(msg):
             self._busy = False
             self.act_new.setEnabled(True)
             self.status_message.emit(f"{label}失败: {msg}")
             if pending_vm:
-                self._pending_vms.discard(pending_vm)
-                self._starting.discard(pending_vm)
-                if not self._pending_vms:
-                    self._spin_timer.stop()
+                _release(pending_vm)
                 self._rebuild()
             QMessageBox.warning(self, f"{label}失败", msg)
             notifier().op_failed(label, "", msg)
@@ -685,6 +728,7 @@ class VMPage(QWidget):
             name, ok, err = res
             self._pending_vms.discard(name)
             self._starting.discard(name)
+            self._stopping.discard(name)
             if not self._pending_vms:
                 self._spin_timer.stop()
             self.refresh_silent()
@@ -699,6 +743,7 @@ class VMPage(QWidget):
         def error(msg):
             self._pending_vms.discard(name)
             self._starting.discard(name)
+            self._stopping.discard(name)
             if not self._pending_vms:
                 self._spin_timer.stop()
             self.refresh_silent()
@@ -734,6 +779,7 @@ class VMPage(QWidget):
         self.run_op(
             "启动", vm_manager.start_vm, vm,
             pending_vm=vm.spec.name,
+            release_when="ssh",
             busy_text=f"正在启动 {vm.spec.name}（首次启动需初始化系统）…",
             on_success=lambda r: notifier().info(
                 "虚拟机已启动" if r[0] else "启动失败",
@@ -759,6 +805,7 @@ class VMPage(QWidget):
 
         self.run_op(
             "停止", vm_manager.stop_vm, vm,
+            pending_vm=vm.spec.name,
             busy_text=f"正在停止 {vm.spec.name}…",
             on_success=lambda r: notifier().info(
                 "虚拟机已停止" if r[0] else "停止失败", vm.spec.name
@@ -790,7 +837,8 @@ class VMPage(QWidget):
         self.run_op(
             "重启", vm_manager.restart_vm, vm,
             pending_vm=vm.spec.name,
-            busy_text=f"正在重启 {vm.spec.name}…",
+            release_when="ssh",
+            busy_text=f"正在重启 {vm.spec.name}…（直到 SSH 可连）",
             on_success=lambda r: notifier().info(
                 "虚拟机已重启" if r[0] else "重启失败", vm.spec.name
             ),
