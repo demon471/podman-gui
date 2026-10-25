@@ -206,14 +206,6 @@ class VMInfoCard(QFrame):
             self._ports_wrap.show()
         else:
             self._ports_wrap.hide()
-
-        # 未运行提示
-        if not running:
-            self.lbl_hint.setText("未运行 · 启动后即可连接")
-            self.lbl_hint.show()
-        else:
-            self.lbl_hint.hide()
-
         self.adjustSize()
 
     def show_at_row(self, global_x: int, global_y: int, row_height: int) -> None:
