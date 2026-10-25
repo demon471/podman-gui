@@ -164,6 +164,9 @@ SVG = {
 <circle cx="12" cy="12" r="1.8" fill="currentColor"/>
 <circle cx="18.5" cy="12" r="1.8" fill="currentColor"/>
 </svg>""",
+    "check": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.5l5 5L19.5 7"/>
+</svg>""",
     "copy": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
 <rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
 <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 5.5v-1a2 2 0 0 0-2-2h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1"/>
@@ -206,6 +209,7 @@ KDE_ICON_MAP = {
     "download": "go-down",
     "home": "go-home",
     "copy": "edit-copy",
+    "check": "dialog-ok-apply",
     "more": "overflow-menu",
 }
 

@@ -183,7 +183,7 @@ class VMPage(QWidget):
         self.table.setMouseTracking(True)
         self.table.viewport().installEventFilter(self)
 
-        # 信息卡片（单例，固定显示在行的右侧，不跟鼠标）
+        # 信息卡片（单例，贴近鼠标显示，可移入卡片内操作复制）
         from ui.vm_infocard import VMInfoCard, SHOW_DELAY_MS
 
         self._info_card = VMInfoCard(self.window())
@@ -196,6 +196,12 @@ class VMPage(QWidget):
         self._card_timer.timeout.connect(self._show_card_now)
         self._pending_row = -1
         self._pending_pos = None
+
+        # 离开表格后延迟收起（给鼠标移入卡片的时间窗口）
+        self._leave_timer = QTimer(self)
+        self._leave_timer.setSingleShot(True)
+        self._leave_timer.setInterval(250)
+        self._leave_timer.timeout.connect(self._on_leave_timeout)
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
         self.table.doubleClicked.connect(lambda _i: self._open_detail())
 
@@ -278,8 +284,10 @@ class VMPage(QWidget):
     def eventFilter(self, obj, ev) -> bool:
         """悬停行上时调度信息卡片
 
-        行为对齐系统 tooltip：停住 500ms 出现，位置固定在
-        行右侧（不跟鼠标），移开立即消失。
+        显示规则：
+          · 悬停行 400ms 后出现，贴近鼠标右下方
+          · 鼠标可以移进卡片内（复制按钮可用），不消失
+          · 同时离开表格和卡片才收起
         """
         if obj is not self.table.viewport():
             return False
@@ -288,30 +296,61 @@ class VMPage(QWidget):
 
         t = ev.type()
 
-        # 移动/滚轮/离开：取消待显示的卡片
-        if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove,
-                 QEvent.Type.Wheel, QEvent.Type.Leave,
-                 QEvent.Type.HoverLeave):
+        if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
+            try:
+                pos = ev.position().toPoint()
+                idx = self.table.indexAt(pos)
+
+                if not idx.isValid():
+                    # 表格空白处：若鼠标不朝卡片方向走则收起
+                    self._card_timer.stop()
+                    self._maybe_hide_for_leave(pos)
+                    return False
+
+                # 移到不同行 → 重新计时
+                if idx.row() != getattr(self, "_pending_row", -1):
+                    self._card_timer.stop()
+                    self._hide_card()
+                    self._pending_row = idx.row()
+                    self._pending_pos = pos
+                    self._card_timer.start()
+                else:
+                    # 同一行内移动：更新贴附位置（卡片未显示时才更新目标点）
+                    self._pending_pos = pos
+                    if self._info_card.isVisible():
+                        # 卡片内也在这套坐标里活动，刷新自动消失计时
+                        self._info_card._auto_hide.start(8000)
+            except Exception:
+                pass
+            return False
+
+        if t in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
+            # 离开表格：延迟收起，给鼠标移入卡片的时间窗口
+            self._leave_timer.start()
+            return False
+
+        if t == QEvent.Type.Wheel:
             self._card_timer.stop()
             self._hide_card()
-
-            # 鼠标移到了某一行上 → 安排延时显示
-            if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
-                try:
-                    pos = ev.position().toPoint()
-                    idx = self.table.indexAt(pos)
-                    if idx.isValid() and self.model.item(idx.row(), 0):
-                        self._pending_pos = pos
-                        self._pending_row = idx.row()
-                        self._card_timer.start()
-                except Exception:
-                    pass
             return False
 
         return False
 
+    def _maybe_hide_for_leave(self, pos) -> None:
+        """鼠标在表格空白处：不立即收起（可能正移向卡片）"""
+        # 交给 _leave_timer 的延迟逻辑处理
+        self._leave_timer.start()
+
+    def _on_leave_timeout(self) -> None:
+        """离开表格的延迟到期：鼠标不在卡片内才真正收起"""
+        if getattr(self._info_card, "hovered", False):
+            # 鼠标已移入卡片：卡片自己的 leaveEvent 会在
+            # 3 秒后自动收起（若期间没回到表格）
+            return
+        self._hide_card()
+
     def _show_card_now(self) -> None:
-        """延时到期 → 填内容并显示在行右侧"""
+        """延时到期 → 填内容并贴近鼠标显示"""
         row = getattr(self, "_pending_row", -1)
         pos = getattr(self, "_pending_pos", None)
         if row < 0 or pos is None:
@@ -330,14 +369,11 @@ class VMPage(QWidget):
         self._card_row = row
         self._info_card.show_for(vm, vm.running)
 
-        # 行的右边缘 + 垂直居中（屏幕坐标）
-        row_rect = self.table.visualRect(self.model.index(row, 0))
-        row_global = self.table.viewport().mapToGlobal(
-            row_rect.topRight()
-        )
-        self._info_card.show_at_row(
-            row_global.x(), row_global.y(), row_rect.height()
-        )
+        g = self.table.viewport().mapToGlobal(pos)
+        self._info_card.show_near(g.x(), g.y())
+
+        # 显示后监听卡片自身的 hover（用于「移入卡片不消失」）
+        self._info_card.installEventFilter(self)
 
     def _hide_card(self) -> None:
         self._card_row = -1

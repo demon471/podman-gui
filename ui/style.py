@@ -599,15 +599,22 @@ QLabel#hintLabel {{
 }}
 
 /* ═══════════ 悬停信息卡片 ═══════════ */
-/*
- * 与 limitBox 同一套质感（Base 底 + hairline 边框 + 8px 圆角）。
- * Qt 的 QFrame 不支持 box-shadow，阴影由 Python 侧
- * QGraphicsDropShadowEffect 实现（见 ui/vm_infocard.py）。
- */
+/* 直角（用户偏好：不要圆角不要阴影，正常平贴即可）*/
 QFrame#vmInfoCard {{
     background-color: {base};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: 0px;
+}}
+
+/* 卡片内复制按钮（命令后面的复制小图标）*/
+QFrame#vmInfoCard QToolButton#cardCopyBtn {{
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    padding: 2px;
+}}
+QFrame#vmInfoCard QToolButton#cardCopyBtn:hover {{
+    background-color: {alternate};
 }}
 
 /* 卡片内标题 */

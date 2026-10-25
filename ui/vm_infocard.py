@@ -1,31 +1,30 @@
 """虚拟机信息卡片（悬停弹窗）
 
-行为对齐系统 tooltip：
-  · 悬停约 500ms 后出现（同 QToolTip 的 wake-up 延迟）
-  · 出现在行的右侧垂直居中（不跟鼠标移动，位置固定）
-  · 移开即消失
-  · 不抢焦点、不进任务栏
+行为：
+  · 悬停约 400ms 后出现，位置贴近鼠标（右下 8px 偏移）
+  · 鼠标可以从行移进卡片内（卡片自身接收 hover，不消失）
+  · SSH 命令后有复制按钮：点击复制，图标变绿勾 1.5 秒
+  · 无圆角、无阴影
+  · 移出卡片和表格范围即消失，悬停 8 秒不动自动收起
 
 为什么不用 QToolTip
 ──────────────────
-Qt 的 QToolTip 只支持 HTML 的一个子集：div 的 background-color、
-border-radius、box-shadow、flex 布局全部无效，做不出卡片质感。
-这里用自定义 QFrame + QSS 完整控制样式。
-
-为什么不做阴影
-──────────────────
-用户反馈：不要花哨的，正常悬上去显示即可。阴影在 Wayland 下
-还会有半透明边缘发灰的问题。就去掉。
+Qt 的 QToolTip 只支持 HTML 的一个子集，且无法含交互控件
+（复制按钮）。用自定义 QFrame 才能放 QPushButton。
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -38,8 +37,12 @@ from resources.icons import icon
 RUNNING_COLOR = "#35a45e"
 STOPPED_COLOR = "#8a8d91"
 
-# 悬停多久后显示（ms），与系统 tooltip 手感一致
-SHOW_DELAY_MS = 500
+# 悬停多久后显示（ms）
+SHOW_DELAY_MS = 400
+# 复制成功后绿勾回退时长（ms）
+COPY_FEEDBACK_MS = 1500
+# 悬停不动自动收起（ms）
+AUTO_HIDE_MS = 8000
 
 
 class VMInfoCard(QFrame):
@@ -53,13 +56,20 @@ class VMInfoCard(QFrame):
         self.setObjectName("vmInfoCard")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # 接收 hover：鼠标进入卡片时不触发表格的 Leave
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
         self._build()
 
-        # 自动消失定时器：tooltip 的标准行为，悬停不动也会自己收起
+        # 自动消失
         self._auto_hide = QTimer(self)
         self._auto_hide.setSingleShot(True)
         self._auto_hide.timeout.connect(self.hide_card)
+
+        # 复制反馈回退
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.setSingleShot(True)
+        self._feedback_timer.timeout.connect(self._reset_copy_icons)
 
     # ─────────────────────────────────────────
     # UI
@@ -113,7 +123,7 @@ class VMInfoCard(QFrame):
         self._sep1.setFrameShape(QFrame.Shape.HLine)
         root.addWidget(self._sep1)
 
-        # ── SSH 区 ──
+        # ── SSH 区（每条命令后面跟复制按钮）──
         ssh_wrap = QWidget()
         sv = QVBoxLayout(ssh_wrap)
         sv.setContentsMargins(14, 10, 14, 12)
@@ -123,13 +133,27 @@ class VMInfoCard(QFrame):
         self.lbl_ssh_head.setObjectName("cardSection")
         sv.addWidget(self.lbl_ssh_head)
 
+        # 命令 1 + 复制按钮
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
         self.lbl_cmd1 = QLabel()
         self.lbl_cmd1.setObjectName("cardCmd")
-        sv.addWidget(self.lbl_cmd1)
+        row1.addWidget(self.lbl_cmd1)
+        self.btn_copy1 = self._make_copy_btn()
+        row1.addWidget(self.btn_copy1)
+        row1.addStretch()
+        sv.addLayout(row1)
 
+        # 命令 2 + 复制按钮
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
         self.lbl_cmd2 = QLabel()
         self.lbl_cmd2.setObjectName("cardCmd")
-        sv.addWidget(self.lbl_cmd2)
+        row2.addWidget(self.lbl_cmd2)
+        self.btn_copy2 = self._make_copy_btn()
+        row2.addWidget(self.btn_copy2)
+        row2.addStretch()
+        sv.addLayout(row2)
 
         root.addWidget(ssh_wrap)
 
@@ -156,12 +180,27 @@ class VMInfoCard(QFrame):
         self.lbl_hint.hide()
         root.addWidget(self.lbl_hint)
 
+    def _make_copy_btn(self) -> QToolButton:
+        """命令后的复制小按钮"""
+        b = QToolButton()
+        b.setObjectName("cardCopyBtn")
+        b.setIcon(icon("copy", 14))
+        b.setAutoRaise(True)
+        b.setFixedSize(22, 22)
+        b.setToolTip("复制")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(lambda: self._copy_clicked(b))
+        return b
+
     # ─────────────────────────────────────────
     # 数据
     # ─────────────────────────────────────────
     def show_for(self, vm, running: bool) -> None:
         """填充内容（不显示，由调用方决定何时 show）"""
         from core.vm.cloudinit import DEFAULT_PASSWORD
+
+        self._reset_copy_icons()
+        self._current_vm = vm
 
         spec = vm.spec
         domain = vm_dns.vm_domain(spec.name)
@@ -185,14 +224,19 @@ class VMInfoCard(QFrame):
             v.setText(val)
 
         # SSH 命令
-        self.lbl_cmd1.setText("ssh " + domain)
+        self._cmd1_text = "ssh " + domain
+        self.lbl_cmd1.setText(self._cmd1_text)
         if vm.ssh_port:
-            self.lbl_cmd2.setText(
+            self._cmd2_text = (
                 "ssh -p %d %s@127.0.0.1" % (vm.ssh_port, spec.username)
             )
+            self.lbl_cmd2.setText(self._cmd2_text)
             self.lbl_cmd2.show()
+            self.btn_copy2.show()
         else:
+            self._cmd2_text = ""
             self.lbl_cmd2.hide()
+            self.btn_copy2.hide()
 
         # 端口转发（排除 SSH）
         others = [f for f in spec.forwards if f.guest_port != 22]
@@ -206,36 +250,102 @@ class VMInfoCard(QFrame):
             self._ports_wrap.show()
         else:
             self._ports_wrap.hide()
+
+        # 未运行提示
+        if not running:
+            self.lbl_hint.setText("未运行 · 启动后即可连接")
+            self.lbl_hint.show()
+        else:
+            self.lbl_hint.hide()
+
         self.adjustSize()
 
-    def show_at_row(self, global_x: int, global_y: int, row_height: int) -> None:
-        """在指定位置显示（行的右侧、垂直居中）
+    # ─────────────────────────────────────────
+    # 复制
+    # ─────────────────────────────────────────
+    def _copy_clicked(self, btn: QToolButton) -> None:
+        """复制对应命令，按钮变绿勾"""
+        text = (
+            self._cmd1_text if btn is self.btn_copy1 else self._cmd2_text
+        )
+        if not text:
+            return
 
-        位置固定：悬停期间不跟鼠标移动，避免「追着跑」的躁动感。
-        """
+        QGuiApplication.clipboard().setText(text)
+
+        # 变绿勾
+        btn.setIcon(icon("check", 14, danger=False))
+        btn.setStyleSheet(f"QToolButton {{ color: {RUNNING_COLOR}; }}")
+        btn.setToolTip("已复制")
+
+        self._feedback_timer.start(COPY_FEEDBACK_MS)
+
+    def _reset_copy_icons(self) -> None:
+        """复制按钮回灰色复制图标"""
+        self._feedback_timer.stop()
+        for b in (getattr(self, "btn_copy1", None),
+                  getattr(self, "btn_copy2", None)):
+            if b is None:
+                continue
+            b.setIcon(icon("copy", 14))
+            b.setStyleSheet("")
+            b.setToolTip("复制")
+
+    # ─────────────────────────────────────────
+    # 显示 / 隐藏
+    # ─────────────────────────────────────────
+    def show_near(self, global_x: int, global_y: int) -> None:
+        """贴近鼠标显示（右下 8px 偏移，越界翻转）"""
         self.adjustSize()
 
-        # 行右侧 12px，垂直居中
-        x = global_x + 12
-        y = global_y + (row_height - self.height()) // 2
+        x = global_x + 8
+        y = global_y + 8
 
-        # 底部越界时往上抬
         screen = self.screen().availableGeometry()
-        if y + self.height() > screen.bottom():
-            y = screen.bottom() - self.height() - 4
-        # 右侧越界时贴右边
         if x + self.width() > screen.right():
-            x = screen.right() - self.width() - 4
+            x = global_x - self.width() - 8
+        if y + self.height() > screen.bottom():
+            y = global_y - self.height() - 8
+        # 兜底：翻完还越界就贴边
+        x = max(screen.left() + 4, min(x, screen.right() - self.width() - 4))
+        y = max(screen.top() + 4, min(y, screen.bottom() - self.height() - 4))
 
         self.move(x, y)
-
         if not self.isVisible():
             self.show()
 
-        # 悬停 6 秒不动自动收起（同 tooltip 行为）
-        self._auto_hide.start(6000)
+        self._auto_hide.start(AUTO_HIDE_MS)
 
     def hide_card(self) -> None:
         self._auto_hide.stop()
         if self.isVisible():
             self.hide()
+
+    # ─────────────────────────────────────────
+    # hover 状态（供列表页判断「鼠标是否在卡片上」）
+    # ─────────────────────────────────────────
+    hovered = False
+
+    def enterEvent(self, e) -> None:
+        """鼠标进入卡片：标记 + 停掉自动消失"""
+        self.hovered = True
+        self._auto_hide.stop()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        """鼠标离开卡片：清除标记；表格那边若也已离开就收起"""
+        self.hovered = False
+        self._auto_hide.start(3000)
+        super().leaveEvent(e)
+
+    def event(self, ev) -> bool:
+        # HoverEnter/HoverLeave 与 enter/leaveEvent 等价，
+        # 但 ToolTip 窗口有时只发 Hover 事件，两边都接住
+        t = ev.type()
+        if t == ev.Type.HoverEnter:
+            self.hovered = True
+            self._auto_hide.stop()
+        elif t == ev.Type.HoverLeave:
+            self.hovered = False
+            self._auto_hide.start(3000)
+        return super().event(ev)
