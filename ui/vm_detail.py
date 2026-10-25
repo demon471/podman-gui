@@ -2,7 +2,11 @@
 
 参照 KDE 的标签页式属性对话框（如 Dolphin 属性、Plasma 系统设置）：
 - 顶部信息区（名称、状态、系统信息）
-- 标签页：概览 / 端口 / 共享 / 内存 / 控制台
+- 标签页：概览 / 文件 / 共享目录 / 控制台
+- 底部动作栏：重启 / SSH 登录 / 更多
+
+端口转发不再单开标签页——列表页已有端口列，
+详情里并进概览页做只读展示，减少一层点击。
 """
 
 from __future__ import annotations
@@ -13,20 +17,18 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -103,21 +105,62 @@ class VMDetailDialog(QDialog):
         # ── 标签页 ──
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_overview(), "概览")
-        self.tabs.addTab(self._build_ports(), "端口转发")
+        self.tabs.addTab(self._build_files(), "文件")
         self.tabs.addTab(self._build_shares(), "共享目录")
         self.tabs.addTab(self._build_console(), "控制台")
         v.addWidget(self.tabs, 1)
 
-        # ── 底部 ──
+        # ── 底部动作栏 ──
         bar = QHBoxLayout()
+        bar.setSpacing(6)
+
         self.lbl_status = QLabel("")
         self.lbl_status.setObjectName("hintLabel")
         bar.addWidget(self.lbl_status, 1)
 
+        # 启停（VM 未运行时显示「启动」，运行中显示「停止」）
+        self.btn_toggle = QPushButton("启动")
+        self.btn_toggle.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
+        self.btn_toggle.clicked.connect(self._toggle_power)
+        bar.addWidget(self.btn_toggle)
+
+        self.btn_restart = QPushButton("重启")
+        self.btn_restart.setIcon(icon("restart", ICON_SIZE_BUTTON.width()))
+        self.btn_restart.setToolTip("先停止再启动虚拟机")
+        self.btn_restart.clicked.connect(self._restart)
+        bar.addWidget(self.btn_restart)
+
         self.btn_ssh = QPushButton("SSH 登录")
         self.btn_ssh.setIcon(icon("terminal", ICON_SIZE_BUTTON.width()))
+        self.btn_ssh.setToolTip("复制 SSH 命令到剪贴板")
         self.btn_ssh.clicked.connect(self._copy_ssh)
         bar.addWidget(self.btn_ssh)
+
+        # 「更多」：把不常用操作收进菜单，保持底部清爽
+        self.btn_more = QPushButton("更多")
+        self.btn_more.setIcon(icon("more", ICON_SIZE_BUTTON.width()))
+
+        menu = QMenu(self)
+        menu.addAction(
+            icon("terminal"), "打开终端（外部）",
+            self._open_ssh_terminal,
+        )
+        menu.addAction(
+            icon("edit"), "重命名…", self._rename_vm,
+        )
+        menu.addSeparator()
+        menu.addAction(
+            icon("folder"), "打开 VM 数据目录", self._open_data_dir,
+        )
+        menu.addAction(
+            icon("copy"), "复制 VM 名称", self._copy_name,
+        )
+        menu.addSeparator()
+        menu.addAction(
+            icon("delete", danger=True), "删除虚拟机…", self._delete_vm,
+        )
+        self.btn_more.setMenu(menu)
+        bar.addWidget(self.btn_more)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
@@ -126,6 +169,11 @@ class VMDetailDialog(QDialog):
         bar.addWidget(btns)
 
         v.addLayout(bar)
+
+        # 文件面板的状态栏信息接到 lbl_status
+        # （此处在底部栏之后，lbl_status 已存在）
+        if hasattr(self, "file_panel"):
+            self.file_panel.status.connect(self.lbl_status.setText)
 
     # ── 概览 ──
     def _build_overview(self) -> QWidget:
@@ -156,6 +204,32 @@ class VMDetailDialog(QDialog):
         f2.addRow("guest 系统", self.lbl_host)
         v.addWidget(g2)
 
+        # 端口转发（只读展示，原独立的「端口转发」标签页）
+        #
+        # 为什么并进概览而不是单开一页：
+        # 端口是「看一眼地址」的信息，不需要重交互。
+        # 列表页已有端口列，这里给出完整访问地址即可。
+        self.g_ports = QGroupBox("端口转发")
+        f3 = QFormLayout(self.g_ports)
+        f3.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f3.setSpacing(8)
+
+        self.lbl_ports = QLabel("-")
+        self.lbl_ports.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.lbl_ports.setWordWrap(True)
+        f3.addRow("映射", self.lbl_ports)
+
+        self.lbl_access = QLabel("-")
+        self.lbl_access.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.lbl_access.setWordWrap(True)
+        f3.addRow("访问地址", self.lbl_access)
+
+        v.addWidget(self.g_ports)
+
         row = QHBoxLayout()
         self.btn_refresh_sys = QPushButton("读取 guest 信息")
         self.btn_refresh_sys.clicked.connect(self._load_guest_info)
@@ -166,71 +240,18 @@ class VMDetailDialog(QDialog):
 
         return w
 
-    # ── 端口 ──
-    def _build_ports(self) -> QWidget:
+    # ── 文件 ──
+    def _build_files(self) -> QWidget:
+        """VM 内文件浏览（SFTP，走已有 SSH 通道，零配置）"""
+        from ui.vm_files import FilePanel
+
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(10, 12, 10, 10)
-        v.setSpacing(8)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
-        hint = QLabel(
-            "端口转发把宿主机端口映射到 VM 端口。\n"
-            f"访问方式：http://127.0.0.1:<宿主机端口> 或 "
-            f"http://{vm_dns.vm_domain(self.vm.spec.name)}:<宿主机端口>"
-            "（域名需一次性配置，见设置页）。\n"
-            "修改端口后需重启虚拟机生效。"
-        )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-
-        self.tbl_ports = QTableWidget(0, 4)
-        self.tbl_ports.setHorizontalHeaderLabels(
-            ["宿主机", "VM 端口", "协议", "访问地址"]
-        )
-        self.tbl_ports.verticalHeader().setVisible(False)
-        self.tbl_ports.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.tbl_ports.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
-        )
-        self.tbl_ports.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.tbl_ports.setAlternatingRowColors(True)
-        self.tbl_ports.horizontalHeader().setStretchLastSection(True)
-        v.addWidget(self.tbl_ports, 1)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("宿主机端口"))
-        self.sp_host_port = QSpinBox()
-        self.sp_host_port.setRange(1, 65535)
-        self.sp_host_port.setValue(8080)
-        row.addWidget(self.sp_host_port)
-
-        row.addWidget(QLabel("→ VM"))
-        self.sp_guest_port = QSpinBox()
-        self.sp_guest_port.setRange(1, 65535)
-        self.sp_guest_port.setValue(8080)
-        row.addWidget(self.sp_guest_port)
-
-        self.cmb_proto = QComboBox()
-        self.cmb_proto.addItems(["tcp", "udp"])
-        row.addWidget(self.cmb_proto)
-
-        btn_add = QPushButton("添加")
-        btn_add.setIcon(icon("add", ICON_SIZE_BUTTON.width()))
-        btn_add.clicked.connect(self._add_port)
-        row.addWidget(btn_add)
-
-        btn_del = QPushButton("删除")
-        btn_del.setIcon(icon("delete", ICON_SIZE_BUTTON.width(), danger=True))
-        btn_del.clicked.connect(self._del_port)
-        row.addWidget(btn_del)
-
-        row.addStretch()
-        v.addLayout(row)
+        self.file_panel = FilePanel(self.vm, self)
+        v.addWidget(self.file_panel)
 
         return w
 
@@ -490,11 +511,19 @@ class VMDetailDialog(QDialog):
         else:
             self.lbl_uptime.setText("-")
 
-        # 表格
+        # 端口（标签形式）
         self._fill_ports()
+
+        # 共享目录
         self._fill_shares()
 
+        # 底部按钮状态
         self.btn_ssh.setEnabled(running)
+        self.btn_restart.setEnabled(running)
+        self.btn_toggle.setText("停止" if running else "启动")
+        self.btn_toggle.setIcon(
+            icon("stop" if running else "play", ICON_SIZE_BUTTON.width())
+        )
 
     def _tick(self) -> None:
         if not self.isVisible():
@@ -503,27 +532,37 @@ class VMDetailDialog(QDialog):
 
 
     def _fill_ports(self) -> None:
+        """端口转发 —— 文本标签形式（原表格版改为只读摘要）"""
         forwards = self.vm.spec.forwards
-        self.tbl_ports.setRowCount(len(forwards))
 
-        for i, f in enumerate(forwards):
-            self.tbl_ports.setItem(i, 0, QTableWidgetItem(f"{f.host_addr}:{f.host_port}"))
-            self.tbl_ports.setItem(i, 1, QTableWidgetItem(str(f.guest_port)))
-            self.tbl_ports.setItem(i, 2, QTableWidgetItem(f.protocol))
+        if not forwards:
+            self.lbl_ports.setText("无")
+            self.lbl_access.setText("-")
+            return
 
-            # 访问地址
+        # 映射关系
+        self.lbl_ports.setText(
+            "\n".join(
+                f"127.0.0.1:{f.host_port}  →  VM:{f.guest_port} "
+                f"({f.protocol})"
+                for f in forwards
+            )
+        )
+
+        # 访问地址
+        domain = vm_dns.vm_domain(self.vm.spec.name)
+        addrs = []
+        for f in forwards:
             if f.guest_port == 22:
-                # 域名方式（~/.ssh/config 已自动映射端口，无需 -p）
-                addr = f"ssh {vm_dns.vm_domain(self.vm.spec.name)}"
+                addrs.append(f"ssh {domain}")
             elif f.guest_port == 443:
-                addr = f"https://127.0.0.1:{f.host_port}"
+                addrs.append("https://" + domain + ":" + str(f.host_port))
+            elif f.guest_port == 80:
+                addrs.append("http://" + domain + ":" + str(f.host_port))
             else:
-                addr = f"http://127.0.0.1:{f.host_port} / http://{vm_network.vm_domain(self.vm.spec.name)}:{f.host_port}"
-            self.tbl_ports.setItem(i, 3, QTableWidgetItem(addr))
+                addrs.append(domain + ":" + str(f.host_port))
 
-        hdr = self.tbl_ports.horizontalHeader()
-        for c in range(3):
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.lbl_access.setText("\n".join(addrs))
 
     def _fill_shares(self) -> None:
         shares = self.vm.spec.shares
@@ -592,54 +631,6 @@ class VMDetailDialog(QDialog):
         QGuiApplication.clipboard().setText(cmd)
         self.lbl_status.setText(f"已复制到剪贴板：{cmd}")
 
-    def _add_port(self) -> None:
-        hp = self.sp_host_port.value()
-        gp = self.sp_guest_port.value()
-        proto = self.cmb_proto.currentText()
-
-        def work():
-            return vm_manager.add_forward(self.vm, hp, gp, proto)
-
-        def done(res):
-            ok, err = res
-            if not ok:
-                QMessageBox.warning(self, "添加失败", err)
-                return
-            self.refresh()
-            self.lbl_status.setText(
-                f"已添加 {hp} → VM:{gp}，重启虚拟机后生效"
-            )
-
-        self._spawn(work, done, lambda m: QMessageBox.warning(self, "失败", m))
-
-    def _del_port(self) -> None:
-        row = self.tbl_ports.currentRow()
-        if row < 0 or row >= len(self.vm.spec.forwards):
-            return
-        f = self.vm.spec.forwards[row]
-
-        if f.guest_port == 22:
-            QMessageBox.information(
-                self, "无法删除",
-                "SSH 端口是虚拟机管理的必需项，不能删除。",
-            )
-            return
-
-        if QMessageBox.question(
-            self, "确认删除",
-            f"确定删除端口转发 {f.host_addr}:{f.host_port} → VM:{f.guest_port} 吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
-            return
-
-        ok, err = vm_manager.remove_forward(self.vm, f.host_port)
-        if not ok:
-            QMessageBox.warning(self, "删除失败", err)
-            return
-        self.refresh()
-        self.lbl_status.setText("已删除，重启虚拟机后生效")
-
     def _add_share(self) -> None:
         path = self.ed_share_path.text().strip()
         tag = self.ed_share_tag.text().strip()
@@ -678,6 +669,236 @@ class VMDetailDialog(QDialog):
         self.refresh()
         self.lbl_status.setText("已删除，重启虚拟机后生效")
 
+
+    # ─────────────────────────────────────────
+    # 底部动作
+    # ─────────────────────────────────────────
+    def _toggle_power(self) -> None:
+        """启动 / 停止"""
+        if self.vm.running:
+            self._do_stop()
+        else:
+            self._do_start()
+
+    def _do_start(self) -> None:
+        self._set_busy(True)
+        self.lbl_status.setText("正在启动…")
+
+        def work():
+            return vm_manager.start_vm(self.vm)
+
+        def done(res):
+            self._set_busy(False)
+            ok, err = res
+            if ok:
+                self.lbl_status.setText("已启动")
+                notifier().info("虚拟机已启动", self.vm.spec.name)
+            else:
+                self.lbl_status.setText("启动失败: " + str(err))
+                QMessageBox.warning(self, "启动失败", str(err))
+            self.refresh()
+
+        self._spawn(work, done, self._op_error)
+
+    def _do_stop(self) -> None:
+        r = QMessageBox.question(
+            self, "确认停止",
+            "停止虚拟机「{self.vm.spec.name}」？\n\n"
+            "guest 内未保存的数据会丢失。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_busy(True)
+        self.lbl_status.setText("正在停止…")
+
+        def work():
+            return vm_manager.stop_vm(self.vm)
+
+        def done(res):
+            self._set_busy(False)
+            ok, err = res
+            self.lbl_status.setText("已停止" if ok else "停止失败: " + str(err))
+            self.refresh()
+
+        self._spawn(work, done, self._op_error)
+
+    def _restart(self) -> None:
+        """重启：先停止再启动"""
+        r = QMessageBox.question(
+            self, "确认重启",
+            "重启虚拟机「{self.vm.spec.name}」？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_busy(True)
+        self.lbl_status.setText("正在重启…")
+
+        def work():
+            ok, err = vm_manager.stop_vm(self.vm)
+            if not ok:
+                return False, "停止失败: " + str(err)
+            ok, err = vm_manager.start_vm(self.vm)
+            if not ok:
+                return False, "启动失败: " + str(err)
+            return True, ""
+
+        def done(res):
+            self._set_busy(False)
+            ok, err = res
+            if ok:
+                self.lbl_status.setText("已重启")
+                notifier().info("虚拟机已重启", self.vm.spec.name)
+            else:
+                self.lbl_status.setText(str(err))
+                QMessageBox.warning(self, "重启失败", str(err))
+            self.refresh()
+
+        self._spawn(work, done, self._op_error)
+
+    def _open_ssh_terminal(self) -> None:
+        """用外部终端打开 SSH 会话"""
+        if not self.vm.running:
+            QMessageBox.information(self, "未运行", "请先启动虚拟机。")
+            return
+
+        cmd = self.vm.ssh_command()
+
+        # 依次尝试常见终端（KDE 环境优先 konsole）
+        import shutil
+
+        for term, args in (
+            ("konsole", ["-e", "bash", "-lc"]),
+            ("x-terminal-emulator", ["-e"]),
+            ("gnome-terminal", ["--"]),
+            ("kitty", []),
+            ("alacritty", ["-e"]),
+            ("foot", []),
+        ):
+            path = shutil.which(term)
+            if not path:
+                continue
+            try:
+                subprocess.Popen([path, *args, cmd], start_new_session=True)
+                self.lbl_status.setText("已在终端中打开：" + cmd)
+                return
+            except OSError:
+                continue
+
+        QMessageBox.information(
+            self, "未找到终端",
+            "没有找到可用的终端模拟器。\n\n可手动执行：\n" + cmd,
+        )
+
+    def _open_data_dir(self) -> None:
+        """在文件管理器中打开 VM 数据目录"""
+        import shutil
+
+        path = str(self.vm.dir)
+        for opener in ("dolphin", "nautilus", "thunar", "xdg-open"):
+            exe = shutil.which(opener)
+            if not exe:
+                continue
+            try:
+                subprocess.Popen([exe, path], start_new_session=True)
+                self.lbl_status.setText("已打开 " + path)
+                return
+            except OSError:
+                continue
+
+        QGuiApplication.clipboard().setText(path)
+        self.lbl_status.setText("已复制数据目录路径到剪贴板")
+
+    def _copy_name(self) -> None:
+        QGuiApplication.clipboard().setText(self.vm.spec.name)
+        self.lbl_status.setText("已复制名称")
+
+    def _rename_vm(self) -> None:
+        """重命名虚拟机（目录 + 配置 + SSH 配置同步）"""
+        if self.vm.running:
+            QMessageBox.information(
+                self, "无法重命名", "请先停止虚拟机再重命名。"
+            )
+            return
+
+        new, ok = QInputDialog.getText(
+            self, "重命名虚拟机", "新名称：", text=self.vm.spec.name
+        )
+        if not ok:
+            return
+
+        new = (new or "").strip()
+        if not new or new == self.vm.spec.name:
+            return
+
+        ok2, err = vm_manager.rename_vm(self.vm, new)
+        if not ok2:
+            QMessageBox.warning(self, "重命名失败", err)
+            return
+
+        notifier().info("虚拟机已重命名", new)
+        self.setWindowTitle("虚拟机 - " + new)
+        self.lbl_name.setText(new)
+        self.lbl_status.setText("已重命名为 " + new)
+        self.refresh()
+
+    def _delete_vm(self) -> None:
+        """删除虚拟机（二次确认：先确认，再输入名称）"""
+        name = self.vm.spec.name
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("删除虚拟机")
+        box.setText("确定删除虚拟机「" + name + "」？")
+        box.setInformativeText(
+            "将删除虚拟机配置与磁盘数据，此操作不可撤销。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText("删除")
+        box.button(QMessageBox.StandardButton.No).setText("取消")
+
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        # 二次确认：输入名称，防止误删
+        typed, ok = QInputDialog.getText(
+            self, "再次确认",
+            "请输入虚拟机名称「" + name + "」以确认删除：",
+        )
+        if not ok or (typed or "").strip() != name:
+            self.lbl_status.setText("名称不匹配，已取消")
+            return
+
+        def work():
+            return vm_manager.delete_vm(self.vm)
+
+        def done(res):
+            ok2, err = res
+            if ok2:
+                notifier().info("虚拟机已删除", name)
+                self.accept()
+            else:
+                QMessageBox.warning(self, "删除失败", err)
+
+        self._set_busy(True)
+        self._spawn(work, done, self._op_error)
+
+    def _op_error(self, msg: str) -> None:
+        self._set_busy(False)
+        self.lbl_status.setText("操作失败: " + str(msg))
+
+    def _set_busy(self, busy: bool) -> None:
+        for b in (self.btn_toggle, self.btn_restart, self.btn_ssh,
+                  self.btn_more):
+            b.setEnabled(not busy)
 
     def _spawn(self, work, done, error) -> None:
         task = run_async(work, on_done=done, on_error=error, parent=self)

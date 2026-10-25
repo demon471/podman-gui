@@ -508,12 +508,14 @@ QStatusBar QLabel {{
 }}
 
 /* ═══════════ 提示框 ═══════════ */
+/* 内边距给足，因为悬停提示含多行键值对与分隔线 */
 QToolTip {{
     background-color: {base};
     color: {text};
     border: 1px solid {border};
-    border-radius: 3px;
-    padding: 3px 6px;
+    border-radius: 4px;
+    padding: 6px 9px;
+    margin: 0px;
 }}
 
 /* ═══════════ 进度条 ═══════════ */

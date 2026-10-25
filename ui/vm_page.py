@@ -126,6 +126,12 @@ class VMPage(QWidget):
         self.act_ssh.triggered.connect(self._open_ssh)
         tb.addAction(self.act_ssh)
 
+        self.act_more = QAction(icon("more"), "更多", self)
+        self.act_more.setProperty("iconName", "more")
+        self.act_more.setToolTip("打开虚拟机管理台（详情、文件、端口、控制台）")
+        self.act_more.triggered.connect(self._open_detail)
+        tb.addAction(self.act_more)
+
         self.act_purge = QAction(icon("delete", danger=True), "清空所有", self)
         self.act_purge.setProperty("iconName", "delete")
         self.act_purge.setToolTip(
@@ -179,12 +185,19 @@ class VMPage(QWidget):
         hdr.setFixedHeight(26)
         hdr.setHighlightSections(False)
         hdr.setStretchLastSection(False)
-        for i in range(len(self.COLUMNS)):
-            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-        # 名称列拉伸占满剩余空间，其它列按内容宽度
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(3, 110)
+
+        # 列宽策略（与容器页一致）：
+        #   名称   固定窄，多数 VM 名很短，不占空间
+        #   状态   按内容（「运行中」+ 图标）
+        #   SSH    拉伸占满剩余 —— 域名长度不一，给它弹性空间
+        #   端口   按内容
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(0, 140)   # 名称
+        self.table.setColumnWidth(1, 96)    # 状态
+        self.table.setColumnWidth(3, 200)   # 端口转发
 
         # 空状态叠加
         self._table_stack = QStackedLayout()
@@ -266,12 +279,22 @@ class VMPage(QWidget):
             # 列 2：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
             c2 = QStandardItem(vm_dns.vm_domain(name))
 
-            # 列 3：端口转发摘要（只列非 SSH 的，避免和 SSH 列重复）
+            # 列 3：端口转发（只列非 SSH 的，避免和 SSH 列重复）
+            #     显示「宿主:guest」，多了才省略
             others = [f for f in vm.spec.forwards if f.guest_port != 22]
             if others:
-                c3 = QStandardItem(
-                    "、".join(f"{f.host_port}" for f in others)
-                )
+                if len(others) <= 2:
+                    c3 = QStandardItem(
+                        "  ".join(
+                            f"{f.host_port}→{f.guest_port}"
+                            for f in others
+                        )
+                    )
+                else:
+                    c3 = QStandardItem(
+                        f"{others[0].host_port}→{others[0].guest_port} "
+                        f"等 {len(others)} 项"
+                    )
             else:
                 c3 = QStandardItem("—")
 
@@ -312,38 +335,85 @@ class VMPage(QWidget):
         self._update_actions()
 
     def _vm_tooltip(self, vm, running: bool) -> str:
-        """生成行悬停提示：账户、密码、SSH、端口
+        """行悬停提示（HTML 卡片式）
 
-        默认密码来自 cloudinit.DEFAULT_PASSWORD，
-        用户改过后这里不会同步（无法从宿主机读取 guest 密码），
-        所以标注「初始密码」避免误导。
+        纯文本换行拼接在 Qt 里会渲染成等宽单色块，键值对不齐、
+        层次不清。改用 HTML 表格：左列标签固定宽度，视觉上对齐。
+
+        密码标注「初始密码」而非「密码」——用户改过后宿主机读不到
+        guest 内的真实密码，避免误导。
         """
         from core.vm.cloudinit import DEFAULT_PASSWORD
 
-        lines = [
-            f"虚拟机：{vm.spec.name}",
-            f"系  统：{vm.spec.image_key}",
-            "",
-            f"账  户：{vm.spec.username}",
-            f"初始密码：{DEFAULT_PASSWORD}",
-            "",
-            f"SSH：ssh {vm_dns.vm_domain(vm.spec.name)}",
-            f"      ssh -p {vm.ssh_port} {vm.spec.username}@127.0.0.1",
+        spec = vm.spec
+        domain = vm_dns.vm_domain(spec.name)
+
+        # ── 分隔线 ──
+        sep = ('<hr style="border:none;border-top:1px solid '
+               'rgba(128,128,128,0.3);margin:6px 0;">')
+
+        # ── 键值表 ──
+        rows = [
+            ("系统", spec.image_key),
+            ("账户", spec.username),
+            ("初始密码", DEFAULT_PASSWORD),
         ]
+        rows_html = "".join(
+            '<tr><td style="padding:1px 14px 1px 0;opacity:0.65;">%s</td>'
+            '<td style="padding:1px 0;">%s</td></tr>' % (k, v)
+            for k, v in rows
+        )
 
-        if vm.spec.forwards:
-            lines.append("")
-            lines.append("端口转发：")
-            for f in vm.spec.forwards:
-                lines.append(
-                    f"  127.0.0.1:{f.host_port} → 虚拟机:{f.guest_port}"
-                )
+        # ── SSH 命令 ──
+        ssh_lines = ["ssh " + domain]
+        if vm.ssh_port:
+            ssh_lines.append(
+                "ssh -p %d %s@127.0.0.1" % (vm.ssh_port, spec.username)
+            )
+        ssh_html = "<br>".join(
+            '<span style="font-family:monospace;">%s</span>' % line
+            for line in ssh_lines
+        )
 
+        # ── 端口转发（排除 SSH，避免与上面重复）──
+        others = [f for f in spec.forwards if f.guest_port != 22]
+        ports_html = ""
+        if others:
+            items = "<br>".join(
+                '<span style="font-family:monospace;">'
+                '127.0.0.1:%d &rarr; VM:%d</span>'
+                % (f.host_port, f.guest_port)
+                for f in others
+            )
+            ports_html = (
+                sep
+                + '<div style="opacity:0.65;margin-bottom:2px;">端口转发</div>'
+                + "<div>" + items + "</div>"
+            )
+
+        # ── 未运行提示 ──
+        stopped_html = ""
         if not running:
-            lines.append("")
-            lines.append("（未运行，启动后即可连接）")
+            stopped_html = (
+                '<div style="opacity:0.6;margin-top:6px;">'
+                '未运行 &middot; 启动后可连接</div>'
+            )
 
-        return "\n".join(lines)
+        return (
+            '<div style="white-space:nowrap;">'
+            '<div style="font-weight:600;margin-bottom:4px;">'
+            + spec.name
+            + '</div>'
+            '<table style="border-collapse:collapse;">'
+            + rows_html
+            + '</table>'
+            + sep
+            + '<div style="opacity:0.65;margin-bottom:2px;">SSH</div>'
+            + '<div>' + ssh_html + '</div>'
+            + ports_html
+            + stopped_html
+            + '</div>'
+        )
 
     def _on_filter(self, text: str) -> None:
         t = text.strip().lower()

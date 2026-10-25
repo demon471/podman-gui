@@ -12,5 +12,8 @@ PyYAML>=6.0,<7
 pyte>=0.8,<1
 pexpect>=4.9,<5
 
+# VM 文件浏览（core/vm/files.py 走 SFTP）
+paramiko>=3.4,<6
+
 # 打包
 pyinstaller>=6.0,<7

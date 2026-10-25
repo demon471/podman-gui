@@ -562,6 +562,67 @@ def remove_share(vm: VM, tag: str) -> tuple[bool, str]:
 # ─────────────────────────────────────────
 # 统计
 # ─────────────────────────────────────────
+def rename_vm(vm: VM, new_name: str) -> tuple[bool, str]:
+    """重命名虚拟机
+
+    需要同步四处，漏一处就会状态不一致：
+      1. 机器目录名 machines/<old> → machines/<new>
+      2. VMSpec.name 与 vm.json
+      3. SQLite 记录（主键是 name，得删旧插新）
+      4. ~/.ssh/config 里的标记段
+    """
+    import re
+    import shutil
+
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False, "名称不能为空"
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", new_name):
+        return False, "名称只能含字母、数字、点、下划线、短横线，且以字母或数字开头"
+
+    if new_name == vm.spec.name:
+        return True, ""
+
+    if name_taken(new_name):
+        return False, "名称「" + new_name + "」已被占用"
+
+    if vm.running:
+        return False, "请先停止虚拟机"
+
+    old_name = vm.spec.name
+    old_dir = vm.dir
+    new_dir = MACHINES_DIR / new_name
+
+    if new_dir.exists():
+        return False, "目录已存在: " + str(new_dir)
+
+    # 1) 目录改名
+    try:
+        old_dir.rename(new_dir)
+    except OSError as e:
+        return False, f"目录改名失败: {e}"
+
+    # 2) 配置
+    vm.spec.name = new_name
+    vm.spec.hostname = new_name        # hostname 跟随名称
+    new_vm = VM(spec=vm.spec, dir=new_dir)
+    new_vm.save()
+
+    # 3) SQLite：删旧行（新名字已由 save 插入）
+    try:
+        from core import state
+
+        state.delete_vm_row(old_name)
+    except Exception as e:
+        print(f"[vm] 清理旧 SQLite 记录失败: {e}")
+
+    # 4) SSH 配置
+    _sync_ssh_config()
+
+    return True, ""
+
+
 def disk_usage(vm: VM) -> int:
     """VM 磁盘实际占用（字节）"""
     total = 0

@@ -141,6 +141,33 @@ SVG = {
 <rect x="6" y="4.5" width="4" height="15" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
 <rect x="14" y="4.5" width="4" height="15" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
 </svg>""",
+
+    "file": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M14 3v5h5"/>
+</svg>""",
+    "upload": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 15.5V4M7.5 8.5L12 4l4.5 4.5"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+</svg>""",
+    "download": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v11.5M7.5 11L12 15.5 16.5 11"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+</svg>""",
+    "home": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 10.5L12 3.5l8.5 7"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M5.5 9.5V20h13V9.5"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M10 20v-5.5h4V20"/>
+</svg>""",
+    "more": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<circle cx="5.5" cy="12" r="1.8" fill="currentColor"/>
+<circle cx="12" cy="12" r="1.8" fill="currentColor"/>
+<circle cx="18.5" cy="12" r="1.8" fill="currentColor"/>
+</svg>""",
+    "copy": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 5.5v-1a2 2 0 0 0-2-2h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1"/>
+</svg>""",
 }
 
 # KDE 系统图标映射（优先使用）
@@ -172,6 +199,14 @@ KDE_ICON_MAP = {
     "folder": "folder",
     "up": "go-up",
     "down": "go-down",
+    "restart": "view-refresh",
+    # 文件浏览
+    "file": "text-x-generic",
+    "upload": "go-up",
+    "download": "go-down",
+    "home": "go-home",
+    "copy": "edit-copy",
+    "more": "overflow-menu",
 }
 
 # 主题色
