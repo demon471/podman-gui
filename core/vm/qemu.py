@@ -412,6 +412,47 @@ def uptime_seconds(vm_dir: Path) -> int:
 # ─────────────────────────────────────────
 # 启停
 # ─────────────────────────────────────────
+def _missing_backing_files(disk: Path) -> list[str]:
+    """检查 qcow2 backing 链，返回缺失的文件路径列表
+
+    VM 磁盘是 backing file 叠加：disk.qcow2 → shared/<img>.qcow2
+    → images/<img>.qcow2。任何一环被删都起不来，
+    提前在这里拦并给出人话提示。
+    """
+    import json as _json
+    import subprocess as _sp
+
+    qemu_img = shutil.which("qemu-img")
+    if not qemu_img:
+        return []
+
+    missing: list[str] = []
+    seen: set[str] = set()
+    cur = disk
+    while True:
+        try:
+            r = _sp.run(
+                [qemu_img, "info", "--output=json", str(cur)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode != 0:
+                break
+            info = _json.loads(r.stdout)
+        except Exception:
+            break
+
+        backing = info.get("backing-filename")
+        if not backing:
+            break
+        if backing not in seen:
+            seen.add(backing)
+            if not Path(backing).exists():
+                missing.append(backing)
+        cur = Path(backing)
+
+    return missing
+
+
 def start(spec: VMSpec, vm_dir: Path, *, vnc: int | None = None) -> tuple[bool, str]:
     """启动 VM
 
@@ -423,6 +464,19 @@ def start(spec: VMSpec, vm_dir: Path, *, vnc: int | None = None) -> tuple[bool, 
     disk = vm_dir / "disk.qcow2"
     if not disk.exists():
         return False, f"磁盘不存在: {disk}"
+
+    # 前置检查：qcow2 backing 链引用的原始镜像必须存在。
+    # 之前镜像缓存被清后所有引用它的 VM 都报裸的
+    # "Could not open backing file"——用户不知所云。
+    missing = _missing_backing_files(disk)
+    if missing:
+        names = "\n  ".join(missing)
+        return False, (
+            "虚拟机磁盘依赖的镜像文件缺失：\n"
+            f"  {names}\n\n"
+            "可能是镜像缓存被清理过。重新创建同名虚拟机即可"
+            "（会自动重新下载镜像，已写入磁盘的数据无法恢复）。"
+        )
 
     try:
         cmd = build_command(spec, vm_dir, headless=(vnc is None), vnc_display=vnc)
