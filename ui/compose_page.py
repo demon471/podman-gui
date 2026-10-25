@@ -420,19 +420,19 @@ class ComposePage(QWidget):
     # 根目录设置
     # ─────────────────────────────────────────
     def _load_root_setting(self) -> None:
-        from PyQt6.QtCore import QSettings
+        """读 Compose 根目录（存 SQLite）"""
+        from core import state
 
-        s = QSettings("podman-gui", "podman-gui")
-        root = s.value("compose/root", DEFAULT_COMPOSE_ROOT)
+        root = state.get_setting("compose/root", str(DEFAULT_COMPOSE_ROOT))
         if root and Path(str(root)).is_dir():
             self.root = Path(str(root))
             self.ed_root.setText(str(self.root))
 
     def _save_root_setting(self) -> None:
-        from PyQt6.QtCore import QSettings
+        """保存 Compose 根目录（存 SQLite）"""
+        from core import state
 
-        s = QSettings("podman-gui", "podman-gui")
-        s.setValue("compose/root", str(self.root))
+        state.set_setting("compose/root", str(self.root))
 
     def _browse_root(self) -> None:
         d = QFileDialog.getExistingDirectory(

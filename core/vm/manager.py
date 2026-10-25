@@ -172,44 +172,87 @@ class VM:
 
     # ── 持久化 ──
     def save(self) -> None:
+        """保存配置：SQLite 为主，vm.json 同步写一份兼容旧版本"""
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.config_file.write_text(
-            json.dumps(self.spec.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+
+        data = self.spec.to_dict()
+
+        # SQLite（主存储）
+        try:
+            from core import state
+
+            state.save_vm(data)
+        except Exception as e:
+            print(f"[vm] 写入 SQLite 失败，回退 json: {e}")
+
+        # json（兼容 + 便于人工查看/迁移）
+        try:
+            self.config_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def delete_files(self) -> tuple[bool, str]:
-        """删除整个 VM 目录"""
+        """删除整个 VM 目录（含 SQLite 记录）"""
         if self.running:
             return False, "请先停止虚拟机"
         try:
             shutil.rmtree(self.dir)
-            return True, ""
         except OSError as e:
             return False, str(e)
+
+        try:
+            from core import state
+
+            state.delete_vm_row(self.spec.name)
+        except Exception as e:
+            print(f"[vm] 删除 SQLite 记录失败: {e}")
+
+        return True, ""
 
 
 # ─────────────────────────────────────────
 # 加载
 # ─────────────────────────────────────────
 def load_all() -> list[VM]:
-    """加载所有 VM"""
-    if not MACHINES_DIR.exists():
-        return []
+    """加载所有 VM
 
-    out = []
-    for d in sorted(MACHINES_DIR.iterdir()):
-        if not d.is_dir():
-            continue
-        cfg = d / "vm.json"
-        if not cfg.exists():
-            continue
-        try:
-            data = json.loads(cfg.read_text(encoding="utf-8"))
-            out.append(VM(spec=qemu.VMSpec.from_dict(data), dir=d))
-        except (json.JSONDecodeError, KeyError, OSError):
-            continue
-    return out
+    SQLite 为主，目录里的 vm.json 作补充（兼容迁移前的数据）。
+    两边都有的以 SQLite 为准（内容更新）。
+    """
+    out: dict[str, VM] = {}
+
+    # 1. SQLite
+    try:
+        from core import state
+
+        for data in state.load_all_vms():
+            d = MACHINES_DIR / data["name"]
+            out[data["name"]] = VM(
+                spec=qemu.VMSpec.from_dict(data), dir=d
+            )
+    except Exception as e:
+        print(f"[vm] 读取 SQLite 失败: {e}")
+
+    # 2. vm.json 补充（SQLite 里没有的）
+    if MACHINES_DIR.exists():
+        for d in sorted(MACHINES_DIR.iterdir()):
+            if not d.is_dir() or d.name in out:
+                continue
+            cfg = d / "vm.json"
+            if not cfg.exists():
+                continue
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                out[data["name"]] = VM(
+                    spec=qemu.VMSpec.from_dict(data), dir=d
+                )
+            except (json.JSONDecodeError, KeyError, OSError):
+                continue
+
+    return [out[k] for k in sorted(out)]
 
 
 def load(name: str) -> VM | None:

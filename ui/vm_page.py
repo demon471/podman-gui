@@ -69,7 +69,7 @@ class VMPage(QWidget):
     # 请求主窗口打开外部终端执行 SSH 命令
     request_terminal = pyqtSignal(object)
 
-    COLUMNS = ["名称", "状态", "SSH 地址"]
+    COLUMNS = ["名称", "状态", "SSH 地址", "端口转发"]
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -183,6 +183,8 @@ class VMPage(QWidget):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         # 名称列拉伸占满剩余空间，其它列按内容宽度
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(3, 110)
 
         # 空状态叠加
         self._table_stack = QStackedLayout()
@@ -264,10 +266,24 @@ class VMPage(QWidget):
             # 列 2：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
             c2 = QStandardItem(vm_dns.vm_domain(name))
 
-            for it in (c0, c1, c2):
+            # 列 3：端口转发摘要（只列非 SSH 的，避免和 SSH 列重复）
+            others = [f for f in vm.spec.forwards if f.guest_port != 22]
+            if others:
+                c3 = QStandardItem(
+                    "、".join(f"{f.host_port}" for f in others)
+                )
+            else:
+                c3 = QStandardItem("—")
+
+            for it in (c0, c1, c2, c3):
                 it.setEditable(False)
 
-            self.model.appendRow([c0, c1, c2])
+            # 悬停提示：默认账户、密码、SSH、端口
+            tip = self._vm_tooltip(vm, running)
+            for it in (c0, c1, c2, c3):
+                it.setToolTip(tip)
+
+            self.model.appendRow([c0, c1, c2, c3])
 
         # 恢复选中
         if selected:
@@ -294,6 +310,40 @@ class VMPage(QWidget):
             self.lbl_stats.setText(f"共 {len(self._vms)} 台虚拟机")
 
         self._update_actions()
+
+    def _vm_tooltip(self, vm, running: bool) -> str:
+        """生成行悬停提示：账户、密码、SSH、端口
+
+        默认密码来自 cloudinit.DEFAULT_PASSWORD，
+        用户改过后这里不会同步（无法从宿主机读取 guest 密码），
+        所以标注「初始密码」避免误导。
+        """
+        from core.vm.cloudinit import DEFAULT_PASSWORD
+
+        lines = [
+            f"虚拟机：{vm.spec.name}",
+            f"系  统：{vm.spec.image_key}",
+            "",
+            f"账  户：{vm.spec.username}",
+            f"初始密码：{DEFAULT_PASSWORD}",
+            "",
+            f"SSH：ssh {vm_dns.vm_domain(vm.spec.name)}",
+            f"      ssh -p {vm.ssh_port} {vm.spec.username}@127.0.0.1",
+        ]
+
+        if vm.spec.forwards:
+            lines.append("")
+            lines.append("端口转发：")
+            for f in vm.spec.forwards:
+                lines.append(
+                    f"  127.0.0.1:{f.host_port} → 虚拟机:{f.guest_port}"
+                )
+
+        if not running:
+            lines.append("")
+            lines.append("（未运行，启动后即可连接）")
+
+        return "\n".join(lines)
 
     def _on_filter(self, text: str) -> None:
         t = text.strip().lower()

@@ -119,11 +119,6 @@ class VMDetailDialog(QDialog):
         self.btn_ssh.clicked.connect(self._copy_ssh)
         bar.addWidget(self.btn_ssh)
 
-        self.btn_reclaim = QPushButton("回收内存")
-        self.btn_reclaim.setIcon(icon("clean", ICON_SIZE_BUTTON.width()))
-        self.btn_reclaim.clicked.connect(self._reclaim)
-        bar.addWidget(self.btn_reclaim)
-
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
         btns.rejected.connect(self.reject)
@@ -297,23 +292,88 @@ class VMDetailDialog(QDialog):
 
     # ── 控制台 ──
     def _build_console(self) -> QWidget:
+        """控制台：串口日志 + 账户密码管理"""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(10, 12, 10, 10)
         v.setSpacing(8)
 
-        hint = QLabel(
-            "QEMU 串口控制台输出（只读）。VM 启动过程的日志会显示在这里，"
+        # ── 账户 ──
+        g1 = QGroupBox("账户")
+        f1 = QFormLayout(g1)
+        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f1.setSpacing(8)
+
+        self.lbl_account = QLabel(self.vm.spec.username)
+        self.lbl_account.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        f1.addRow("用户名", self.lbl_account)
+
+        v.addWidget(g1)
+
+        # ── 修改密码 ──
+        g2 = QGroupBox("修改密码")
+        f2 = QFormLayout(g2)
+        f2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f2.setSpacing(8)
+
+        self.ed_old_pwd = QLineEdit()
+        self.ed_old_pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ed_old_pwd.setPlaceholderText("当前密码")
+        f2.addRow("当前密码", self.ed_old_pwd)
+
+        self.ed_new_pwd = QLineEdit()
+        self.ed_new_pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ed_new_pwd.setPlaceholderText("新密码")
+        f2.addRow("新密码", self.ed_new_pwd)
+
+        self.ed_new_pwd2 = QLineEdit()
+        self.ed_new_pwd2.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ed_new_pwd2.setPlaceholderText("再输一次")
+        f2.addRow("确认密码", self.ed_new_pwd2)
+
+        btn_row = QHBoxLayout()
+        self.btn_chpwd = QPushButton("修改密码")
+        self.btn_chpwd.setIcon(icon("save", ICON_SIZE_BUTTON.width()))
+        self.btn_chpwd.clicked.connect(self._change_password)
+        btn_row.addWidget(self.btn_chpwd)
+
+        self.lbl_chpwd_status = QLabel("")
+        self.lbl_chpwd_status.setObjectName("hintLabel")
+        self.lbl_chpwd_status.setWordWrap(True)
+        btn_row.addWidget(self.lbl_chpwd_status, 1)
+
+        f2.addRow("", btn_row)
+
+        hint2 = QLabel(
+            "修改后新密码立即生效，"
+            "建议同时更新自己的记录。"
+        )
+        hint2.setObjectName("hintLabel")
+        hint2.setWordWrap(True)
+        f2.addRow("", hint2)
+
+        v.addWidget(g2)
+
+        # ── 串口日志 ──
+        g3 = QGroupBox("控制台输出")
+        v3 = QVBoxLayout(g3)
+        v3.setSpacing(6)
+
+        hint3 = QLabel(
+            "QEMU 串口输出（只读）。"
+            "VM 启动过程的日志会显示在这里，"
             "可用于排查启动失败。"
         )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        v.addWidget(hint)
+        hint3.setObjectName("hintLabel")
+        hint3.setWordWrap(True)
+        v3.addWidget(hint3)
 
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setFontFamily("monospace")
-        v.addWidget(self.console, 1)
+        v3.addWidget(self.console, 1)
 
         row = QHBoxLayout()
         btn_reload = QPushButton("刷新")
@@ -321,9 +381,84 @@ class VMDetailDialog(QDialog):
         btn_reload.clicked.connect(self._load_console)
         row.addWidget(btn_reload)
         row.addStretch()
-        v.addLayout(row)
+        v3.addLayout(row)
+
+        v.addWidget(g3, 1)
 
         return w
+
+    def _change_password(self) -> None:
+        """修改 guest 内账户密码（需先验证当前密码）"""
+        old = self.ed_old_pwd.text()
+        new1 = self.ed_new_pwd.text()
+        new2 = self.ed_new_pwd2.text()
+
+        if not old:
+            self.lbl_chpwd_status.setText("请输入当前密码")
+            return
+        if not new1:
+            self.lbl_chpwd_status.setText("请输入新密码")
+            return
+        if new1 != new2:
+            self.lbl_chpwd_status.setText("两次输入的新密码不一致")
+            return
+        if len(new1) < 4:
+            self.lbl_chpwd_status.setText("新密码至少 4 位")
+            return
+        if not self.vm.running:
+            self.lbl_chpwd_status.setText("虚拟机未运行")
+            return
+
+        self.btn_chpwd.setEnabled(False)
+        self.lbl_chpwd_status.setText("正在修改…")
+
+        user = self.vm.spec.username
+
+        def work():
+            # 用 chpasswd 非交互修改；先验证旧密码是否正确。
+            # passwd -S 只能看状态，不能验证旧密码，
+            # 所以用「旧密码登录测试」来校验。
+            import shlex
+
+            # 1) 验证旧密码：用 su 切过去试
+            verify_cmd = (
+                f"echo {shlex.quote(old)} | su - {shlex.quote(user)} "
+                f"-c 'echo OLD_OK' 2>/dev/null"
+            )
+            ok, out = vm_ssh.run_command(
+                self.vm, verify_cmd, timeout=20
+            )
+            if "OLD_OK" not in out:
+                return False, "当前密码不正确"
+
+            # 2) 设置新密码
+            cmd = (
+                f"echo {shlex.quote(user)}:{shlex.quote(new1)} | "
+                f"sudo chpasswd"
+            )
+            ok, out = vm_ssh.run_command(self.vm, cmd, timeout=20)
+            if not ok:
+                return False, out.strip()[:120] or "修改失败"
+
+            return True, ""
+
+        def done(res):
+            ok, msg = res
+            self.btn_chpwd.setEnabled(True)
+            if ok:
+                self.lbl_chpwd_status.setText("✓ 密码已修改")
+                self.ed_old_pwd.clear()
+                self.ed_new_pwd.clear()
+                self.ed_new_pwd2.clear()
+                notifier().info("密码已修改", self.vm.spec.name)
+            else:
+                self.lbl_chpwd_status.setText(f"✗ {msg}")
+
+        self._spawn(work, done,
+                    lambda m: (
+                        setattr(self.btn_chpwd, "enabled", True),
+                        setattr(self.lbl_chpwd_status, "text", f"✗ {m}"),
+                    ))
 
     # ─────────────────────────────────────────
     # 刷新
@@ -360,7 +495,6 @@ class VMDetailDialog(QDialog):
         self._fill_shares()
 
         self.btn_ssh.setEnabled(running)
-        self.btn_reclaim.setEnabled(running)
 
     def _tick(self) -> None:
         if not self.isVisible():
@@ -544,27 +678,7 @@ class VMDetailDialog(QDialog):
         self.refresh()
         self.lbl_status.setText("已删除，重启虚拟机后生效")
 
-    def _reclaim(self) -> None:
-        """立即回收空闲内存（用户主动触发，正常情况自动进行）"""
-        if not self.vm.running:
-            return
 
-        self.lbl_status.setText("正在回收内存…")
-
-        def work():
-            return vm_memory.balloon_reclaim(self.vm, keep_mb=128)
-
-        def done(res):
-            ok, msg = res
-            if not ok:
-                self.lbl_status.setText(f"回收失败: {msg}")
-                return
-            self.lbl_status.setText("内存已回收")
-            notifier().info("内存已回收", self.vm.spec.name)
-
-        self._spawn(work, done, lambda m: self.lbl_status.setText(f"失败: {m}"))
-
-    # ─────────────────────────────────────────
     def _spawn(self, work, done, error) -> None:
         task = run_async(work, on_done=done, on_error=error, parent=self)
         self._tasks.append(task)

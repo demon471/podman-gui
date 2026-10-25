@@ -83,6 +83,15 @@ def main() -> int:
     # 应用自定义 QSS（颜色全部取自调色板）
     app.setStyleSheet(build_stylesheet())
 
+    # 状态存储迁移（旧 QSettings / vm.json → SQLite）
+    # 幂等，只在数据库为空时搬一次；原文件保留不删。
+    try:
+        from core import state
+
+        state.migrate_from_legacy()
+    except Exception as e:
+        print(f"[main] 状态迁移失败: {e}")
+
     client = PodmanClient()
     win = MainWindow(client)
     win.show()

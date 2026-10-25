@@ -647,27 +647,31 @@ def _diagnose_service_failure() -> str:
 # 设置 mem_limit。这里在「启动容器」前预检查：
 #   已运行容器 mem_limit 之和 + 本次要启动的 limit > 阈值 → 拒绝启动
 #
-# 阈值保存在 QSettings（不写入 Podman 配置），默认 0 表示不限制。
+# 阈值保存在 SQLite（不写入 Podman 配置），默认 0 表示不限制。
+# 容器与虚拟机共用这个内存预算。
 # ─────────────────────────────────────────
 
-def get_memory_limit_gb() -> float:
-    """读取用户设置的内存阈值（GB，0 表示不限制）"""
-    from PyQt6.QtCore import QSettings
+MEMORY_LIMIT_KEY = "limits/memory_gb"
 
-    s = QSettings("podman-gui", "podman-gui")
+
+def get_memory_limit_gb() -> float:
+    """读取用户设置的内存阈值（GB，0 表示不限制）
+
+    存 SQLite（core.state）。容器与虚拟机共用这个预算。
+    """
+    from core import state
+
     try:
-        return float(s.value("limits/memory_gb", 0) or 0)
+        return float(state.get_setting(MEMORY_LIMIT_KEY, 0) or 0)
     except (TypeError, ValueError):
         return 0.0
 
 
 def set_memory_limit_gb(gb: float) -> None:
     """保存内存阈值（GB，0 表示不限制）"""
-    from PyQt6.QtCore import QSettings
+    from core import state
 
-    s = QSettings("podman-gui", "podman-gui")
-    s.setValue("limits/memory_gb", float(gb))
-    s.sync()
+    state.set_setting(MEMORY_LIMIT_KEY, float(gb))
 
 
 def container_memory_bytes(info: dict) -> int:
