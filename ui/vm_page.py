@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QBrush,
@@ -69,7 +69,7 @@ class VMPage(QWidget):
     # 请求主窗口打开外部终端执行 SSH 命令
     request_terminal = pyqtSignal(object)
 
-    COLUMNS = ["名称", "状态", "SSH 地址", "端口转发"]
+    COLUMNS = ["名称", "状态", "SSH 地址"]
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -126,12 +126,6 @@ class VMPage(QWidget):
         self.act_ssh.triggered.connect(self._open_ssh)
         tb.addAction(self.act_ssh)
 
-        self.act_more = QAction(icon("more"), "更多", self)
-        self.act_more.setProperty("iconName", "more")
-        self.act_more.setToolTip("打开虚拟机管理台（详情、文件、端口、控制台）")
-        self.act_more.triggered.connect(self._open_detail)
-        tb.addAction(self.act_more)
-
         self.act_purge = QAction(icon("delete", danger=True), "清空所有", self)
         self.act_purge.setProperty("iconName", "delete")
         self.act_purge.setToolTip(
@@ -178,6 +172,17 @@ class VMPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
+
+        # 悬停卡片（不用 QToolTip，见 ui/vm_infocard.py）
+        self.table.setMouseTracking(True)
+        self.table.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.table.viewport().installEventFilter(self)
+
+        # 信息卡片（单例，挂在主窗口上，跟随鼠标显示）
+        from ui.vm_infocard import VMInfoCard
+
+        self._info_card = VMInfoCard(self.window())
+        self._card_row = -1
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
         self.table.doubleClicked.connect(lambda _i: self._open_detail())
 
@@ -186,18 +191,15 @@ class VMPage(QWidget):
         hdr.setHighlightSections(False)
         hdr.setStretchLastSection(False)
 
-        # 列宽策略（与容器页一致）：
-        #   名称   固定窄，多数 VM 名很短，不占空间
-        #   状态   按内容（「运行中」+ 图标）
-        #   SSH    拉伸占满剩余 —— 域名长度不一，给它弹性空间
-        #   端口   按内容
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        # 列宽策略：三列均匀分布，平分可用宽度
+        #   名称 / 状态 / SSH 地址 各占 1/3，视觉整齐
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 140)   # 名称
-        self.table.setColumnWidth(1, 96)    # 状态
-        self.table.setColumnWidth(3, 200)   # 端口转发
+        # 等宽：各列 initial 相同，Stretch 模式下平分剩余
+        self.table.setColumnWidth(0, 200)
+        self.table.setColumnWidth(1, 200)
+        self.table.setColumnWidth(2, 200)
 
         # 空状态叠加
         self._table_stack = QStackedLayout()
@@ -257,6 +259,102 @@ class VMPage(QWidget):
         self._tasks.append(task)
 
 
+    # ─────────────────────────────────────────
+    # 悬停信息卡片
+    # ─────────────────────────────────────────
+    def eventFilter(self, obj, ev) -> bool:
+        """鼠标在表格上移动时显示信息卡片
+
+        为什么不用 QToolTip：
+        Qt 的 QToolTip 只支持 HTML 子集，background-color /
+        border-radius / 阴影全部无效，做不出卡片质感。
+        这里用自定义 QFrame（Qt.WindowType.ToolTip 标志），
+        行为与系统 tooltip 一致：不抢焦点、失焦自隐。
+        """
+        if obj is not self.table.viewport():
+            return False
+
+        from PyQt6.QtCore import QEvent
+
+        t = ev.type()
+
+        if t in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
+            try:
+                self._card_move(ev.position().toPoint())
+            except Exception:
+                pass
+            return False
+
+        if t == QEvent.Type.Leave or t == QEvent.Type.HoverLeave:
+            self._hide_card()
+            return False
+
+        if t == QEvent.Type.Wheel:
+            # 滚轮时卡片会遮挡内容，直接隐藏
+            self._hide_card()
+            return False
+
+        return False
+
+    def _card_move(self, pos: QPoint) -> None:
+        """鼠标移动 → 更新卡片内容与位置"""
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
+            self._hide_card()
+            return
+
+        row = idx.row()
+        name_item = self.model.item(row, 0)
+        if name_item is None:
+            self._hide_card()
+            return
+
+        vm = next(
+            (v for v in self._vms if v.spec.name == name_item.text()), None
+        )
+        if vm is None:
+            self._hide_card()
+            return
+
+        # 行变化才重填内容（同一行内移动只改位置）
+        if row != self._card_row:
+            self._card_row = row
+            self._info_card.show_for(vm, vm.running)
+
+        self._position_card(pos)
+
+    def _position_card(self, pos: QPoint) -> None:
+        """把卡片放到鼠标右下方，越界则翻转"""
+        card = self._info_card
+
+        # 先 show 再取真实尺寸（layout 算出最终大小）
+        if not card.isVisible():
+            card.show()
+
+        # viewport 相对坐标 → 屏幕坐标
+        pt = self.table.viewport().mapToGlobal(pos)
+
+        screen = self.window().screen().availableGeometry()
+
+        # 默认右上角对齐鼠标（略偏右下）
+        x = pt.x() + 16
+        y = pt.y() + 8
+
+        # 右边越界 → 翻到左边
+        if x + card.width() > screen.right():
+            x = pt.x() - card.width() - 8
+        # 下面越界 → 翻到上面
+        if y + card.height() > screen.bottom():
+            y = pt.y() - card.height() - 8
+
+        if x != card.x() or y != card.y():
+            card.move(x, y)
+
+    def _hide_card(self) -> None:
+        self._card_row = -1
+        if hasattr(self, "_info_card"):
+            self._info_card.hide_card()
+
     def _rebuild(self) -> None:
         selected = self._selected_name()
 
@@ -279,34 +377,12 @@ class VMPage(QWidget):
             # 列 2：SSH 地址（域名，端口由 ~/.ssh/config 自动映射）
             c2 = QStandardItem(vm_dns.vm_domain(name))
 
-            # 列 3：端口转发（只列非 SSH 的，避免和 SSH 列重复）
-            #     显示「宿主:guest」，多了才省略
-            others = [f for f in vm.spec.forwards if f.guest_port != 22]
-            if others:
-                if len(others) <= 2:
-                    c3 = QStandardItem(
-                        "  ".join(
-                            f"{f.host_port}→{f.guest_port}"
-                            for f in others
-                        )
-                    )
-                else:
-                    c3 = QStandardItem(
-                        f"{others[0].host_port}→{others[0].guest_port} "
-                        f"等 {len(others)} 项"
-                    )
-            else:
-                c3 = QStandardItem("—")
-
-            for it in (c0, c1, c2, c3):
+            for it in (c0, c1, c2):
                 it.setEditable(False)
+                # 不用 setToolTip：Qt 的 QToolTip HTML 子集太弱，
+                # 做不出卡片样式。改用自定义卡片（见 _show_info_card）。
 
-            # 悬停提示：默认账户、密码、SSH、端口
-            tip = self._vm_tooltip(vm, running)
-            for it in (c0, c1, c2, c3):
-                it.setToolTip(tip)
-
-            self.model.appendRow([c0, c1, c2, c3])
+            self.model.appendRow([c0, c1, c2])
 
         # 恢复选中
         if selected:
@@ -333,87 +409,6 @@ class VMPage(QWidget):
             self.lbl_stats.setText(f"共 {len(self._vms)} 台虚拟机")
 
         self._update_actions()
-
-    def _vm_tooltip(self, vm, running: bool) -> str:
-        """行悬停提示（HTML 卡片式）
-
-        纯文本换行拼接在 Qt 里会渲染成等宽单色块，键值对不齐、
-        层次不清。改用 HTML 表格：左列标签固定宽度，视觉上对齐。
-
-        密码标注「初始密码」而非「密码」——用户改过后宿主机读不到
-        guest 内的真实密码，避免误导。
-        """
-        from core.vm.cloudinit import DEFAULT_PASSWORD
-
-        spec = vm.spec
-        domain = vm_dns.vm_domain(spec.name)
-
-        # ── 分隔线 ──
-        sep = ('<hr style="border:none;border-top:1px solid '
-               'rgba(128,128,128,0.3);margin:6px 0;">')
-
-        # ── 键值表 ──
-        rows = [
-            ("系统", spec.image_key),
-            ("账户", spec.username),
-            ("初始密码", DEFAULT_PASSWORD),
-        ]
-        rows_html = "".join(
-            '<tr><td style="padding:1px 14px 1px 0;opacity:0.65;">%s</td>'
-            '<td style="padding:1px 0;">%s</td></tr>' % (k, v)
-            for k, v in rows
-        )
-
-        # ── SSH 命令 ──
-        ssh_lines = ["ssh " + domain]
-        if vm.ssh_port:
-            ssh_lines.append(
-                "ssh -p %d %s@127.0.0.1" % (vm.ssh_port, spec.username)
-            )
-        ssh_html = "<br>".join(
-            '<span style="font-family:monospace;">%s</span>' % line
-            for line in ssh_lines
-        )
-
-        # ── 端口转发（排除 SSH，避免与上面重复）──
-        others = [f for f in spec.forwards if f.guest_port != 22]
-        ports_html = ""
-        if others:
-            items = "<br>".join(
-                '<span style="font-family:monospace;">'
-                '127.0.0.1:%d &rarr; VM:%d</span>'
-                % (f.host_port, f.guest_port)
-                for f in others
-            )
-            ports_html = (
-                sep
-                + '<div style="opacity:0.65;margin-bottom:2px;">端口转发</div>'
-                + "<div>" + items + "</div>"
-            )
-
-        # ── 未运行提示 ──
-        stopped_html = ""
-        if not running:
-            stopped_html = (
-                '<div style="opacity:0.6;margin-top:6px;">'
-                '未运行 &middot; 启动后可连接</div>'
-            )
-
-        return (
-            '<div style="white-space:nowrap;">'
-            '<div style="font-weight:600;margin-bottom:4px;">'
-            + spec.name
-            + '</div>'
-            '<table style="border-collapse:collapse;">'
-            + rows_html
-            + '</table>'
-            + sep
-            + '<div style="opacity:0.65;margin-bottom:2px;">SSH</div>'
-            + '<div>' + ssh_html + '</div>'
-            + ports_html
-            + stopped_html
-            + '</div>'
-        )
 
     def _on_filter(self, text: str) -> None:
         t = text.strip().lower()
@@ -706,7 +701,11 @@ class VMPage(QWidget):
 
     def on_disconnected(self) -> None:
         """Podman 断开不影响 VM 管理"""
-        pass
+        self._hide_card()
+
+    def hideEvent(self, e) -> None:
+        self._hide_card()
+        super().hideEvent(e)
 
     def stop_timers(self) -> None:
         self._list_timer.stop()

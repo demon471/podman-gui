@@ -118,12 +118,18 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setObjectName("hintLabel")
         bar.addWidget(self.lbl_status, 1)
 
-        # 启停（VM 未运行时显示「启动」，运行中显示「停止」）
-        self.btn_toggle = QPushButton("启动")
-        self.btn_toggle.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
-        self.btn_toggle.clicked.connect(self._toggle_power)
-        bar.addWidget(self.btn_toggle)
+        # 启动 / 停止 独立按钮（运行态决定启用哪个）
+        self.btn_start = QPushButton("启动")
+        self.btn_start.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
+        self.btn_start.clicked.connect(self._do_start)
+        bar.addWidget(self.btn_start)
 
+        self.btn_stop = QPushButton("停止")
+        self.btn_stop.setIcon(icon("stop", ICON_SIZE_BUTTON.width()))
+        self.btn_stop.clicked.connect(self._do_stop)
+        bar.addWidget(self.btn_stop)
+
+        # 重启：跟在停止后面
         self.btn_restart = QPushButton("重启")
         self.btn_restart.setIcon(icon("restart", ICON_SIZE_BUTTON.width()))
         self.btn_restart.setToolTip("先停止再启动虚拟机")
@@ -135,32 +141,6 @@ class VMDetailDialog(QDialog):
         self.btn_ssh.setToolTip("复制 SSH 命令到剪贴板")
         self.btn_ssh.clicked.connect(self._copy_ssh)
         bar.addWidget(self.btn_ssh)
-
-        # 「更多」：把不常用操作收进菜单，保持底部清爽
-        self.btn_more = QPushButton("更多")
-        self.btn_more.setIcon(icon("more", ICON_SIZE_BUTTON.width()))
-
-        menu = QMenu(self)
-        menu.addAction(
-            icon("terminal"), "打开终端（外部）",
-            self._open_ssh_terminal,
-        )
-        menu.addAction(
-            icon("edit"), "重命名…", self._rename_vm,
-        )
-        menu.addSeparator()
-        menu.addAction(
-            icon("folder"), "打开 VM 数据目录", self._open_data_dir,
-        )
-        menu.addAction(
-            icon("copy"), "复制 VM 名称", self._copy_name,
-        )
-        menu.addSeparator()
-        menu.addAction(
-            icon("delete", danger=True), "删除虚拟机…", self._delete_vm,
-        )
-        self.btn_more.setMenu(menu)
-        bar.addWidget(self.btn_more)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
@@ -517,13 +497,11 @@ class VMDetailDialog(QDialog):
         # 共享目录
         self._fill_shares()
 
-        # 底部按钮状态
-        self.btn_ssh.setEnabled(running)
+        # 底部按钮状态：运行中 → 停止/重启/SSH 可用；停止态 → 启动可用
+        self.btn_start.setEnabled(not running)
+        self.btn_stop.setEnabled(running)
         self.btn_restart.setEnabled(running)
-        self.btn_toggle.setText("停止" if running else "启动")
-        self.btn_toggle.setIcon(
-            icon("stop" if running else "play", ICON_SIZE_BUTTON.width())
-        )
+        self.btn_ssh.setEnabled(running)
 
     def _tick(self) -> None:
         if not self.isVisible():
@@ -673,13 +651,6 @@ class VMDetailDialog(QDialog):
     # ─────────────────────────────────────────
     # 底部动作
     # ─────────────────────────────────────────
-    def _toggle_power(self) -> None:
-        """启动 / 停止"""
-        if self.vm.running:
-            self._do_stop()
-        else:
-            self._do_start()
-
     def _do_start(self) -> None:
         self._set_busy(True)
         self.lbl_status.setText("正在启动…")
@@ -896,8 +867,8 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setText("操作失败: " + str(msg))
 
     def _set_busy(self, busy: bool) -> None:
-        for b in (self.btn_toggle, self.btn_restart, self.btn_ssh,
-                  self.btn_more):
+        for b in (self.btn_start, self.btn_stop, self.btn_restart,
+                  self.btn_ssh):
             b.setEnabled(not busy)
 
     def _spawn(self, work, done, error) -> None:

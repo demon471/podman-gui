@@ -598,6 +598,56 @@ QLabel#hintLabel {{
     font-size: {fs['small']};
 }}
 
+/* ═══════════ 悬停信息卡片 ═══════════ */
+/*
+ * 与 limitBox 同一套质感（Base 底 + hairline 边框 + 8px 圆角）。
+ * Qt 的 QFrame 不支持 box-shadow，阴影由 Python 侧
+ * QGraphicsDropShadowEffect 实现（见 ui/vm_infocard.py）。
+ */
+QFrame#vmInfoCard {{
+    background-color: {base};
+    border: 1px solid {border};
+    border-radius: 8px;
+}}
+
+/* 卡片内标题 */
+QLabel#cardTitle {{
+    font-weight: 600;
+    font-size: {fs['base']};
+}}
+
+/* 卡片内分组小标签（SSH 连接 / 端口转发）*/
+QLabel#cardSection {{
+    color: {button_text};
+    font-size: {fs['small']};
+}}
+
+/* 卡片内键名（系统 / 账户 / 初始密码）*/
+QLabel#cardKey {{
+    color: {button_text};
+    font-size: {fs['small']};
+}}
+
+/* 卡片内等宽命令 */
+QLabel#cardCmd {{
+    font-family: monospace;
+    font-size: {fs['small']};
+}}
+
+/* 卡片内弱提示（未运行）*/
+QLabel#cardHint {{
+    color: {button_text};
+    font-size: {fs['small']};
+    padding: 0 12px 10px 12px;
+}}
+
+/* 卡片内分隔线 */
+QFrame#cardSep {{
+    background-color: {border};
+    max-height: 1px;
+    border: none;
+}}
+
 /* ═══════════ 资源限制小卡片 ═══════════ */
 QFrame#limitBox {{
     background-color: {alternate};
