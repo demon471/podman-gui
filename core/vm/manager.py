@@ -710,6 +710,33 @@ def resume_vm(vm: VM) -> tuple[bool, str]:
     return start_vm(vm)
 
 
+def get_password(name: str) -> str:
+    """读取 VM 当前登录密码
+
+    用户在详情页改过密码后，界面上所有展示密码的地方
+    （悬停卡片、sudo 提权默认值）都必须跟着变，
+    否则显示的还是镜像默认密码，照着输必然失败。
+    """
+    from core import state
+    from core.vm.cloudinit import DEFAULT_PASSWORD
+
+    try:
+        val = state.get_setting(f"vm.password.{name}", "")
+    except Exception:
+        val = ""
+    return val or DEFAULT_PASSWORD
+
+
+def set_password(name: str, password: str) -> None:
+    """记录 VM 当前登录密码（改密码成功后调用）"""
+    from core import state
+
+    try:
+        state.set_setting(f"vm.password.{name}", password or "")
+    except Exception:
+        pass
+
+
 def desired_running_vms() -> list[VM]:
     """列出「用户希望其运行」的 VM
 

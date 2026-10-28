@@ -214,7 +214,9 @@ class FilePanel(QWidget):
             self.ed_path.setText(path)
             self._entries = entries
             self._fill_table(entries)
-            self.status.emit(f"{len(entries)} 项")
+            # 不再显示「N 项」——目录里有多少条肉眼可见，
+            # 这个计数占了左下角却没提供任何信息。
+            self.status.emit("")
 
         def error(msg):
             if seq != self._nav_seq:
@@ -687,11 +689,12 @@ class FilePanel(QWidget):
         if ret != QMessageBox.StandardButton.Yes:
             return
 
+        # 默认值填该 VM 当前实际密码（用户改过密码后要跟着变）
         default_pwd = ""
         try:
-            from core.vm.cloudinit import DEFAULT_PASSWORD
+            from core.vm import manager as vm_manager
 
-            default_pwd = DEFAULT_PASSWORD
+            default_pwd = vm_manager.get_password(self.vm.spec.name)
         except Exception:
             pass
 

@@ -42,6 +42,22 @@ def _font_sizes() -> dict[str, str]:
     }
 
 
+def semantic_colors() -> dict[str, str]:
+    """成功 / 失败语义色
+
+    Breeze 的 positive/negative 在暗色主题下会偏亮，这里按窗口
+    亮度分两套，保证任何主题下都有足够对比度。
+    代码里需要动态着色（比如按钮闪一下绿色对勾）时直接取这里，
+    不要另写一套色值，否则换主题就不同步了。
+    """
+    pal = QApplication.palette()
+    c = pal.color(QPalette.ColorRole.Window)
+    is_dark = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000 < 128
+    if is_dark:
+        return {"success": "#3ddc84", "danger": "#ff6b6b"}
+    return {"success": "#1a7f37", "danger": "#c0392b"}
+
+
 def build_stylesheet() -> str:
     pal = QApplication.palette()
     fs = _font_sizes()
@@ -65,6 +81,11 @@ def build_stylesheet() -> str:
     # 滚动条滑块：跟随主题的 WindowText，低透明度
     sb_idle = _rgba(QPalette.ColorRole.WindowText, 0.22)
     sb_hover = _rgba(QPalette.ColorRole.WindowText, 0.45)
+
+    # 语义色（成功/失败），供 QSS 和代码里的动态反馈共用
+    sem = semantic_colors()
+    success = sem["success"]
+    danger = sem["danger"]
 
     return f"""
 /* ═══════════ 全局 ═══════════ */
@@ -612,6 +633,32 @@ QLabel#statusError {{
 QLabel#hintLabel {{
     color: {button_text};
     font-size: {fs['small']};
+}}
+
+/* 状态反馈：成功绿 / 失败红
+   颜色取自 KDE 语义色（Breeze 的 positive/negative），
+   暗色主题下也能保证对比度。 */
+QLabel#okLabel {{
+    color: {success};
+    font-size: {fs['small']};
+}}
+
+QLabel#errLabel {{
+    color: {danger};
+    font-size: {fs['small']};
+    font-weight: 500;
+}}
+
+/* 前置警示：红字但不用错误态那么重，读起来是「注意」不是「出错」 */
+QLabel#warnLabel {{
+    color: {danger};
+    font-size: {fs['small']};
+}}
+
+/* 等宽：SSH 命令、路径这类要精确读的内容 */
+QLabel#monoLabel {{
+    font-family: monospace;
+    color: {text};
 }}
 
 /* ═══════════ 悬停信息卡片 ═══════════ */

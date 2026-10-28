@@ -106,7 +106,7 @@ class VMInfoCard(QFrame):
         grid.setVerticalSpacing(4)
 
         self._rows: list[tuple[QLabel, QLabel]] = []
-        for i, key in enumerate(("系统", "账户", "初始密码")):
+        for i, key in enumerate(("系统", "账户", "密码")):
             k = QLabel(key)
             k.setObjectName("cardKey")
             v = QLabel()
@@ -202,7 +202,7 @@ class VMInfoCard(QFrame):
         资源已释放（访问时秒级恢复）两种底层状态。
         用户视角没有区别，所以统一显示为运行中。
         """
-        from core.vm.cloudinit import DEFAULT_PASSWORD
+        from core.vm import manager as vm_manager
 
         self._reset_copy_icons()
         self._current_vm = vm
@@ -224,7 +224,10 @@ class VMInfoCard(QFrame):
             )
 
         # 信息
-        values = (spec.image_key, spec.username, DEFAULT_PASSWORD)
+        # 密码取实际值：用户改过密码后这里要跟着变，
+        # 否则卡片上还是镜像默认密码，照着输一定失败
+        values = (spec.image_key, spec.username,
+                  vm_manager.get_password(spec.name))
         for (_k, v), val in zip(self._rows, values):
             v.setText(val)
 

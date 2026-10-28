@@ -188,6 +188,15 @@ SVG = {
 <rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
 <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 5.5v-1a2 2 0 0 0-2-2h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1"/>
 </svg>""",
+    # 密码可见性切换（眼睛 / 划掉的眼睛）
+    "eye": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/>
+<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.9"/>
+</svg>""",
+    "eye_off": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5c1.6 0 3 .5 4.2 1.2M21.5 12S18 18.5 12 18.5c-1.6 0-3-.5-4.2-1.2"/>
+<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M4 20L20 4"/>
+</svg>""",
 }
 
 # KDE 系统图标映射（优先使用）
@@ -362,19 +371,25 @@ def _render_svg(svg_content: str, color: str, size: int, optical: bool = True) -
     return pix
 
 
-def icon(name: str, size: int = 16, danger: bool = False) -> QIcon:
+def icon(name: str, size: int = 16, danger: bool = False,
+         color: str | None = None) -> QIcon:
     """获取图标（颜色随主题动态变化）
 
     策略：
     1. 内置 SVG → 用 QIconEngine 动态渲染，主题切换时自动变色
     2. 若 KDE 有对应语义图标且内置 SVG 缺失，用 KDE 图标
 
+    参数：
+      · danger=True  固定红色（危险操作）
+      · color="#..." 固定指定颜色（如成功态的绿色对勾），
+        此时不再跟随主题
+
     注意：size 是逻辑尺寸，实际按 2x 渲染保证高 DPI 清晰。
     请优先使用 ICON_SIZE_* 常量，勿硬编码数字。
     """
     svg_content = SVG.get(name)
     if svg_content:
-        return QIcon(_ThemedIconEngine(svg_content, size, danger))
+        return QIcon(_ThemedIconEngine(svg_content, size, danger, color))
 
     kde_name = KDE_ICON_MAP.get(name, name)
     return QIcon.fromTheme(kde_name)
@@ -387,18 +402,25 @@ class _ThemedIconEngine(QIconEngine):
     因此主题切换后 Qt 重绘时自动使用新颜色。
     """
 
-    def __init__(self, svg_content: str, size: int, danger: bool = False):
+    def __init__(self, svg_content: str, size: int, danger: bool = False,
+                 color: str | None = None):
         super().__init__()
         self._svg = svg_content
         self._size = size
         self._danger = danger
+        self._fixed_color = color
         self._cached: QPixmap | None = None
         self._cached_color: str = ""
         self._cached_size: int = 0
 
     def _pixmap(self, size: int) -> QPixmap:
-        # danger=True 时固定红色（不随主题变化）
-        color = DANGER_FG if self._danger else _fg_color()
+        # color 优先（固定色），其次 danger（固定红），最后跟随主题
+        if self._fixed_color:
+            color = self._fixed_color
+        elif self._danger:
+            color = DANGER_FG
+        else:
+            color = _fg_color()
         if (
             self._cached is not None
             and self._cached_color == color

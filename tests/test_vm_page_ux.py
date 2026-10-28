@@ -354,7 +354,9 @@ class TestDetailHeader:
         dlg, vm = detail
         names = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
         assert "概览" not in names, f"不该再有概览页，实际 {names}"
-        assert names == ["文件", "共享目录", "控制台"], names
+        # 第三个 tab 只剩账户 + 修改密码，串口输出区已移除，
+        # 名字也从「控制台」改成「账户」
+        assert names == ["文件", "共享目录", "账户"], names
 
     def test_header_shows_ssh_address(self, detail):
         """头部显示可复制的 SSH 地址"""

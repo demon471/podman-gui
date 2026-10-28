@@ -190,6 +190,16 @@ def ensure_nopass(vm) -> bool:
     if _password:
         candidates.append(_password)
 
+    # 该 VM 当前实际密码（用户可能已经改过）
+    try:
+        from core.vm import manager as vm_manager
+
+        cur = vm_manager.get_password(vm.spec.name)
+        if cur and cur not in candidates:
+            candidates.append(cur)
+    except Exception:
+        pass
+
     try:
         from core.vm.cloudinit import DEFAULT_PASSWORD
 

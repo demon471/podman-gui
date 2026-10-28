@@ -2,7 +2,7 @@
 
 参照 KDE 的标签页式属性对话框（如 Dolphin 属性、Plasma 系统设置）：
 - 顶部信息区（名称、状态、系统信息）
-- 标签页：概览 / 文件 / 共享目录 / 控制台
+- 标签页：文件 / 共享目录 / 账户
 - 底部动作栏：重启 / SSH 登录 / 更多
 
 端口转发不再单开标签页——列表页已有端口列，
@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QLayout,
     QLabel,
     QLineEdit,
     QMenu,
@@ -36,7 +37,6 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
-    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -45,9 +45,9 @@ from PyQt6.QtWidgets import (
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import manager as vm_manager
-from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
 from resources.icons import ICON_SIZE_BUTTON, ICON_SIZE_DIALOG, icon
+from ui.style import semantic_colors
 from ui.utils import fmt_size
 
 
@@ -186,7 +186,11 @@ class VMDetailDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_files(), "文件")
         self.tabs.addTab(self._build_shares(), "共享目录")
-        self.tabs.addTab(self._build_console(), "控制台")
+        self.tabs.addTab(self._build_account(), "账户")
+
+        # 状态栏是三个 tab 共用的，切页时清掉上一页的残留
+        # （比如文件页的「加载中…」会一直挂在那里）
+        self.tabs.currentChanged.connect(lambda _i: self.lbl_status.setText(""))
         v.addWidget(self.tabs, 1)
 
         # ── 底部动作栏 ──
@@ -218,7 +222,7 @@ class VMDetailDialog(QDialog):
         # 文件面板的状态栏信息接到 lbl_status
         # （此处在底部栏之后，lbl_status 已存在）
         if hasattr(self, "file_panel"):
-            self.file_panel.status.connect(self.lbl_status.setText)
+            self.file_panel.status.connect(self._on_file_status)
 
     # ── 概览 ──
     # ── 文件 ──
@@ -329,15 +333,28 @@ class VMDetailDialog(QDialog):
         return w
 
 
-    # ── 控制台 ──
-    def _build_console(self) -> QWidget:
-        """控制台：串口日志 + 账户密码管理"""
+    # ── 账户 ──
+    def _build_account(self) -> QWidget:
+        """账户：用户名 + 修改密码
+
+        设计要点（都来自实际操作时的痛点）：
+          · 每个密码框带「显示/隐藏」眼睛 —— 打错一个字符
+            就要整段重输，看不见非常难受
+          · 校验实时反馈：确认密码一输入就提示一致/不一致，
+            不用等点了按钮才知道
+          · 状态分色：成功绿 / 失败红 / 进行中灰，一眼可辨
+          · 三个输入框都支持回车提交，不用去够按钮
+        """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(10, 12, 10, 10)
-        v.setSpacing(8)
+        v.setSpacing(10)
 
-        # ── 账户 ──
+        self._eye_actions: list = []
+        # 防抖：改密码进行中 / 成功提示期间，忽略重复触发
+        self._pwd_busy = False
+
+        # ── 账户信息 ──
         g1 = QGroupBox("账户")
         f1 = QFormLayout(g1)
         f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -349,6 +366,23 @@ class VMDetailDialog(QDialog):
         )
         f1.addRow("用户名", self.lbl_account)
 
+        # SSH 地址放这里：改完密码最关心的就是「怎么连、用哪个密码」
+        row_ssh = QHBoxLayout()
+        row_ssh.setSpacing(6)
+        self.lbl_ssh = QLabel(self.vm.ssh_command())
+        self.lbl_ssh.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.lbl_ssh.setObjectName("monoLabel")
+        row_ssh.addWidget(self.lbl_ssh)
+        btn_copy = QToolButton()
+        btn_copy.setIcon(icon("copy", ICON_SIZE_BUTTON.width()))
+        btn_copy.setToolTip("复制 SSH 命令")
+        btn_copy.clicked.connect(self._copy_ssh)
+        row_ssh.addWidget(btn_copy)
+        row_ssh.addStretch(1)
+        f1.addRow("SSH", row_ssh)
+
         v.addWidget(g1)
 
         # ── 修改密码 ──
@@ -357,149 +391,409 @@ class VMDetailDialog(QDialog):
         f2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         f2.setSpacing(8)
 
-        self.ed_old_pwd = QLineEdit()
-        self.ed_old_pwd.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ed_old_pwd.setPlaceholderText("当前密码")
-        f2.addRow("当前密码", self.ed_old_pwd)
+        # 警示放最前面：用户点进来第一眼就该知道改了密码的后果，
+        # 而不是填完、点提交之后才在底部看到一行小字
+        hint2 = QLabel(
+            "修改后立即生效：外部 ssh 连接必须改用新密码"
+            "（本应用使用密钥登录，不受影响）。"
+        )
+        hint2.setObjectName("warnLabel")
+        hint2.setWordWrap(True)
+        # 单参数 addRow 占满整行：跨列的 wordWrap 标签
+        # QFormLayout 不会正确计算高度，第二行会被裁掉
+        f2.addRow(hint2)
 
-        self.ed_new_pwd = QLineEdit()
-        self.ed_new_pwd.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ed_new_pwd.setPlaceholderText("新密码")
-        f2.addRow("新密码", self.ed_new_pwd)
+        self.ed_old_pwd = self._add_pwd_field(
+            f2, "当前密码", "输入当前登录密码"
+        )
 
-        self.ed_new_pwd2 = QLineEdit()
-        self.ed_new_pwd2.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ed_new_pwd2.setPlaceholderText("再输一次")
-        f2.addRow("确认密码", self.ed_new_pwd2)
+        self.ed_new_pwd = self._add_pwd_field(f2, "新密码", "至少 4 位")
 
-        btn_row = QHBoxLayout()
+        # 长度规则：实时显示，别等提交才报错
+        self.lbl_pwd_rule = QLabel("至少 4 位字符")
+        self.lbl_pwd_rule.setObjectName("hintLabel")
+        self.lbl_pwd_rule.setWordWrap(True)
+        f2.addRow("", self.lbl_pwd_rule)
+
+        self.ed_new_pwd2 = self._add_pwd_field(f2, "确认密码", "再输一次")
+
+        # 一致性提示：实时显示，占位保持高度稳定避免跳动
+        self.lbl_pwd_match = QLabel("")
+        self.lbl_pwd_match.setObjectName("hintLabel")
+        self.lbl_pwd_match.setWordWrap(True)
+        self.lbl_pwd_match.setMinimumHeight(18)
+        f2.addRow("", self.lbl_pwd_match)
+
+        # 按钮行
+        row_btn = QHBoxLayout()
+        row_btn.setSpacing(8)
+
         self.btn_chpwd = QPushButton("修改密码")
         self.btn_chpwd.setIcon(icon("save", ICON_SIZE_BUTTON.width()))
         self.btn_chpwd.clicked.connect(self._change_password)
-        btn_row.addWidget(self.btn_chpwd)
+        row_btn.addWidget(self.btn_chpwd)
 
+        self.btn_pwd_clear = QPushButton("清空")
+        self.btn_pwd_clear.clicked.connect(self._clear_pwd_fields)
+        row_btn.addWidget(self.btn_pwd_clear)
+
+        row_btn.addStretch()
+        f2.addRow("", row_btn)
+
+        # 操作状态：成功绿 / 失败红 / 进行中灰
         self.lbl_chpwd_status = QLabel("")
         self.lbl_chpwd_status.setObjectName("hintLabel")
         self.lbl_chpwd_status.setWordWrap(True)
-        btn_row.addWidget(self.lbl_chpwd_status, 1)
-
-        f2.addRow("", btn_row)
-
-        hint2 = QLabel(
-            "修改后新密码立即生效，"
-            "建议同时更新自己的记录。"
-        )
-        hint2.setObjectName("hintLabel")
-        hint2.setWordWrap(True)
-        f2.addRow("", hint2)
+        self.lbl_chpwd_status.setMinimumHeight(20)
+        # 整行：这条消息可能有两行（含「外部 ssh 请使用新密码」），
+        # 跨列 wordWrap 会被裁掉第二行
+        f2.addRow(self.lbl_chpwd_status)
 
         v.addWidget(g2)
 
-        # ── 串口日志 ──
-        g3 = QGroupBox("控制台输出")
-        v3 = QVBoxLayout(g3)
-        v3.setSpacing(6)
+        # 实时校验
+        self.ed_new_pwd.textChanged.connect(self._validate_pwd)
+        self.ed_new_pwd2.textChanged.connect(self._validate_pwd)
 
-        hint3 = QLabel(
-            "QEMU 串口输出（只读）。"
-            "VM 启动过程的日志会显示在这里，"
-            "可用于排查启动失败。"
-        )
-        hint3.setObjectName("hintLabel")
-        hint3.setWordWrap(True)
-        v3.addWidget(hint3)
+        v.addStretch(1)
 
-        self.console = QTextEdit()
-        self.console.setReadOnly(True)
-        self.console.setFontFamily("monospace")
-        v3.addWidget(self.console, 1)
-
-        row = QHBoxLayout()
-        btn_reload = QPushButton("刷新")
-        btn_reload.setIcon(icon("refresh", ICON_SIZE_BUTTON.width()))
-        btn_reload.clicked.connect(self._load_console)
-        row.addWidget(btn_reload)
-        row.addStretch()
-        v3.addLayout(row)
-
-        v.addWidget(g3, 1)
+        # 关键：不允许布局把内容压到 sizeHint 以下。
+        # 否则窗口不够高时 QLabel（wordWrap）会被裁掉半行，
+        # 用户看到的是「提示文字突然断掉」。
+        v.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
         return w
 
+    def _add_pwd_field(self, form: QFormLayout, label: str,
+                       placeholder: str) -> QLineEdit:
+        """生成一个带「显示/隐藏」按钮的密码输入框"""
+        ed = QLineEdit()
+        ed.setEchoMode(QLineEdit.EchoMode.Password)
+        ed.setPlaceholderText(placeholder)
+        # 不开 QLineEdit 自带的清除按钮：Breeze 下渲染成一坨深色块，
+        # 和眼睛按钮挤在一起很乱；表单底部已有「清空」按钮。
+
+        act = ed.addAction(
+            icon("eye", ICON_SIZE_BUTTON.width()),
+            QLineEdit.ActionPosition.TrailingPosition,
+        )
+        act.setToolTip("显示密码")
+        act.triggered.connect(
+            lambda _checked=False, e=ed, a=act: self._toggle_echo(e, a)
+        )
+        # QAction 由 QLineEdit 持有，但 Python 侧也要留引用，
+        # 否则对象被回收后点击无反应
+        self._eye_actions.append(act)
+
+        # 回车即提交：三个框都能用
+        ed.returnPressed.connect(self._change_password)
+
+        form.addRow(label, ed)
+        return ed
+
+    @staticmethod
+    def _toggle_echo(ed: QLineEdit, act) -> None:
+        """切换密码可见性"""
+        if ed.echoMode() == QLineEdit.EchoMode.Password:
+            ed.setEchoMode(QLineEdit.EchoMode.Normal)
+            act.setIcon(icon("eye_off", ICON_SIZE_BUTTON.width()))
+            act.setToolTip("隐藏密码")
+        else:
+            ed.setEchoMode(QLineEdit.EchoMode.Password)
+            act.setIcon(icon("eye", ICON_SIZE_BUTTON.width()))
+            act.setToolTip("显示密码")
+
+    @staticmethod
+    def _apply_label_kind(lbl: QLabel, kind: str) -> None:
+        """切换标签配色（'' 普通 / 'ok' 绿 / 'err' 红）
+
+        Qt 不会因为 objectName 变化自动重算样式，
+        必须 unpolish + polish 才会生效。
+        """
+        name = {"ok": "okLabel", "err": "errLabel"}.get(kind, "hintLabel")
+        if lbl.objectName() == name:
+            return
+        lbl.setObjectName(name)
+        lbl.style().unpolish(lbl)
+        lbl.style().polish(lbl)
+
+    def _set_pwd_status(self, text: str, kind: str = "") -> None:
+        self._apply_label_kind(self.lbl_chpwd_status, kind)
+        self.lbl_chpwd_status.setText(text)
+
+    def _validate_pwd(self) -> None:
+        """实时校验：长度规则 + 两次输入一致性"""
+        new1 = self.ed_new_pwd.text()
+        new2 = self.ed_new_pwd2.text()
+
+        # 长度
+        if not new1:
+            self.lbl_pwd_rule.setText("至少 4 位字符")
+            self._apply_label_kind(self.lbl_pwd_rule, "")
+        elif len(new1) < 4:
+            self.lbl_pwd_rule.setText(f"还差 {4 - len(new1)} 位（至少 4 位）")
+            self._apply_label_kind(self.lbl_pwd_rule, "err")
+        else:
+            self.lbl_pwd_rule.setText("✓ 长度符合要求")
+            self._apply_label_kind(self.lbl_pwd_rule, "ok")
+
+        # 一致性
+        if not new2:
+            self.lbl_pwd_match.setText("")
+            self._apply_label_kind(self.lbl_pwd_match, "")
+        elif new1 == new2:
+            self.lbl_pwd_match.setText("✓ 两次输入一致")
+            self._apply_label_kind(self.lbl_pwd_match, "ok")
+        else:
+            self.lbl_pwd_match.setText("✗ 两次输入不一致")
+            self._apply_label_kind(self.lbl_pwd_match, "err")
+
+    def _clear_pwd_fields(self) -> None:
+        for ed in (self.ed_old_pwd, self.ed_new_pwd, self.ed_new_pwd2):
+            ed.clear()
+        self._validate_pwd()
+        self._set_pwd_status("")
+        self.ed_old_pwd.setFocus()
+
+    def _pwd_error(self, msg: str, field: QLineEdit | None = None) -> None:
+        """报错并把焦点送到出错的输入框
+
+        只弹一行字在底部、不告诉用户是哪一栏出问题，
+        用户还得自己一个个试。
+        """
+        self._set_pwd_status(f"✗ {msg}", "err")
+        if field is not None:
+            field.setFocus()
+            field.selectAll()
+
+    PWD_BTN_TEXT = "修改密码"
+
+    def _set_pwd_busy(self, busy: bool) -> None:
+        """进行中：按钮文字变「修改中…」并整组置灰
+
+        三个按钮都要灰掉（含关闭）—— 只灰一个的话，用户还是能在
+        改密码的同时点「清空」把正在提交的内容清掉，
+        或者直接关窗口把操作打断。
+        """
+        self._pwd_busy = busy
+        for w in (self.btn_chpwd, self.btn_pwd_clear,
+                  self.ed_old_pwd, self.ed_new_pwd, self.ed_new_pwd2):
+            w.setEnabled(not busy)
+        self._lock_close(busy)
+        self.btn_chpwd.setText("修改中…" if busy else self.PWD_BTN_TEXT)
+
+    def _lock_close(self, locked: bool) -> None:
+        """锁定/解锁底部关闭按钮（控件可能还没创建）"""
+        btn = getattr(self, "btn_close", None)
+        if btn is None:
+            return
+        # 整窗遮罩忙碌时由 _set_busy 管，这里不要抢
+        if locked:
+            btn.setEnabled(False)
+        elif not getattr(self, "_busy", False):
+            btn.setEnabled(True)
+
+    def _flash_pwd_success(self) -> None:
+        """成功反馈落在按钮上：绿色对勾 + 「保存成功」
+
+        文案走禁用态渲染成灰色，同时把「清空」「关闭」一起锁住：
+          · 三个按钮都点不动 → 天然防抖，不会连点两次改密码
+          · 灰掉也传达了「这一轮已经结束」的信息
+        1.5 秒后自动复原。
+        """
+        color = semantic_colors()["success"]
+        self.btn_chpwd.setIcon(
+            icon("check", ICON_SIZE_BUTTON.width(), color=color)
+        )
+        self.btn_chpwd.setText("保存成功")
+        self.btn_chpwd.setStyleSheet("")
+        self.btn_chpwd.setToolTip("密码已修改")
+
+        self._pwd_busy = True
+        self.btn_chpwd.setEnabled(False)
+        self.btn_pwd_clear.setEnabled(False)
+        self._lock_close(True)
+
+        QTimer.singleShot(1500, self._restore_pwd_button)
+
+    def _restore_pwd_button(self) -> None:
+        """把按钮恢复成常态（保存图标 + 修改密码），解锁按钮"""
+        try:
+            self._pwd_busy = False
+            self.btn_chpwd.setIcon(
+                icon("save", ICON_SIZE_BUTTON.width())
+            )
+            self.btn_chpwd.setText(self.PWD_BTN_TEXT)
+            self.btn_chpwd.setStyleSheet("")
+            self.btn_chpwd.setToolTip("")
+            self.btn_chpwd.setEnabled(True)
+            self.btn_pwd_clear.setEnabled(True)
+            self._lock_close(False)
+        except RuntimeError:
+            # 对话框已关闭，控件已销毁
+            pass
+
+    def _verify_old_password(self, user: str, old: str) -> tuple[bool, str]:
+        """校验当前密码
+
+        优先从宿主机用密码登录 VM 的 SSH —— 这是用户实际登录的
+        同一条路径，最权威。若 guest 关了密码登录（或端口不通），
+        退回 guest 内 su 验证。
+        """
+        port = getattr(self.vm, "ssh_port", None)
+
+        if port:
+            try:
+                import paramiko
+
+                cli = paramiko.SSHClient()
+                cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                try:
+                    cli.connect(
+                        "127.0.0.1",
+                        port=int(port),
+                        username=user,
+                        password=old,
+                        timeout=12,
+                        allow_agent=False,
+                        look_for_keys=False,
+                        banner_timeout=12,
+                        auth_timeout=12,
+                    )
+                    return True, ""
+                except paramiko.AuthenticationException:
+                    # 密码确实不对 —— 这是权威结论，不用再试别的
+                    return False, "当前密码不正确"
+                except Exception:
+                    # 端口/网络问题，走下面的 su 兜底
+                    pass
+                finally:
+                    try:
+                        cli.close()
+                    except Exception:
+                        pass
+            except ImportError:
+                pass
+
+        import shlex
+
+        verify = (
+            f"command -v su >/dev/null 2>&1 || echo NO_SU; "
+            f"echo {shlex.quote(old)} | su - {shlex.quote(user)} "
+            f"-c 'echo OLD_OK' 2>/dev/null"
+        )
+        try:
+            _ok, out = vm_ssh.run_command(self.vm, verify, timeout=25)
+        except Exception as e:
+            return False, f"无法连接虚拟机校验密码: {e}"
+
+        out = out or ""
+        if "OLD_OK" in out:
+            return True, ""
+        if "NO_SU" in out:
+            return False, "无法校验当前密码（guest 内没有 su 命令）"
+        return False, "当前密码不正确"
+
     def _change_password(self) -> None:
-        """修改 guest 内账户密码（需先验证当前密码）"""
+        """修改 guest 内账户密码"""
+        # 防抖：进行中或成功提示期间重复触发一律忽略
+        # （回车 + 连点按钮很容易各触发一次）
+        if self._pwd_busy:
+            return
+
         old = self.ed_old_pwd.text()
         new1 = self.ed_new_pwd.text()
         new2 = self.ed_new_pwd2.text()
 
+        # 逐项校验，出错直接定位到对应输入框
         if not old:
-            self.lbl_chpwd_status.setText("请输入当前密码")
+            self._pwd_error("请输入当前密码", self.ed_old_pwd)
             return
         if not new1:
-            self.lbl_chpwd_status.setText("请输入新密码")
-            return
-        if new1 != new2:
-            self.lbl_chpwd_status.setText("两次输入的新密码不一致")
+            self._pwd_error("请输入新密码", self.ed_new_pwd)
             return
         if len(new1) < 4:
-            self.lbl_chpwd_status.setText("新密码至少 4 位")
+            self._pwd_error("新密码至少 4 位", self.ed_new_pwd)
             return
+        if new1 != new2:
+            self._pwd_error("两次输入的新密码不一致", self.ed_new_pwd2)
+            return
+        if new1 == old:
+            self._pwd_error("新密码不能与当前密码相同", self.ed_new_pwd)
+            return
+
         if not self.vm.running:
             # 资源已释放 → 先恢复再改密码，不让用户手动启动
-            self.lbl_chpwd_status.setText("正在恢复虚拟机…")
+            self._set_pwd_status("正在恢复虚拟机…", "")
             self._ensure_running(self._change_password)
             return
 
-        self.btn_chpwd.setEnabled(False)
-        self.lbl_chpwd_status.setText("正在修改…")
+        # 改密码会影响外部 SSH 登录，先确认
+        if QMessageBox.question(
+            self, "修改密码",
+            f"确定修改「{self.vm.spec.username}」的登录密码？\n\n"
+            "修改后：\n"
+            "· 外部 ssh 连接必须使用新密码\n"
+            "· 本应用使用密钥登录，不受影响",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_pwd_busy(True)
+        self._set_pwd_status("正在修改…", "")
 
         user = self.vm.spec.username
 
         def work():
-            # 用 chpasswd 非交互修改；先验证旧密码是否正确。
-            # passwd -S 只能看状态，不能验证旧密码，
-            # 所以用「旧密码登录测试」来校验。
+            # 1) 校验旧密码
+            ok, msg = self._verify_old_password(user, old)
+            if not ok:
+                return False, msg
+
+            # 2) 设置新密码（chpasswd 需要 root，走免密 sudo）
             import shlex
 
-            # 1) 验证旧密码：用 su 切过去试
-            verify_cmd = (
-                f"echo {shlex.quote(old)} | su - {shlex.quote(user)} "
-                f"-c 'echo OLD_OK' 2>/dev/null"
-            )
-            ok, out = vm_ssh.run_command(
-                self.vm, verify_cmd, timeout=20
-            )
-            if "OLD_OK" not in out:
-                return False, "当前密码不正确"
-
-            # 2) 设置新密码
             cmd = (
                 f"echo {shlex.quote(user)}:{shlex.quote(new1)} | "
                 f"sudo chpasswd"
             )
-            ok, out = vm_ssh.run_command(self.vm, cmd, timeout=20)
-            if not ok:
-                return False, out.strip()[:120] or "修改失败"
+            try:
+                ok2, out = vm_ssh.run_command(self.vm, cmd, timeout=25)
+            except Exception as e:
+                return False, f"执行失败: {e}"
 
+            if not ok2:
+                detail = (out or "").strip()[:160]
+                return False, detail or "修改失败（无输出）"
+
+            # chpasswd 成功时无输出；有输出且带 error 才算失败
+            low = (out or "").lower()
+            if "error" in low or "失败" in low:
+                return False, (out or "").strip()[:160]
             return True, ""
 
         def done(res):
-            ok, msg = res
-            self.btn_chpwd.setEnabled(True)
-            if ok:
-                self.lbl_chpwd_status.setText("✓ 密码已修改")
+            self._set_pwd_busy(False)
+            ok3, msg = res
+            if ok3:
                 self.ed_old_pwd.clear()
                 self.ed_new_pwd.clear()
                 self.ed_new_pwd2.clear()
+                self._validate_pwd()
+                self._set_pwd_status("")
+                # 记住新密码：悬停卡片等地方要显示实际值
+                vm_manager.set_password(self.vm.spec.name, new1)
+                self._flash_pwd_success()
                 notifier().info("密码已修改", self.vm.spec.name)
             else:
-                self.lbl_chpwd_status.setText(f"✗ {msg}")
+                self._set_pwd_status(f"✗ {msg}", "err")
 
-        self._spawn(work, done,
-                    lambda m: (
-                        setattr(self.btn_chpwd, "enabled", True),
-                        setattr(self.lbl_chpwd_status, "text", f"✗ {m}"),
-                    ))
+        def error(m):
+            self._set_pwd_busy(False)
+            self._set_pwd_status(f"✗ {m}", "err")
+
+        self._spawn(work, done, error)
 
     # ─────────────────────────────────────────
     # 刷新
@@ -570,12 +864,14 @@ class VMDetailDialog(QDialog):
         self._fill_shares()
 
     def _on_file_busy(self, busy: bool) -> None:
-        """文件面板忙碌时禁用关闭按钮（避免中途关窗口导致崩溃）"""
+        """文件面板忙碌时禁用关闭按钮（避免中途关窗口导致崩溃）
+
+        不再在底部写「操作进行中，请稍候…」——
+        文件面板自己已有加载指示，底部这行只是噪音。
+        """
         btn = getattr(self, "btn_close", None)
         if btn is not None:
             btn.setEnabled(not busy)
-        if busy:
-            self.lbl_status.setText("操作进行中，请稍候…")
 
     def _tick(self) -> None:
         """定时刷新副标题里的状态文字"""
@@ -638,15 +934,14 @@ class VMDetailDialog(QDialog):
         self._spawn(work, done, error)
 
 
-    def _load_console(self) -> None:
-        try:
-            out = vm_qemu.read_console(self.vm.dir)
-        except Exception as e:
-            out = f"读取失败: {e}"
-        self.console.setPlainText(out[-200000:])
-        self.console.verticalScrollBar().setValue(
-            self.console.verticalScrollBar().maximum()
-        )
+    def _on_file_status(self, text: str) -> None:
+        """文件面板的状态只在「文件」tab 显示
+
+        状态栏是共用的，否则切到账户页还挂着文件页的
+        「加载中…」，看着像界面卡住了。
+        """
+        if self.tabs.currentIndex() == 0:
+            self.lbl_status.setText(text)
 
     def _copy_ssh(self) -> None:
         cmd = self.vm.ssh_command()
