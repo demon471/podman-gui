@@ -90,6 +90,7 @@ class VMPage(QWidget):
         self._pending_vms: set[str] = set()
         self._starting: set[str] = set()      # 区分「启动中」/「重启中」
         self._stopping: set[str] = set()      # 「停止中」文案
+        self._mounting: set[str] = set()      # 「目录挂载中」文案
         # loading 图标旋转帧（0-7，对应 8 个角度）
         self._spin_frame = 0
         self._spin_timer = QTimer(self)
@@ -449,6 +450,8 @@ class VMPage(QWidget):
             return "启动中…"
         if name in self._stopping:
             return "停止中…"
+        if name in self._mounting:
+            return "目录挂载中…"
         return "重启中…"
 
     def _spin_icon(self) -> QIcon:
@@ -791,6 +794,8 @@ class VMPage(QWidget):
                 self._starting.add(pending_vm)
             elif label == "停止":
                 self._stopping.add(pending_vm)
+            elif label == "挂载":
+                self._mounting.add(pending_vm)
             self._spin_timer.start()
             self._hide_card()
             self._rebuild()
@@ -802,6 +807,7 @@ class VMPage(QWidget):
             self._pending_vms.discard(name)
             self._starting.discard(name)
             self._stopping.discard(name)
+            self._mounting.discard(name)
             if not self._pending_vms:
                 self._spin_timer.stop()
 
@@ -928,6 +934,11 @@ class VMPage(QWidget):
                 vm = next((v for v in self._vms if v.spec.name == name), None)
                 if vm is not None:
                     self.keepalive.note_ready(vm)
+                    # 自动挂载共享目录。
+                    # QEMU 的 -virtfs 只是把目录暴露成 9p 设备，
+                    # guest 内还要 mount 才能访问 —— 之前没有任何
+                    # 地方做这一步，用户配了共享目录也看不到内容。
+                    self._mount_shares_async(vm)
                 self.status_message.emit(f"{name} 已就绪（{detail}s）")
                 notifier().info("虚拟机已就绪", name)
             else:
@@ -941,6 +952,34 @@ class VMPage(QWidget):
             if not self._pending_vms:
                 self._spin_timer.stop()
             self.refresh_silent()
+
+        task = run_async(work, on_done=done, on_error=error, parent=self)
+        self._tasks.append(task)
+
+    def _mount_shares_async(self, vm) -> None:
+        """后台挂载该 VM 的全部共享目录（不阻塞 UI）"""
+        if not vm.spec.shares:
+            return
+
+        def work():
+            return vm_ssh.mount_all_shares(vm)
+
+        def done(results):
+            ok_n = sum(1 for _t, ok, _m in results if ok)
+            total = len(results)
+            if ok_n == total:
+                self.status_message.emit(
+                    f"{vm.spec.name} 共享目录已挂载（{ok_n} 个）"
+                )
+            else:
+                failed = [t for t, ok, _m in results if not ok]
+                self.status_message.emit(
+                    f"{vm.spec.name} 共享目录 {ok_n}/{total} 挂载成功，"
+                    f"失败：{', '.join(failed)}"
+                )
+
+        def error(msg):
+            self.status_message.emit(f"共享目录挂载失败: {msg}")
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
         self._tasks.append(task)
@@ -1170,7 +1209,14 @@ class VMPage(QWidget):
             on_success=done,
         )
 
-    def _open_detail(self) -> None:
+    # 共享目录 tab 在详情页里的索引
+    DETAIL_TAB_SHARES = 1
+
+    def _open_detail(self, initial_tab: int | None = None) -> None:
+        """打开详情对话框
+
+        initial_tab 用于「重启并挂载」流程结束后自动回到共享目录页。
+        """
         vm = self._selected_vm()
         if not vm:
             return
@@ -1181,9 +1227,78 @@ class VMPage(QWidget):
 
         from ui.vm_detail import VMDetailDialog
 
-        dlg = VMDetailDialog(vm, self)
+        dlg = VMDetailDialog(vm, self, initial_tab=initial_tab)
+        dlg.restart_and_mount_requested.connect(self._restart_and_mount)
         dlg.exec()
         self.refresh_silent()
+
+    def _restart_and_mount(self, name: str) -> None:
+        """重启虚拟机并挂载共享目录（详情页发起的请求）
+
+        流程：
+          1. 详情页已关闭
+          2. 列表该行进入 loading（「目录挂载中…」）
+          3. 后台：重启 → 等 SSH 就绪 → 挂载共享
+          4. 完成后自动重新打开详情页，定位到共享目录 tab
+        """
+        vm = vm_manager.load(name)
+        if vm is None:
+            return
+
+        def work():
+            ok, err = vm_manager.restart_vm(vm)
+            if not ok:
+                return False, f"重启失败: {err}"
+
+            fresh = vm_manager.load(name)
+            if fresh is None:
+                return False, "重启后找不到虚拟机"
+
+            # 等 guest 真正起来（restart_vm 只保证 QEMU 进程）
+            deadline = _time_mod.monotonic() + 120
+            ready = False
+            while _time_mod.monotonic() < deadline:
+                o, _ = vm_ssh.test_connection(fresh, timeout=5)
+                if o:
+                    ready = True
+                    break
+                _time_mod.sleep(2)
+
+            if not ready:
+                return False, "重启后 SSH 未就绪，共享目录未挂载"
+
+            if fresh.spec.shares:
+                results = vm_ssh.mount_all_shares(fresh)
+                failed = [t for t, ok2, _m in results if not ok2]
+                if failed:
+                    return True, f"已重启，但 {', '.join(failed)} 挂载失败"
+            return True, ""
+
+        def done(res):
+            ok, detail = res if isinstance(res, tuple) else (False, "")
+            if ok:
+                self.status_message.emit(f"{name} {detail or '共享目录已挂载'}")
+                notifier().info("共享目录已挂载", name)
+                # 自动重新打开详情，定位到共享目录
+                QTimer.singleShot(0, lambda: self._reopen_detail_shares(name))
+            else:
+                self.status_message.emit(f"{name} {detail}")
+                notifier().op_failed("挂载共享目录", name, detail)
+
+        self.run_op(
+            "挂载", work,
+            pending_vm=name,
+            busy_text=f"正在重启 {name} 并挂载共享目录…",
+            on_success=done,
+        )
+
+    def _reopen_detail_shares(self, name: str) -> None:
+        """重新打开详情页并定位到共享目录 tab"""
+        for r in range(self.model.rowCount()):
+            if self.model.item(r, 0).text() == name:
+                self.table.selectRow(r)
+                break
+        self._open_detail(initial_tab=self.DETAIL_TAB_SHARES)
 
     # ─────────────────────────────────────────
     # 右键菜单
@@ -1217,7 +1332,11 @@ class VMPage(QWidget):
             # 详情页里的文件 / 控制台 / 共享目录都依赖 guest 在运行，
             # 未启动时进去是空的 —— 所以这一项只在可用时出现。
             menu.addSeparator()
-            menu.addAction(icon("info"), "详情…", self._open_detail)
+            # 用 lambda 包一层：QAction.triggered 会传 bool，
+            # 直接连 _open_detail 会被当成 initial_tab 参数
+            menu.addAction(
+                icon("info"), "详情…", lambda: self._open_detail()
+            )
 
         menu.addSeparator()
         act_del = menu.addAction(icon("delete", danger=True), "删除…", self._delete_selected)

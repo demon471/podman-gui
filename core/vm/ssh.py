@@ -274,26 +274,135 @@ def get_ip(vm) -> str:
 # 挂载共享目录（9p）
 # ─────────────────────────────────────────
 def mount_share(vm, tag: str, mount_point: str) -> tuple[bool, str]:
-    """在 VM 内挂载 9p 共享目录
+    """在 VM 内挂载共享目录
 
-    msize 用 262144（256KB）：默认 8KB 会在大文件传输时频繁分片，
-    提升后拷贝大文件快数倍。version=9p2000.L 是 Linux 客户端专用，
-    支持 symlink / 硬链接 / 扩展属性。
+    优先 virtiofs（新方案），失败回退 9p（老内核）。
+
+    为什么需要回退：
+    Rocky / RHEL 10 内核没有 9p 模块，只能 virtiofs；
+    而很老的发行版可能没有 virtiofs。两条都试，谁通用谁。
+
+    msize 262144（256KB）：9p 默认 8KB 会让大文件传输频繁分片。
     """
-    cmd = (
-        f"sudo mkdir -p {shlex.quote(mount_point)} && "
-        f"sudo modprobe 9pnet_virtio 2>/dev/null; "
+    mp = shlex.quote(mount_point)
+
+    # 已挂载就跳过（幂等 —— 每次启动都会调一遍）
+    check = (
+        f"sudo mkdir -p {mp}; "
+        f"if grep -qs ' {mount_point} ' /proc/mounts; then "
+        f"echo ALREADY_MOUNTED; exit 0; fi; "
+    )
+
+    # 1) virtiofs
+    vfs_cmd = (
+        check
+        + "sudo modprobe virtiofs 2>/dev/null; "
+        + f"sudo mount -t virtiofs {shlex.quote(tag)} {mp} 2>/dev/null "
+        + "&& echo MOUNT_OK_VIRTIOFS && exit 0; "
+    )
+
+    # 2) 9p 回退（需要完整的模块链：文件系统 + 网络 + virtio 传输）
+    p9_cmd = (
+        "sudo modprobe 9p 2>/dev/null; "
+        "sudo modprobe 9pnet 2>/dev/null; "
+        "sudo modprobe 9pnet_virtio 2>/dev/null; "
         f"sudo mount -t 9p "
         f"-o trans=virtio,version=9p2000.L,msize=262144 "
-        f"{shlex.quote(tag)} {shlex.quote(mount_point)}"
+        f"{shlex.quote(tag)} {mp} 2>&1 "
+        "&& echo MOUNT_OK_9P && exit 0; "
+        "echo MOUNT_FAILED"
     )
-    return run_command(vm, cmd, timeout=30)
+
+    ok, out = run_command(vm, vfs_cmd + p9_cmd, timeout=40)
+    text = out or ""
+    if "MOUNT_OK_VIRTIOFS" in text or "MOUNT_OK_9P" in text:
+        return True, ""
+    if "ALREADY_MOUNTED" in text:
+        return True, ""
+
+    # 给出能直接看懂的原因
+    if "unknown filesystem type" in text:
+        return False, (
+            "该发行版内核既不支持 virtiofs 也不支持 9p。\n"
+            "共享目录不可用，请改用「文件」页的上传/下载。"
+        )
+    return False, text.strip()[:300] or "挂载失败"
+
+
+def unmount_share(vm, tag: str, mount_point: str | None = None) -> tuple[bool, str]:
+    """卸载 VM 内的 9p 共享
+
+    删除共享目录时调用，避免留下悬空的挂载点
+    （后续访问会报 "Stale file handle"）。
+    """
+    mp = mount_point or f"/mnt/host/{tag}"
+    cmd = (
+        f"sudo umount {shlex.quote(mp)} 2>/dev/null; "
+        f"sudo rmdir {shlex.quote(mp)} 2>/dev/null; "
+        f"echo UM_OK"
+    )
+    ok, out = run_command(vm, cmd, timeout=20)
+    return ok and "UM_OK" in (out or ""), out
+
+
+def unmount_all_shares(vm) -> list[tuple[str, bool, str]]:
+    """卸载 VM 内所有共享目录
+
+    休眠前调用。必须真的卸干净（而不只是丢掉引用），
+    否则 guest 的 dentry/inode 缓存会跨快照残留，
+    恢复后读到错乱的文件。
+    """
+    results: list[tuple[str, bool, str]] = []
+    for _host, tag in vm.spec.shares:
+        try:
+            ok, msg = unmount_share(vm, tag)
+            results.append((tag, ok, msg or ""))
+        except Exception as e:
+            results.append((tag, False, str(e)))
+    return results
+
+
+def mounted_tags(vm) -> set[str]:
+    """查询 VM 内已挂载的 9p tag 集合
+
+    读 /proc/mounts 里 type=9p 的条目，第二列是挂载点，
+    第一列是 tag。用于在界面上显示「已挂载 / 未挂载」。
+    """
+    # 必须同时匹配 virtiofs 和 9p：
+    # 现在主用 virtiofs，只查 9p 会让状态一直显示「未挂载」，
+    # 而实际已经挂上了 —— 用户看到的就是「挂载成功但显示未挂载」。
+    ok, out = run_command(
+        vm,
+        "awk '$3==\"9p\" || $3==\"virtiofs\" {print $1\" \"$2}' "
+        "/proc/mounts 2>/dev/null",
+        timeout=15,
+    )
+    if not ok:
+        return set()
+
+    tags = set()
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if parts:
+            tags.add(parts[0])
+    return tags
+
+
+def share_states(vm) -> dict[str, bool]:
+    """每个已配置共享目录的挂载状态：{tag: 是否已挂载}"""
+    live = mounted_tags(vm)
+    return {tag: (tag in live) for _host, tag in vm.spec.shares}
 
 
 def mount_all_shares(vm) -> list[tuple[str, bool, str]]:
     """挂载所有共享目录到 /mnt/host/<tag>
 
-    与详情对话框里展示的路径保持一致。
+    **这是共享目录功能的关键一环**：QEMU 用 -virtfs 把宿主机目录
+    暴露成 9p 设备，但 guest 内还需要主动 mount 才能访问。
+    之前没有任何地方调用本函数，导致用户配好共享目录、重启 VM 后
+    /mnt/host/ 下依然什么都没有。
+
+    调用时机：VM 启动且 SSH 就绪之后。
     """
     results = []
     for _host_path, tag in vm.spec.shares:

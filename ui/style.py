@@ -309,6 +309,17 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
+/* 忙碌遮罩（重启等耗时操作时覆盖整个对话框） */
+QLabel#busyOverlay {{
+    /* 用足够深的半透明黑，保证白字在任何主题下都清晰可读。
+       90 太浅，浅色主题下白字几乎看不见。 */
+    background-color: rgba(0, 0, 0, 150);
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 500;
+    padding: 24px;
+}}
+
 /* ═══════════ 标签页 ═══════════
  *
  * 这里**故意不写任何 QTabBar::tab 规则**。

@@ -214,7 +214,15 @@ def build_command(
         binary,
         "-name", spec.name,
         # mem-merge=on 让 KSM 可以合并该 VM 的内存页
-        "-machine", f"{MACHINE_TYPES.get(spec.arch, 'q35')},mem-merge=on",
+        # 有共享目录时用 memfd 内存后端：
+        # vhost-user（virtiofs 用的协议）要求 QEMU 把 guest 内存
+        # 共享给外部进程（virtiofsd）。默认的匿名内存无法 mmap，
+        # virtiofsd 会报 HandleRequest(InvalidParam) 然后断开 ——
+        # 表现为 VM 内 mount 一直卡住。
+        "-object",
+        f"memory-backend-memfd,id=vmmem,size={spec.memory_mb}M,share=on",
+        "-machine",
+        f"{MACHINE_TYPES.get(spec.arch, 'q35')},mem-merge=on,memory-backend=vmmem",
         "-m", str(spec.memory_mb),
         "-smp", str(spec.cpus),
     ]
@@ -292,34 +300,26 @@ def build_command(
         "-device", "virtio-net-pci,netdev=net0",
     ]
 
-    # ── 共享目录（9p）──
-    # 用 passthrough 而非 mapped-xattr：
-    #   mapped-xattr 会把 VM 内用户映射到宿主机某 UID，导致 VM 内
-    #   非 root 用户写宿主机文件时 Permission denied。
-    #   passthrough 让 VM 内直接以宿主机 UID/GID 访问，
-    #   宿主机与 VM 双向读写都正常（需 VM 内 UID 与宿主机一致时才最直观）。
-    for i, (host_path, mount_tag) in enumerate(spec.shares):
-        if not Path(host_path).is_dir():
-            continue
-        cmd += [
-            "-virtfs",
-            f"local,path={host_path},mount_tag={mount_tag},"
-            f"security_model=none,id=fsdev{i}",
-        ]
-        # security_model 三种取值的区别（实测结论）：
-        #   mapped-xattr（默认）→ VM 内 UID 被映射到宿主机未占用 UID，
-        #     VM 内非 root 用户写宿主机文件 Permission denied。
-        #   passthrough        → VM 内客户端创建文件时 QEMU 会 chown 成
-        #     VM 内 UID；VM 内 UID 与宿主机不一致时 QEMU 无 CAP_CHOWN，
-        #     报 EPERM（Operation not permitted），连 root 都写不了。
-        #   none               → 不做 UID 映射、不 chown，文件统一归
-        #     运行 QEMU 的宿主机用户。读写都正常，是唯一跨发行版通用的选择。
-        #
-        # 宿主机侧仍放开目录权限，避免 QEMU 用户无写权限的场景。
-        try:
-            os.chmod(host_path, 0o777)
-        except OSError:
-            pass
+    # ── 共享目录（virtiofs）──
+    #
+    # 为什么不是 9p：Rocky / RHEL 10 的内核已彻底移除 9p 模块，
+    # 挂载会报 "unknown filesystem type '9p'"。virtiofs 是它的
+    # 继任者，Alpine 3.22 与 Rocky 10 都支持。
+    #
+    # 每个共享目录需要一个独立的 virtiofsd 守护进程（由
+    # core.vm.virtiofs 管理，在调用 build_command 之前就已拉起），
+    # QEMU 通过 unix socket 与之通信。
+    if spec.shares:
+        from core.vm import virtiofs as _vfs
+
+        cmd += _vfs.qemu_args(vm_dir, spec.shares)
+
+        # 宿主机侧放开目录权限，避免 VM 内写入被拒
+        for host_path, _tag in spec.shares:
+            try:
+                os.chmod(host_path, 0o777)
+            except OSError:
+                pass
 
     # ── 显示 ──
     if vnc_display is not None:
@@ -488,6 +488,21 @@ def start(spec: VMSpec, vm_dir: Path, *, vnc: int | None = None) -> tuple[bool, 
             "（会自动重新下载镜像，已写入磁盘的数据无法恢复）。"
         )
 
+    # 共享目录：先拉起 virtiofsd，QEMU 才能连上 socket
+    if spec.shares:
+        from core.vm import virtiofs as _vfs
+
+        if not _vfs.available():
+            return False, (
+                "宿主机未安装 virtiofsd，无法使用共享目录。\n"
+                "请安装 qemu 包（通常自带 /usr/lib/virtiofsd），"
+                "或先移除共享目录配置。"
+            )
+        errs = _vfs.ensure_all(vm_dir, spec.shares)
+        if errs:
+            _vfs.stop_all(vm_dir)
+            return False, "共享目录后端启动失败：\n" + "\n".join(errs)
+
     try:
         cmd = build_command(spec, vm_dir, headless=(vnc is None), vnc_display=vnc)
     except RuntimeError as e:
@@ -546,6 +561,7 @@ def stop(vm_dir: Path, timeout: int = 30) -> tuple[bool, str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if not is_running(vm_dir):
+            _cleanup_share_daemons(vm_dir)
             return True, ""
         time.sleep(0.3)
 
@@ -746,6 +762,24 @@ def snapshot_restore(vm_dir: Path) -> tuple[bool, str]:
     except (OSError, ValueError, KeyError) as e:
         return False, f"读取配置失败: {e}"
 
+    # 共享目录后端必须比 QEMU 先起来：
+    # 恢复快照走的是同一条 build_command，里面有 vhost-user-fs
+    # 设备，QEMU 启动时会立刻连 virtiofsd 的 socket。
+    # 之前这里漏了，导致「休眠 → 唤醒」之后共享目录全部失效
+    # （guest 内 mount 还在，但访问会卡死）。
+    if spec.shares:
+        from core.vm import virtiofs as _vfs
+
+        if not _vfs.available():
+            return False, (
+                "宿主机未安装 virtiofsd，无法恢复带共享目录的虚拟机。\n"
+                "请安装 qemu 包，或先移除共享目录配置。"
+            )
+        errs = _vfs.ensure_all(vm_dir, spec.shares)
+        if errs:
+            _vfs.stop_all(vm_dir)
+            return False, "共享目录后端启动失败：\n" + "\n".join(errs)
+
     incoming = f"exec:zstd -d -q -c {snap}"
     try:
         cmd = build_command(spec, vm_dir, headless=True, incoming=incoming)
@@ -758,6 +792,7 @@ def snapshot_restore(vm_dir: Path) -> tuple[bool, str]:
         return False, str(e)
 
     if r.returncode != 0:
+        _cleanup_share_daemons(vm_dir)
         return False, (r.stderr or r.stdout).strip()[:400]
 
     # 等 QEMU 起来（进程存在即可，迁移流在后台灌入）
@@ -786,6 +821,16 @@ def snapshot_restore(vm_dir: Path) -> tuple[bool, str]:
     return False, "恢复超时"
 
 
+def _cleanup_share_daemons(vm_dir: Path) -> None:
+    """VM 停止后清理 virtiofsd（否则进程残留、socket 占着）"""
+    try:
+        from core.vm import virtiofs as _vfs
+
+        _vfs.stop_all(vm_dir)
+    except Exception:
+        pass
+
+
 def kill(vm_dir: Path) -> tuple[bool, str]:
     """强制终止"""
     pid = read_pid(vm_dir)
@@ -799,6 +844,7 @@ def kill(vm_dir: Path) -> tuple[bool, str]:
         return False, str(e)
     time.sleep(0.3)
     (vm_dir / "qemu.pid").unlink(missing_ok=True)
+    _cleanup_share_daemons(vm_dir)
     return True, ""
 
 

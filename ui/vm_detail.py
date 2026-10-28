@@ -11,9 +11,13 @@
 
 from __future__ import annotations
 
+import re
+import time
+from pathlib import Path
+
 import subprocess
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -47,19 +51,74 @@ from resources.icons import ICON_SIZE_BUTTON, ICON_SIZE_DIALOG, icon
 from ui.utils import fmt_size
 
 
+class _BusyOverlay(QWidget):
+    """全屏忙碌遮罩
+
+    用 paintEvent 自绘半透明背景 —— QLabel 的 QSS background
+    在部分主题下不生效（父级样式覆盖），白字会看不清。
+    自绘最可靠。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self.update()
+
+    def paintEvent(self, e) -> None:
+        from PyQt6.QtGui import QColor, QPainter
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 深色半透明底，白字在任何主题下都清晰
+        p.fillRect(self.rect(), QColor(20, 20, 20, 190))
+
+        p.setPen(QColor(255, 255, 255))
+        f = self.font()
+        f.setPointSizeF(f.pointSizeF() + 2)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(
+            self.rect().adjusted(40, 40, -40, -40),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            self._text,
+        )
+        p.end()
+
+
 class VMDetailDialog(QDialog):
+    # 请求「重启并挂载共享目录」
+    # 由列表页接管：关闭本对话框 → 列表显示 loading →
+    # 后台重启 + 挂载 → 完成后自动重新打开详情（定位到共享目录 tab）
+    restart_and_mount_requested = pyqtSignal(str)
     """虚拟机详情"""
 
-    def __init__(self, vm, parent: QWidget | None = None):
+    def __init__(self, vm, parent: QWidget | None = None,
+                 initial_tab: int | None = None):
         super().__init__(parent)
         self.vm = vm
         self._busy = False
         self._tasks: list = []
+        # 共享目录配置是否已变更、待重启生效
+        self._shares_dirty = False
 
         self.setWindowTitle(f"虚拟机 - {vm.spec.name}")
         self.resize(820, 620)
 
         self._build_ui()
+
+        # 全屏忙碌遮罩：重启等耗时操作时盖住整个对话框，
+        # 明确告诉用户「正在做什么」，并挡住所有点击。
+        self._overlay = _BusyOverlay(self)
+        self._overlay.hide()
+
+        # 从「重启并挂载」流程回来时直接落在共享目录页
+        if initial_tab is not None and 0 <= initial_tab < self.tabs.count():
+            self.tabs.setCurrentIndex(initial_tab)
+
         self.refresh()
 
         # 状态轮询
@@ -183,21 +242,30 @@ class VMDetailDialog(QDialog):
 
     # ── 共享 ──
     def _build_shares(self) -> QWidget:
+        """共享目录：宿主机目录 ↔ VM 内 /mnt/host/<挂载点>
+
+        操作设计原则（用户视角）：
+          · 选目录用文件浏览器，不用手打路径
+          · 挂载点自动从目录名推导，可改
+          · 一眼看出哪些已挂载、哪些需要重启
+          · 改完给一个「应用并重启」的直达按钮
+        """
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(10, 12, 10, 10)
         v.setSpacing(8)
 
         hint = QLabel(
-            "共享目录通过 virtio-9p 把宿主机目录挂载进 VM，实现宿主机与 VM 文件互通。"
-            "挂载点在 VM 内为 /mnt/host/<挂载点>。修改后需重启虚拟机生效。"
+            "把宿主机目录挂进 VM，在 VM 内访问 /mnt/host/<挂载点>。"
         )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
-        self.tbl_shares = QTableWidget(0, 2)
-        self.tbl_shares.setHorizontalHeaderLabels(["宿主机目录", "挂载点"])
+        self.tbl_shares = QTableWidget(0, 3)
+        self.tbl_shares.setHorizontalHeaderLabels(
+            ["宿主机目录", "VM 内路径", "状态"]
+        )
         self.tbl_shares.verticalHeader().setVisible(False)
         self.tbl_shares.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -209,29 +277,53 @@ class VMDetailDialog(QDialog):
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
         self.tbl_shares.setAlternatingRowColors(True)
-        self.tbl_shares.horizontalHeader().setStretchLastSection(True)
+        hdr = self.tbl_shares.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         v.addWidget(self.tbl_shares, 1)
 
+        # 状态提示（需要重启时出现）
+        self.lbl_share_hint = QLabel("")
+        self.lbl_share_hint.setObjectName("hintLabel")
+        self.lbl_share_hint.setWordWrap(True)
+        self.lbl_share_hint.setVisible(False)
+        v.addWidget(self.lbl_share_hint)
+
+        # 操作行
         row = QHBoxLayout()
-        self.ed_share_path = QLineEdit()
-        self.ed_share_path.setPlaceholderText("宿主机目录，如 /home/john/projects")
-        row.addWidget(self.ed_share_path, 2)
+        row.setSpacing(6)
 
-        row.addWidget(QLabel("挂载点"))
-        self.ed_share_tag = QLineEdit()
-        self.ed_share_tag.setPlaceholderText("如 projects")
-        self.ed_share_tag.setFixedWidth(140)
-        row.addWidget(self.ed_share_tag)
+        self.btn_share_add = QPushButton("添加目录…")
+        self.btn_share_add.setIcon(icon("add", ICON_SIZE_BUTTON.width()))
+        self.btn_share_add.clicked.connect(self._add_share)
+        row.addWidget(self.btn_share_add)
 
-        btn_add = QPushButton("添加")
-        btn_add.setIcon(icon("add", ICON_SIZE_BUTTON.width()))
-        btn_add.clicked.connect(self._add_share)
-        row.addWidget(btn_add)
+        self.btn_share_mount = QPushButton("立即挂载")
+        self.btn_share_mount.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
+        self.btn_share_mount.setToolTip(
+            "在 VM 内挂载选中的共享目录（需要 QEMU 已带 9p 设备，"
+            "即添加后重启过）"
+        )
+        self.btn_share_mount.clicked.connect(self._mount_selected_share)
+        row.addWidget(self.btn_share_mount)
 
-        btn_del = QPushButton("删除")
-        btn_del.setIcon(icon("delete", ICON_SIZE_BUTTON.width(), danger=True))
-        btn_del.clicked.connect(self._del_share)
-        row.addWidget(btn_del)
+        self.btn_share_del = QPushButton("移除")
+        self.btn_share_del.setIcon(
+            icon("delete", ICON_SIZE_BUTTON.width(), danger=True)
+        )
+        self.btn_share_del.clicked.connect(self._del_share)
+        row.addWidget(self.btn_share_del)
+
+        row.addStretch()
+
+        self.btn_share_apply = QPushButton("应用并重启")
+        self.btn_share_apply.setToolTip(
+            "共享目录的增删需要重启 VM 才能让 QEMU 加载 9p 设备"
+        )
+        self.btn_share_apply.clicked.connect(self._apply_shares)
+        self.btn_share_apply.setVisible(False)
+        row.addWidget(self.btn_share_apply)
 
         v.addLayout(row)
         return w
@@ -493,14 +585,58 @@ class VMDetailDialog(QDialog):
         self.lbl_sub.setText(f"{self.vm.spec.image_key} · {state_text}")
 
     def _fill_shares(self) -> None:
+        """填充共享目录表格：目录 / VM 内路径 / 挂载状态
+
+        状态通过 SSH 查询 guest 的 /proc/mounts，失败时统一显示
+        「未挂载」，不阻塞界面（查询放后台）。
+        """
         shares = self.vm.spec.shares
         self.tbl_shares.setRowCount(len(shares))
-        for i, (path, tag) in enumerate(shares):
-            self.tbl_shares.setItem(i, 0, QTableWidgetItem(path))
-            self.tbl_shares.setItem(i, 1, QTableWidgetItem(f"/mnt/host/{tag}"))
-        self.tbl_shares.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+
+        for r, (host_path, tag) in enumerate(shares):
+            self.tbl_shares.setItem(r, 0, QTableWidgetItem(host_path))
+            self.tbl_shares.setItem(
+                r, 1, QTableWidgetItem(f"/mnt/host/{tag}")
+            )
+            # 先占位，异步查询后回填
+            state_item = QTableWidgetItem("…")
+            state_item.setData(Qt.ItemDataRole.UserRole, tag)
+            self.tbl_shares.setItem(r, 2, state_item)
+
+        # 按钮可用性
+        has = bool(shares)
+        self.btn_share_mount.setEnabled(has)
+        self.btn_share_del.setEnabled(has)
+
+        if not has:
+            return
+
+        if not self.vm.running:
+            for r in range(len(shares)):
+                self.tbl_shares.item(r, 2).setText("未挂载")
+            return
+
+        # 后台查挂载状态
+        def work():
+            return vm_ssh.share_states(self.vm)
+
+        def done(states):
+            for r in range(self.tbl_shares.rowCount()):
+                item = self.tbl_shares.item(r, 2)
+                if item is None:
+                    continue
+                tag = item.data(Qt.ItemDataRole.UserRole)
+                mounted = states.get(tag, False)
+                item.setText("已挂载" if mounted else "未挂载")
+
+        def error(_msg):
+            for r in range(self.tbl_shares.rowCount()):
+                item = self.tbl_shares.item(r, 2)
+                if item is not None:
+                    item.setText("未挂载")
+
+        self._spawn(work, done, error)
+
 
     def _load_console(self) -> None:
         try:
@@ -517,11 +653,75 @@ class VMDetailDialog(QDialog):
         QGuiApplication.clipboard().setText(cmd)
         self.lbl_status.setText(f"已复制到剪贴板：{cmd}")
 
+    @staticmethod
+    def _derive_share_tag(path: str) -> tuple[str, bool]:
+        """从目录名推导 9p 挂载点
+
+        返回 (tag, 是否因无法推导而回退到 share)。
+
+        要点：不能把非 ASCII 字符逐个替换成 `-` ——
+        `/home/john/下载` 会变成 `--`，输入框里显示两个减号，
+        非常诡异。这里直接丢弃非 ASCII，结果为空时回退到 share。
+        """
+        name = Path(path).name
+        # 只保留 ASCII 字母数字下划线连字符
+        tag = re.sub(r"[^A-Za-z0-9_-]", "", name)
+        # 清理连续的 -/_ 和首尾残留
+        tag = re.sub(r"[-_]{2,}", "-", tag).strip("-_")
+
+        if not tag:
+            return "share", True
+        return tag, False
+
     def _add_share(self) -> None:
-        path = self.ed_share_path.text().strip()
-        tag = self.ed_share_tag.text().strip()
-        if not path or not tag:
-            QMessageBox.information(self, "请填写", "宿主机目录和挂载点都要填写。")
+        """添加共享目录：选目录 → 自动推导挂载点 → 确认"""
+        from PyQt6.QtWidgets import QFileDialog
+
+        path = QFileDialog.getExistingDirectory(
+            self, "选择要共享的宿主机目录", str(Path.home()),
+            QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not path:
+            return
+
+        tag, auto = self._derive_share_tag(path)
+
+        existing = {t for _p, t in self.vm.spec.shares}
+        if tag in existing:
+            i = 2
+            while f"{tag}-{i}" in existing:
+                i += 1
+            tag = f"{tag}-{i}"
+
+        # 用 QInputDialog 实例而不是 getText 静态方法，
+        # 这样才能给输入框设置 placeholder（提示格式）。
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("挂载点")
+        dlg.setLabelText(
+            f"宿主机目录：{path}\n\n"
+            f"VM 内访问路径：/mnt/host/<挂载点>"
+            + ("\n\n（目录名含中文等字符，已自动命名为 share）" if auto else "")
+        )
+        dlg.setTextValue(tag)
+        dlg.setTextEchoMode(QLineEdit.EchoMode.Normal)
+        dlg.setOkButtonText("添加")
+        dlg.setCancelButtonText("取消")
+        line = dlg.findChild(QLineEdit)
+        if line is not None:
+            line.setPlaceholderText("挂载点名称，如 projects")
+            line.selectAll()
+        if dlg.exec() != QInputDialog.DialogCode.Accepted:
+            return
+        tag = dlg.textValue().strip()
+        if not tag:
+            return
+        # 挂载点必须能安全用作 9p tag
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", tag):
+            QMessageBox.warning(
+                self, "挂载点不合法",
+                "挂载点只能用字母、数字、下划线和连字符。\n"
+                "（VM 内路径不能含中文或空格）",
+            )
             return
 
         ok, err = vm_manager.add_share(self.vm, path, tag)
@@ -529,20 +729,19 @@ class VMDetailDialog(QDialog):
             QMessageBox.warning(self, "添加失败", err)
             return
 
-        self.ed_share_path.clear()
-        self.ed_share_tag.clear()
         self.refresh()
-        self.lbl_status.setText(f"已添加共享 {path} → /mnt/host/{tag}，重启后生效")
+        self._mark_shares_changed(f"已添加 {path} → /mnt/host/{tag}")
 
     def _del_share(self) -> None:
+        """移除共享目录（若已挂载，先卸载再删配置）"""
         row = self.tbl_shares.currentRow()
         if row < 0 or row >= len(self.vm.spec.shares):
             return
         path, tag = self.vm.spec.shares[row]
 
         if QMessageBox.question(
-            self, "确认删除",
-            f"确定删除共享「{tag}」（{path}）吗？",
+            self, "移除共享",
+            f"移除「{tag}」？\n\n宿主机目录 {path} 本身不会被删除。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
@@ -550,11 +749,106 @@ class VMDetailDialog(QDialog):
 
         ok, err = vm_manager.remove_share(self.vm, tag)
         if not ok:
-            QMessageBox.warning(self, "删除失败", err)
+            QMessageBox.warning(self, "移除失败", err)
             return
-        self.refresh()
-        self.lbl_status.setText("已删除，重启虚拟机后生效")
 
+        if self.vm.running:
+            self._spawn(
+                lambda: vm_ssh.unmount_share(self.vm, tag),
+                lambda _r: self.refresh(),
+                lambda _m: self.refresh(),
+            )
+        else:
+            self.refresh()
+
+        self._mark_shares_changed(f"已移除 {tag}")
+
+    def _mount_selected_share(self) -> None:
+        """在 VM 内立即挂载选中的共享目录"""
+        row = self.tbl_shares.currentRow()
+        if row < 0 or row >= len(self.vm.spec.shares):
+            self.lbl_status.setText("请先选择一个共享目录")
+            return
+
+        _path, tag = self.vm.spec.shares[row]
+        if not self.vm.running:
+            self.lbl_status.setText("虚拟机未运行，启动后会自动挂载")
+            return
+
+        self._spawn(
+            lambda: vm_ssh.mount_share(self.vm, tag, f"/mnt/host/{tag}"),
+            lambda res: self._on_mount_result(tag, res),
+            lambda m: self.lbl_status.setText(f"挂载失败: {m}"),
+        )
+
+    def _on_mount_result(self, tag: str, result) -> None:
+        ok, msg = result if isinstance(result, tuple) else (False, "")
+        if ok:
+            self.lbl_status.setText(f"已挂载 /mnt/host/{tag}")
+        else:
+            text = (msg or "").strip()
+            low = text.lower()
+            if "not found" in low or "no such device" in low:
+                self.lbl_status.setText(
+                    f"挂载点 {tag} 的设备不存在 —— 请先「应用并重启」"
+                )
+            else:
+                self.lbl_status.setText(f"挂载失败: {text[:120]}")
+        self.refresh()
+
+    def _mark_shares_changed(self, message: str) -> None:
+        """共享配置变更后：说明需要重启，并直接问要不要现在重启
+
+        用户视角的友好做法：
+          · 不要求用户自己去点「重启」按钮
+          · 明确说清「为什么需要重启」（QEMU 的共享设备只在启动时加载）
+          · 默认选「现在重启」，一键走完
+        """
+        self._shares_dirty = True
+        self.lbl_status.setText(message)
+
+        ret = QMessageBox.question(
+            self, "需要重启",
+            f"{message}\n\n"
+            "共享目录是虚拟机的启动参数，修改后需要重启才能生效。\n\n"
+            "现在重启吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._apply_shares()
+            return
+
+        # 选择稍后：留一个显眼的入口，别让用户找不到
+        self.lbl_share_hint.setText(
+            f"{message}。重启虚拟机后生效 —— 点右下角「应用并重启」。"
+        )
+        self.lbl_share_hint.setVisible(True)
+        self.btn_share_apply.setVisible(True)
+
+    def _apply_shares(self) -> None:
+        """应用共享配置：交给列表页去重启
+
+        为什么不在这里重启：
+        重启要几十秒，用户需要看到列表里的 loading 状态，
+        而不是盯着一个被遮罩盖住的对话框干等。
+        所以这里只做一件事 —— 发信号、关自己，
+        后续由列表页统一管理（显示 loading → 重启 → 挂载 →
+        自动重新打开详情页并定位到共享目录）。
+        """
+        if QMessageBox.question(
+            self, "需要重启",
+            f"重启「{self.vm.spec.name}」以应用共享目录变更？\n\n"
+            "重启期间虚拟机会短暂不可用，完成后会自动打开这个页面。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        name = self.vm.spec.name
+        self.restart_and_mount_requested.emit(name)
+        # 立刻关闭自己，把舞台交给列表页
+        self.accept()
 
     # ─────────────────────────────────────────
     # 底部动作
@@ -789,14 +1083,35 @@ class VMDetailDialog(QDialog):
         self._set_busy(False)
         self.lbl_status.setText("操作失败: " + str(msg))
 
-    def _set_busy(self, busy: bool) -> None:
-        """忙碌时禁用会发起操作的控件
+    def _set_busy(self, busy: bool, text: str = "") -> None:
+        """切换忙碌态：盖一层遮罩 + 禁用所有交互
 
-        底部按钮已精简为只有「关闭」，操作入口都在主列表页，
-        这里只需要管住文件面板和各 Tab 的操作按钮。
+        用户视角：重启这类操作要几十秒，界面必须明确表达
+        「正在做什么」并且不能再接受任何点击 —— 否则用户会以为
+        卡死，或者点了按钮触发新操作把状态搞乱。
         """
+        self._busy = busy
+
+        if busy:
+            self._overlay.set_text(text or "正在处理…")
+            self._overlay.setGeometry(self.rect())
+            self._overlay.show()
+            self._overlay.raise_()
+        else:
+            self._overlay.hide()
+
+        # 遮罩能挡住点击，但这些也一并禁用，语义更明确
+        for w in (self.tabs, self.btn_close, self.lbl_status):
+            try:
+                w.setEnabled(not busy)
+            except Exception:
+                pass
+
+    def resizeEvent(self, e) -> None:
+        """遮罩始终铺满对话框"""
+        super().resizeEvent(e)
         try:
-            self.file_panel.setEnabled(not busy)
+            self._overlay.setGeometry(self.rect())
         except Exception:
             pass
 

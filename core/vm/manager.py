@@ -637,6 +637,24 @@ def soft_stop(vm: VM, timeout: int = 30) -> tuple[bool, str]:
     if not vm.running:
         return True, "未在运行"
 
+    # 快照前必须把共享目录卸掉。
+    #
+    # 原因：virtiofs 的 inode 编号由 virtiofsd 进程维护，而快照
+    # 只保存 guest 内存，不保存 virtiofsd 的内部状态。恢复后
+    # guest 仍拿旧的 inode 去 lookup，新的 virtiofsd 会解析成
+    # 完全不同的文件 —— 实测 /mnt/host/download 里显示出了
+    # /tmp 的 .X11-unix，属于静默的数据错乱，比挂载失败更危险。
+    #
+    # 卸载后 guest 的 dentry/inode 缓存被丢弃，恢复后重新挂载
+    # 就是一次全新的会话，编号自然对齐。
+    if vm.spec.shares:
+        try:
+            from core.vm import ssh as _ssh
+
+            _ssh.unmount_all_shares(vm)
+        except Exception:
+            pass
+
     ok, msg = qemu.snapshot_save(vm.dir, timeout=max(timeout, 180))
     if ok:
         return True, ""
@@ -666,6 +684,20 @@ def resume_vm(vm: VM) -> tuple[bool, str]:
     if qemu.has_snapshot(vm.dir):
         ok, msg = qemu.snapshot_restore(vm.dir)
         if ok:
+            # 快照前卸载过共享目录，恢复后要重新挂上
+            # （见 soft_stop 里的说明：不重挂会读到错乱的文件）
+            if vm.spec.shares:
+                try:
+                    from core.vm import ssh as _ssh
+
+                    for _ in range(30):
+                        o, _e = _ssh.test_connection(vm, timeout=5)
+                        if o:
+                            break
+                        time.sleep(1)
+                    _ssh.mount_all_shares(vm)
+                except Exception:
+                    pass
             return True, ""
         # 快照坏了 → 丢掉，冷启动兜底
         import logging
@@ -799,9 +831,17 @@ def remove_forward(vm: VM, host_port: int) -> tuple[bool, str]:
 # ─────────────────────────────────────────
 def add_share(vm: VM, host_path: str, tag: str) -> tuple[bool, str]:
     """添加共享目录（需重启 VM 生效）"""
-    p = Path(host_path)
+    # 严格校验：必须是绝对路径、真实存在的目录。
+    # 相对路径（如用户手输的 "download"）会被解析到进程 cwd，
+    # 结果挂进 VM 的是一个不存在的路径 —— 表现为「挂载成功但里面是空的」。
+    if not host_path or not host_path.startswith("/"):
+        return False, f"必须是绝对路径（如 /home/{Path.home().name}/下载）"
+
+    p = Path(host_path).expanduser().resolve()
     if not p.is_dir():
         return False, f"目录不存在: {host_path}"
+
+    host_path = str(p)
 
     if any(s[1] == tag for s in vm.spec.shares):
         return False, f"挂载点 {tag} 已存在"
