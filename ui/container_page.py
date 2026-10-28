@@ -687,7 +687,7 @@ class ContainerPage(QWidget):
             self.refresh_silent()
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     def _set_actions_enabled(self, enabled: bool) -> None:

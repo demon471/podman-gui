@@ -167,7 +167,6 @@ class MainWindow(QMainWindow):
         # 后台任务里 podman 连接状态变化时不能直接调 UI 回调
         # （Qt fatal），会投递到队列等这里取出执行。
         self._state_timer = QTimer(self)
-        self._state_timer = QTimer(self)
         self._state_timer.timeout.connect(drain_state_callbacks)
         self._state_timer.start(200)
 
@@ -194,10 +193,109 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _quit_from_tray(self) -> None:
-        """托盘菜单退出"""
+        """托盘菜单退出：先把虚拟机转入内存快照，再退出
+
+        为什么休眠而不是关闭或保持运行：
+          · 保持运行 → 没有进程管理它们，内存被长期占用
+          · 彻底关闭 → 下次要冷启动 19 秒
+          · 休眠     → 内存释放（约 250MB 磁盘），下次 2 秒恢复
+
+        休眠后由 systemd 托管的守护进程接管端口，
+        `ssh xxx.vm.local` 依然可用（会自动唤醒）。
+        """
         if self.tray is not None:
             self.tray.hide()
-        QApplication.instance().quit()
+        self._suspend_vms_then_quit()
+
+    def _suspend_vms_then_quit(self) -> None:
+        """退出前把所有「应运行」的虚拟机转入内存快照，然后退出
+
+        后台执行（带进度提示），因为保存 1GB 内存约需 6 秒。
+        休眠完成后由 systemd 守护进程接管端口，用户随时
+        `ssh xxx.vm.local` 都能自动唤醒。
+
+        关键点：**保存意图**。休眠后 vm.desired_running 仍为 True，
+        所以守护进程知道这些机器「应该可用」，会一直占着端口等访问。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        try:
+            from core.vm import manager as vm_manager
+            from core import state as _state
+        except Exception:
+            QApplication.instance().quit()
+            return
+
+        # 找出需要休眠的（应运行且真的在跑）
+        targets = []
+        try:
+            for vm in vm_manager.load_all():
+                want = _state.get_setting(
+                    f"vm.desired_running.{vm.spec.name}", False
+                )
+                if want and vm.running:
+                    targets.append(vm)
+        except Exception:
+            targets = []
+
+        if not targets:
+            # 没有要处理的，直接退出
+            self._final_quit()
+            return
+
+        # 后台串行休眠，完成后退出
+        from core.async_task import run_async
+
+        def work():
+            results = []
+            for vm in targets:
+                try:
+                    ok, msg = vm_manager.soft_stop(vm)
+                    results.append((vm.spec.name, ok, msg))
+                except Exception as e:
+                    results.append((vm.spec.name, False, str(e)))
+            return results
+
+        def done(results):
+            saved = sum(1 for _, ok, _ in results if ok)
+            print(f"[main] 退出前已休眠 {saved}/{len(results)} 台虚拟机")
+            self._final_quit()
+
+        def error(msg):
+            print(f"[main] 退出前休眠失败: {msg}")
+            self._final_quit()
+
+        self._set_status("正在保存虚拟机状态…")
+        run_async(work, on_done=done, on_error=error, parent=self)
+
+    def _final_quit(self) -> None:
+        """完成退出
+
+        注意顺序：先停定时器，再 quit。
+        不能在这里调 shutdown_all() —— 调用方（休眠任务的 done 回调）
+        本身就跑在后台任务里，等所有任务会自己等自己，直接死锁。
+        真正的线程清理交给 app.exec() 返回后的 shutdown_all。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        # 先停所有定时器，避免退出过程中又起新任务
+        try:
+            self.page_vms.stop_timers()
+        except Exception:
+            pass
+        try:
+            if self.tray is not None:
+                self.tray.stop()
+        except Exception:
+            pass
+        try:
+            self._conn_timer.stop()
+            self._state_timer.stop()
+        except Exception:
+            pass
+
+        app = QApplication.instance()
+        app.quit()
 
     def _setup_theme_watcher(self) -> None:
         self.theme_watcher = ThemeWatcher(2000, self)
@@ -489,9 +587,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        try:
-            from core.async_task import shutdown_all
-            shutdown_all(3000)
-        except Exception:
-            pass
-        super().closeEvent(event)
+        # 真正退出（托盘不可用）→ 先休眠虚拟机
+        self._suspend_vms_then_quit()
+        return

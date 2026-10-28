@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -332,6 +334,216 @@ def _resolve_alpine_url(spec: ImageSpec, arch: str, on_log=None) -> list[str]:
     return out
 
 
+# ─────────────────────────────────────────
+# 官方校验和
+# ─────────────────────────────────────────
+# 各发行版校验文件命名不统一，逐个探测：
+#   Alpine   <file>.qcow2.sha512      内容：裸 sha512
+#   Arch     <file>.qcow2.SHA256      内容：裸 sha256
+#   Rocky    <dir>/CHECKSUM           内容：SHA256 (name) = hash
+#   Debian   <dir>/SHA256SUMS         内容：hash *name
+#   Ubuntu   <dir>/SHA256SUMS         内容：hash *name
+#
+# 为什么必须校验
+# ──────────────
+# 断点续传（HTTP Range）对着「内容会变的 URL」是灾难：
+# 前半段来自旧版本、后半段来自新版本，拼出来的文件大小可能完全一样，
+# 任何基于长度的检查都拦不住。烧进共享基础后，所有同镜像的 VM 全部损坏
+# （guest 里表现为共享库 Exec format error → /run 挂不上 → sshd 起不来，
+# 而宿主机侧只看到 SSH 超时，极难排查）。
+# 因此下载完成必须比对官方哈希。
+_CHECKSUM_SUFFIXES = (
+    ".sha256", ".sha512", ".SHA256", ".SHA512",
+    ".sha256sum", ".sha512sum",
+)
+_CHECKSUM_DIR_FILES = (
+    "SHA256SUMS", "SHA256SUMS.txt", "sha256sums.txt", "sha256sum.txt",
+    "SHA512SUMS", "SHA512SUMS.txt",
+    "CHECKSUM", "CHECKSUM.txt", "checksums.txt",
+)
+
+
+def parse_checksum_text(text: str, filename: str) -> tuple[str, str] | None:
+    """从校验文件内容里解析指定文件的 (算法, 哈希)
+
+    三种格式都认：
+      · 裸哈希（Alpine/Arch 单文件校验）
+      · `<hash> *<name>`（Debian/Ubuntu SHA256SUMS）
+      · `SHA256 (<name>) = <hash>`（Rocky CHECKSUM）
+    """
+    stripped = text.strip()
+
+    # 裸哈希：整份内容就是一个十六进制串
+    if re.fullmatch(r"[0-9a-fA-F]{64,128}", stripped):
+        algo = "sha512" if len(stripped) == 128 else "sha256"
+        return algo, stripped.lower()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        # <hash> [*]<name>
+        m = re.match(r"^([0-9a-fA-F]{64,128})\s+\*?(\S+)\s*$", line)
+        if m and m.group(2).endswith(filename):
+            algo = "sha512" if len(m.group(1)) == 128 else "sha256"
+            return algo, m.group(1).lower()
+
+        # SHA256 (<name>) = <hash>
+        m = re.match(
+            r"^(SHA256|SHA512)\s*\((.+?)\)\s*=\s*([0-9a-fA-F]+)\s*$", line
+        )
+        if m and m.group(2).strip().endswith(filename):
+            return m.group(1).lower(), m.group(3).lower()
+
+    return None
+
+
+def official_checksum(
+    file_url: str, timeout: int = 20
+) -> tuple[str, str] | None:
+    """探测某个文件 URL 的官方校验值
+
+    返回 (算法, 哈希)；取不到返回 None（不是所有源都提供校验文件，
+    上层会退回 qemu-img check 兜底）。
+    """
+    filename = file_url.rstrip("/").rsplit("/", 1)[-1]
+    if not filename:
+        return None
+
+    candidates = [file_url + s for s in _CHECKSUM_SUFFIXES]
+    base = file_url.rsplit("/", 1)[0]
+    candidates += [f"{base}/{n}" for n in _CHECKSUM_DIR_FILES]
+
+    for url in candidates:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "podman-gui/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read(256 * 1024).decode("utf-8", "replace")
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+            continue
+
+        found = parse_checksum_text(text, filename)
+        if found:
+            return found
+
+    return None
+
+
+def hash_file(path: Path, algo: str = "sha256", on_progress=None) -> str:
+    """计算文件哈希（分块读，大文件不占内存）"""
+    h = hashlib.new(algo)
+    total = path.stat().st_size
+    done = 0
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(1024 * 1024)
+            if not buf:
+                break
+            h.update(buf)
+            done += len(buf)
+            if on_progress:
+                on_progress(done, total)
+    return h.hexdigest()
+
+
+def sidecar_path(spec: "ImageSpec", arch: str = "amd64") -> Path:
+    """校验记录文件路径（镜像旁边的小 json）"""
+    return image_path(spec, arch).with_name(
+        f"{spec.key}-{arch}.qcow2.sha256.json"
+    )
+
+
+def write_sidecar(
+    spec: "ImageSpec",
+    arch: str,
+    sha256: str,
+    source_url: str = "",
+    verified_with: str = "",
+) -> None:
+    """写校验记录
+
+    共享基础指纹和 VM 都读它，避免重复算哈希。
+    """
+    p = image_path(spec, arch)
+    if not p.exists():
+        return
+    try:
+        sidecar_path(spec, arch).write_text(
+            json.dumps(
+                {
+                    "sha256": sha256,
+                    "source_url": source_url,
+                    "verified_with": verified_with,
+                    "size": p.stat().st_size,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def read_sidecar(spec: "ImageSpec", arch: str = "amd64") -> dict:
+    """读校验记录（不存在或已失效返回 {}）"""
+    p = image_path(spec, arch)
+    side = sidecar_path(spec, arch)
+    if not p.exists() or not side.exists():
+        return {}
+    try:
+        data = json.loads(side.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    # 文件被换过（大小不符）则记录失效
+    if data.get("size") != p.stat().st_size:
+        return {}
+    return data
+
+
+def image_sha256(spec: "ImageSpec", arch: str = "amd64", on_log=None) -> str:
+    """本地镜像文件的 sha256（sidecar 命中则免算）"""
+    log = on_log or (lambda _m: None)
+    p = image_path(spec, arch)
+    if not p.exists():
+        return ""
+
+    cached = read_sidecar(spec, arch)
+    if cached.get("sha256"):
+        return cached["sha256"]
+
+    log(f"计算镜像校验值（{p.name}）…")
+    digest = hash_file(p, "sha256")
+    write_sidecar(spec, arch, digest)
+    return digest
+
+
+def _partial_meta_path(tmp: Path) -> Path:
+    """断点续传的元数据（记录 URL 校验器）"""
+    return tmp.with_suffix(".part.meta")
+
+
+def _read_partial_meta(tmp: Path) -> dict:
+    p = _partial_meta_path(tmp)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_partial_meta(tmp: Path, **kw) -> None:
+    try:
+        _partial_meta_path(tmp).write_text(
+            json.dumps(kw, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def _download_one(
     url: str,
     target: Path,
@@ -339,23 +551,44 @@ def _download_one(
     on_progress=None,
     on_log=None,
     cancel_flag=None,
+    meta: dict | None = None,
 ) -> tuple[bool, str]:
-    """从单个 URL 下载（支持断点续传）
+    """从单个 URL 下载（支持断点续传 + 一致性校验）
 
-    断点续传通过 HTTP Range 请求实现：
-      · tmp 已存在且非空 → 带 Range: bytes=<已下载>- 续传
-      · 服务端返回 206 → 追加写
-      · 服务端返回 200 → 不支持续传，重新下
+    断点续传通过 HTTP Range 实现，但**必须配 If-Range**：
+      · tmp 已有内容 → 带 Range: bytes=<已下载>- 续传
+      · 同时带 If-Range: <上次响应给的 ETag 或 Last-Modified>
+      · 服务端内容没变 → 206，继续追加
+      · 服务端内容变了 → 200，从头下（If-Range 由服务端判定，
+        避免了「前半旧 + 后半新」拼出损坏文件）
+
+    光靠 Range 不校验是危险的：镜像 URL 常指向会更新的内容
+    （latest / current / 小版本号变化），续传拼出的文件大小可能
+    恰好一样，长度检查拦不住，烧进共享基础后所有同镜像 VM 全坏。
+
+    下载完成后由上层比对官方哈希。
 
     返回 (成功, 错误信息)
     """
     log = on_log or (lambda _m: None)
+    meta = meta if meta is not None else {}
 
     have = tmp.stat().st_size if tmp.exists() else 0
+    prev = _read_partial_meta(tmp) if have > 0 else {}
+
+    # URL 换了（切到别的镜像源）→ 旧分片不能用
+    if have > 0 and prev.get("url") and prev["url"] != url:
+        log("切换镜像源，丢弃旧分片重新下载")
+        have = 0
+        tmp.unlink(missing_ok=True)
 
     headers = {"User-Agent": "podman-gui/1.0"}
     if have > 0:
         headers["Range"] = f"bytes={have}-"
+        # If-Range：内容变了服务端会无视 Range 直接返回 200
+        validator = prev.get("etag") or prev.get("last_modified")
+        if validator:
+            headers["If-Range"] = validator
         log(f"尝试断点续传（已有 {have / 1024**2:.1f} MB）")
 
     try:
@@ -363,18 +596,27 @@ def _download_one(
         with urllib.request.urlopen(req, timeout=60) as resp:
             status = resp.status
 
-            if status == 200:
-                # 服务端不支持续传，从头下
-                if have > 0:
-                    log("服务端不支持断点续传，重新下载")
-                have = 0
-                total = int(resp.headers.get("Content-Length", 0) or 0)
-            elif status == 206:
+            if status == 206:
                 cr = resp.headers.get("Content-Range", "")
-                # 形如 bytes 12345-67890/123456
                 total = int(cr.rsplit("/", 1)[-1]) if "/" in cr else 0
+            elif status == 200:
+                # 服务端不支持续传，或内容已变（If-Range 未匹配）
+                if have > 0:
+                    log("镜像源内容已更新，重新完整下载")
+                have = 0
+                tmp.unlink(missing_ok=True)
+                total = int(resp.headers.get("Content-Length", 0) or 0)
             else:
                 return False, f"HTTP {status}"
+
+            # 记下校验器，供下次续传比对
+            _write_partial_meta(
+                tmp,
+                url=url,
+                etag=resp.headers.get("ETag", ""),
+                last_modified=resp.headers.get("Last-Modified", ""),
+                total=total,
+            )
 
             mode = "ab" if have > 0 else "wb"
             done = have
@@ -393,22 +635,49 @@ def _download_one(
                         on_progress(done, total)
 
     except urllib.error.HTTPError as e:
-        # 416 = Range 超出范围，说明文件已下完但没被识别
+        # 416 = Range 超出范围，可能已下完（交给哈希校验判定）
         if e.code == 416 and have > 0:
-            tmp.replace(target)
-            return True, ""
-        if e.code == 404:
+            pass
+        elif e.code == 404:
             return False, "文件不存在 (404)"
-        return False, f"HTTP {e.code}: {e.reason}"
+        else:
+            return False, f"HTTP {e.code}: {e.reason}"
     except urllib.error.URLError as e:
         return False, f"网络错误: {e.reason}"
     except OSError as e:
         return False, f"写入失败: {e}"
 
-    if tmp.stat().st_size < 1024 * 1024:
+    if not tmp.exists() or tmp.stat().st_size < 1024 * 1024:
         return False, "下载内容过小，可能不是有效镜像"
 
+    # 期望大小对不上 → 内容不完整
+    if total and tmp.stat().st_size != total:
+        return False, (
+            "下载不完整（%.1f MB / 应为 %.1f MB）"
+            % (tmp.stat().st_size / 1024**2, total / 1024**2)
+        )
+
+    # ── 官方哈希校验 ──
+    # 断点续传拼错、镜像源半更新、CDN 缓存不一致都能在这里拦下
+    expected = meta.get("checksum")          # (algo, hash) 或 None
+    if expected:
+        algo, want = expected
+        log("校验镜像完整性（%s）…" % algo)
+        got = hash_file(tmp, algo)
+        if got != want:
+            tmp.unlink(missing_ok=True)
+            _partial_meta_path(tmp).unlink(missing_ok=True)
+            return False, (
+                "%s 校验失败（文件损坏或不完整）\n"
+                "  期望 %s…\n"
+                "  实际 %s…"
+                % (algo, want[:16], got[:16])
+            )
+        meta["verified_with"] = algo
+        log("校验通过")
+
     tmp.replace(target)
+    _partial_meta_path(tmp).unlink(missing_ok=True)
     return True, ""
 
 
@@ -434,6 +703,37 @@ def _make_progress_proxy(on_progress):
             on_progress(done, total)
 
     return proxy
+
+
+def _record_download(
+    spec: ImageSpec,
+    arch: str,
+    target: Path,
+    url: str,
+    verified_with: str = "",
+    *,
+    on_log=None,
+) -> None:
+    """下载完成后记录：算 sha256 写 sidecar + 写 SQLite
+
+    sha256 是共享基础指纹的依据（见 shared_disk），
+    也是判断「镜像是否被换过」的唯一可靠手段
+    （长度、mtime 都会被断点续传拼出的等价长度骗过）。
+    """
+    log = on_log or (lambda _m: None)
+    try:
+        log("计算镜像指纹（sha256）…")
+        digest = hash_file(target, "sha256")
+        write_sidecar(spec, arch, digest, url, verified_with)
+
+        from core import state
+
+        state.record_image(
+            spec.key, arch, str(target), target.stat().st_size, digest
+        )
+        log("指纹 %s…" % digest[:16])
+    except Exception as e:                       # 记录失败不影响下载结果
+        log("记录镜像信息失败: %s" % e)
 
 
 def download_image(
@@ -467,30 +767,44 @@ def download_image(
     tmp = target.with_suffix(".part")
 
     errors: list[str] = []
+    verified_with = ""
 
     for i, url in enumerate(urls, 1):
         if cancel_flag and cancel_flag():
             tmp.unlink(missing_ok=True)
             return False, "已取消"
 
-        log(f"[{i}/{len(urls)}] {url}")
+        log("[%d/%d] %s" % (i, len(urls), url))
         if on_progress:
             on_progress(0, 0)
+
+        # 探测官方校验值（Alpine .sha512 / Arch .SHA256 /
+        # Rocky CHECKSUM / Debian-Ubuntu SHA256SUMS）
+        meta = {}
+        found = official_checksum(url)
+        if found:
+            meta["checksum"] = found
+            log("获取官方校验值: %s" % found[0])
+        else:
+            log("该源未提供校验文件，下载后用 qemu-img 兜底检查")
 
         ok, err = _download_one(
             url, target, tmp,
             on_progress=on_progress,
             on_log=log,
             cancel_flag=cancel_flag,
+            meta=meta,
         )
 
         if ok:
+            verified_with = meta.get("verified_with", "")
             size_mb = target.stat().st_size / 1024**2
-            log(f"下载完成: {target.name} ({size_mb:.1f} MB)")
+            log("下载完成: %s (%.1f MB)" % (target.name, size_mb))
+            _record_download(spec, arch, target, url, verified_with, on_log=log)
             return True, str(target)
 
-        errors.append(f"{url}: {err}")
-        log(f"  失败: {err}，尝试下一个源…")
+        errors.append("%s: %s" % (url, err))
+        log("  失败: %s，尝试下一个源…" % err)
 
     # 全部失败。保留 .part 以便下次续传，
     # 除非是「已取消」。

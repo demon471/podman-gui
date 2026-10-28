@@ -52,6 +52,7 @@ from core.vm import budget as vm_budget
 import time as _time_mod
 
 from core.vm import dns as vm_dns
+from core.vm import keepalive as vm_keepalive
 from core.vm import manager as vm_manager
 from core.vm import network as vm_network
 from core.vm import qemu as vm_qemu
@@ -96,13 +97,21 @@ class VMPage(QWidget):
         self._spin_timer.timeout.connect(self._spin_tick)
         self._tasks: list = []
 
+        # 常驻保活：空闲超时自动休眠，运行意图保留
+        self.keepalive = vm_keepalive.KeepAliveManager(self)
+        self.keepalive.auto_slept.connect(self._on_auto_slept)
+        self.keepalive.auto_sleep_failed.connect(self._on_auto_sleep_failed)
+
         self._build_ui()
         self.refresh_silent()
+        self._sync_keepalive()
 
         # 列表状态轮询（5s）
         self._list_timer = QTimer(self)
         self._list_timer.timeout.connect(self.refresh_silent)
         self._list_timer.start(5000)
+
+
 
     # ─────────────────────────────────────────
     # UI
@@ -217,7 +226,7 @@ class VMPage(QWidget):
         self._leave_timer.setInterval(250)
         self._leave_timer.timeout.connect(self._on_leave_timeout)
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
-        self.table.doubleClicked.connect(lambda _i: self._open_detail())
+        self.table.doubleClicked.connect(self._on_row_activated)
 
         hdr = self.table.horizontalHeader()
         hdr.setFixedHeight(26)
@@ -337,6 +346,19 @@ class VMPage(QWidget):
                     self._hide_card()
                     return False
 
+                # 未启动的虚拟机：不显示信息卡片。
+                # 卡片里是 SSH 地址、密码这些「已就绪」才有意义的
+                # 信息，机器没跑时显示只会误导。
+                if name_item:
+                    row_vm = next(
+                        (v for v in self._vms
+                         if v.spec.name == name_item.text()), None
+                    )
+                    if row_vm is not None and not self._is_available(row_vm):
+                        self._card_timer.stop()
+                        self._hide_card()
+                        return False
+
                 # 移到不同行 → 重新计时
                 if idx.row() != getattr(self, "_pending_row", -1):
                     self._card_timer.stop()
@@ -404,7 +426,7 @@ class VMPage(QWidget):
             return
 
         self._card_row = row
-        self._info_card.show_for(vm, vm.running)
+        self._info_card.show_for(vm, self._is_available(vm))
 
         g = self.table.viewport().mapToGlobal(pos)
         self._info_card.show_near(g.x(), g.y())
@@ -493,6 +515,86 @@ class VMPage(QWidget):
             if name in self._pending_vms:
                 self.model.item(r, 1).setIcon(self._spin_icon())
 
+    # ─────────────────────────────────────────
+    # 常驻保活
+    # ─────────────────────────────────────────
+    def _sync_keepalive(self) -> None:
+        """把当前 VM 列表同步给保活管理器
+
+        启动意图从 SQLite 读回（应用重启后仍知道哪些该运行），
+        并且只对「确实在跑」的 VM 开始计时。
+        """
+        from core import state as _state
+
+        for vm in self._vms:
+            name = vm.spec.name
+            try:
+                want = _state.get_setting(f"vm.desired_running.{name}", False)
+            except Exception:
+                want = False
+
+            if want:
+                self.keepalive.note_started(vm)
+                if vm.running:
+                    self.keepalive.note_ready(vm)
+            elif not vm.running:
+                self.keepalive.note_stopped(vm)
+
+        # 应用启动时，仍在休眠的 VM 需要重新建立唤醒代理
+        # （代理随上个进程退出而释放了端口）
+        self.keepalive._sync_proxies()
+
+        # 上一轮可能因端口 TIME_WAIT 失败。应用刚启动时事件循环
+        # 尚未稳定，QTimer 重试不一定及时 —— 这里额外排几轮
+        # 主动补偿，确保休眠中的 VM 一定有代理在监听，
+        # 否则用户 ssh 会直接「连接被拒绝」。
+        self._ensure_proxies_ready(attempt=0)
+
+    def _ensure_proxies_ready(self, attempt: int = 0) -> None:
+        """确保所有「休眠中且应运行」的 VM 都有代理在监听
+
+        最多重试 10 次（每次间隔递增），足够覆盖 QEMU 退出后
+        端口的 TIME_WAIT 释放窗口。
+        """
+        if attempt > 10:
+            return
+
+        need = [
+            vm for vm in self._vms
+            if not vm.running
+            and self.keepalive.enabled
+            and self.keepalive.wants_running(vm.spec.name)
+        ]
+        if not need:
+            return
+
+        pending = []
+        for vm in need:
+            if vm.spec.name in self.keepalive.proxied_vms():
+                continue
+            ok, _err = self.keepalive._pool.ensure(vm, retries=1)
+            if not ok:
+                pending.append(vm)
+
+        if pending:
+            delay = 500 + attempt * 500      # 0.5s, 1s, 1.5s …
+            QTimer.singleShot(
+                delay,
+                lambda: self._ensure_proxies_ready(attempt + 1),
+            )
+
+    def _on_auto_slept(self, name: str) -> None:
+        """空闲资源回收完成
+
+        对用户完全静默：机器在用户看来始终可用，
+        底层释放内存属于实现细节，不该弹通知打扰。
+        """
+        self.refresh_silent()
+
+    def _on_auto_sleep_failed(self, name: str, err: str) -> None:
+        """资源回收失败：只记状态栏，不弹窗（不影响用户使用）"""
+        self.status_message.emit(f"{name} 资源回收未完成")
+
     def _rebuild(self) -> None:
         selected = self._selected_name()
 
@@ -510,6 +612,13 @@ class VMPage(QWidget):
             elif running:
                 state = "running"
                 state_text = "运行中"
+            elif self.keepalive.wants_running(name) and self.keepalive.enabled:
+                # 用户视角：这台机器「随时可用」。
+                # 底层可能是内存快照待恢复（1 秒级）或已驻留内存，
+                # 对用户来说没有区别，所以统一显示为就绪，
+                # 不暴露「休眠/倒计时/内存状态」这些实现细节。
+                state = "running"
+                state_text = "就绪"
             else:
                 state = "stopped"
                 state_text = "已停止"
@@ -563,11 +672,15 @@ class VMPage(QWidget):
         else:
             self._table_stack.setCurrentWidget(self.table)
 
-        # 统计：只报数量，不暴露内存/磁盘等技术细节
-        running_n = sum(1 for vm in self._vms if vm.running)
-        if running_n:
+        # 统计：只报数量，不暴露内存/磁盘/休眠等技术细节
+        ready_n = sum(
+            1 for vm in self._vms
+            if vm.running
+            or (self.keepalive.wants_running(vm.spec.name) and self.keepalive.enabled)
+        )
+        if ready_n:
             self.lbl_stats.setText(
-                f"共 {len(self._vms)} 台虚拟机 · {running_n} 台运行中"
+                f"共 {len(self._vms)} 台虚拟机 · {ready_n} 台运行中"
             )
         else:
             self.lbl_stats.setText(f"共 {len(self._vms)} 台虚拟机")
@@ -600,24 +713,46 @@ class VMPage(QWidget):
         vm = self._selected_vm()
         return [vm] if vm else []
 
+    def _is_available(self, vm) -> bool:
+        """对用户而言这台机器是否「可用」
+
+        包含两种情况：
+          · 真的在运行
+          · 资源已释放（内存快照待恢复），访问时 1 秒级恢复
+
+        用户视角两者没区别 —— 都能连上、都能用，
+        所以操作按钮按「可用」启用，而不是按进程状态。
+        """
+        if vm is None:
+            return False
+        if vm.running:
+            return True
+        return bool(
+            self.keepalive.enabled
+            and self.keepalive.wants_running(vm.spec.name)
+        )
+
     def _update_actions(self) -> None:
         vm = self._selected_vm()
         has = vm is not None
         running = bool(vm and vm.running)
+        available = self._is_available(vm)
         # 选中行正在启动/重启 → 全部动作禁用
         pending_sel = bool(vm and vm.spec.name in self._pending_vms)
 
+        # 「启动」只在真需要冷启动时可用（未运行且没登记运行意图）
         self.act_start.setEnabled(
-            has and not running and not self._busy and not pending_sel
+            has and not available and not self._busy and not pending_sel
         )
         self.act_stop.setEnabled(
-            has and running and not self._busy and not pending_sel
+            has and available and not self._busy and not pending_sel
         )
         self.act_restart.setEnabled(
-            has and running and not self._busy and not pending_sel
+            has and available and not self._busy and not pending_sel
         )
+        # SSH：可用即可（资源已释放时点它会在后台恢复，用户感知不到）
         self.act_ssh.setEnabled(
-            has and running and not pending_sel
+            has and available and not pending_sel
         )
         self.act_purge.setEnabled(
             bool(self._vms) and not self._busy and not pending_sel
@@ -673,7 +808,21 @@ class VMPage(QWidget):
         def done(result):
             self._busy = False
             self.act_new.setEnabled(True)
-            self.status_message.emit(f"{label}完成")
+
+            # 状态栏文案要说实话：
+            # · release_when == "ssh" 时，这一步只代表 qemu 进程起来了，
+            #   guest 还在启动 —— 说「完成」会让用户以为已经能用，
+            #   而列表还显示「启动中…」，两边对不上。
+            # · 其他情况（停止/删除）此时确实完成了。
+            if release_when == "ssh":
+                ok_now = bool(result and result[0])
+                if ok_now:
+                    self.status_message.emit(f"{label}中，等待系统就绪…")
+                else:
+                    self.status_message.emit(f"{label}失败")
+            else:
+                self.status_message.emit(f"{label}完成")
+
             if on_success:
                 on_success(result)
             self.refresh_silent()
@@ -682,9 +831,7 @@ class VMPage(QWidget):
                 return
 
             if release_when == "ssh":
-                # 启动/重启：qemu 起来后继续等 SSH 就绪。
-                # fn 返回 (False, err) 也走这里，探不到 SSH
-                # 就 30 秒后解除，避免永久卡死。
+                # 启动/重启：qemu 起来后继续等 guest 就绪
                 self._probe_ssh_then_release(pending_vm)
             else:
                 # 停止：QEMU 进程已退出，直接解除
@@ -707,38 +854,85 @@ class VMPage(QWidget):
 
     def _probe_ssh_then_release(self, name: str,
                                 timeout_s: int = 180) -> None:
-        """后台轮询 SSH 直到可连，才解除该行的 loading
+        """等待虚拟机就绪，然后解除该行的 loading
 
-        启动成功 = 能 SSH 进去。QEMU 进程起来只是开始。
-        超时（默认 180s）也解除，但通知失败。
+        「就绪」的判定：TCP 能连上 SSH 端口并读到 SSH banner。
+
+        为什么不用 `ssh ... echo ok` 探测：
+        · 完整 SSH 握手要 0.1–8 秒（密钥交换 + 认证）
+        · VM 还在启动时，每次探测都要等满超时才返回，
+          180 秒里只能试十几次，很容易误判「启动失败」
+        · 同时 GUI 的保活模块也在轮询 SSH，两个客户端抢
+          sshd 的 MaxStartups，会互相把对方挤掉
+
+        纯 TCP 探测只要 10 毫秒，可以密集轮询（每 0.5 秒），
+        既准确又快，也不会给 sshd 造成压力。
         """
         def work():
+            import socket
+
             vm = vm_manager.load(name)
             if vm is None:
                 return name, False, "虚拟机已不存在"
+
+            port = vm.ssh_port
+            if not port:
+                return name, False, "未配置 SSH 端口"
+
             t0 = _time_mod.monotonic()
+            last_err = ""
+
             while _time_mod.monotonic() - t0 < timeout_s:
-                ok, out = vm_ssh.run_command(vm, "echo SSH_OK", timeout=8)
-                if ok and "SSH_OK" in out:
-                    return name, True, ""
-                _time_mod.sleep(4)
-            return name, False, f"{timeout_s}s 内 SSH 未就绪"
+                # QEMU 进程没了 → 明确失败，不用等满超时
+                if not vm.running:
+                    last_err = "虚拟机进程已退出"
+                    break
+
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1.5)
+                    s.connect(("127.0.0.1", port))
+                    # 读到 banner 才算 sshd 真的在服务
+                    banner = s.recv(64)
+                    s.close()
+                    if b"SSH-" in banner:
+                        elapsed = _time_mod.monotonic() - t0
+                        return name, True, f"{elapsed:.0f}"
+                except OSError as e:
+                    last_err = str(e)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+                _time_mod.sleep(0.5)
+
+            return name, False, last_err or f"{timeout_s}s 内未就绪"
 
         def done(res):
-            name, ok, err = res
+            name, ok, detail = res
             self._pending_vms.discard(name)
             self._starting.discard(name)
             self._stopping.discard(name)
             if not self._pending_vms:
                 self._spin_timer.stop()
+
+            # 先刷新列表（让状态立刻变成「运行中」），再发通知。
+            # 反过来的话，通知弹出来时列表还显示「启动中…」，
+            # 用户会觉得两边对不上。
             self.refresh_silent()
 
             if ok:
-                self.status_message.emit(f"{name} 已就绪（SSH 可连）")
+                # 保活空闲计时从这里开始
+                vm = next((v for v in self._vms if v.spec.name == name), None)
+                if vm is not None:
+                    self.keepalive.note_ready(vm)
+                self.status_message.emit(f"{name} 已就绪（{detail}s）")
                 notifier().info("虚拟机已就绪", name)
             else:
-                self.status_message.emit(f"{name} 启动失败: {err}")
-                notifier().op_failed("启动", name, err)
+                self.status_message.emit(f"{name} 启动失败: {detail}")
+                notifier().op_failed("启动", name, detail)
 
         def error(msg):
             self._pending_vms.discard(name)
@@ -776,16 +970,41 @@ class VMPage(QWidget):
             QMessageBox.warning(self, "内存不足", msg)
             return
 
+        # 有内存快照就走恢复（1–2 秒），否则冷启动（十几秒）。
+        # resume_vm 内部会自动判断，这里统一用它。
         self.run_op(
-            "启动", vm_manager.start_vm, vm,
+            "启动", vm_manager.resume_vm, vm,
             pending_vm=vm.spec.name,
             release_when="ssh",
-            busy_text=f"正在启动 {vm.spec.name}（首次启动需初始化系统）…",
-            on_success=lambda r: notifier().info(
-                "虚拟机已启动" if r[0] else "启动失败",
-                f"{vm.spec.name}\n{r[1]}" if r[1] else vm.spec.name,
-            ),
+            busy_text=f"正在启动 {vm.spec.name}…",
+            on_success=lambda r: self._after_start(vm, r),
         )
+
+    def _after_start(self, vm, result) -> None:
+        """QEMU 进程已启动（但 guest 还没就绪）
+
+        这里**不发「已启动」通知** —— 此时只是 qemu 进程起来了，
+        guest 里的系统还在启动，SSH 还连不上。列表行仍然是
+        「启动中…」，探测任务会继续等就绪。
+
+        真正的完成通知由 _probe_ssh_then_release 在探测成功后发，
+        这样通知与列表状态始终一致。
+        """
+        ok = bool(result and result[0])
+        if not ok:
+            # 失败要立刻告诉用户，不用等探测
+            err = (result[1] if result and len(result) > 1 else "") or ""
+            notifier().op_failed("启动", vm.spec.name, err)
+            return
+
+        # 运行意图：保活机制据此判断「可以自动休眠，也要自动恢复」
+        self.keepalive.note_started(vm)
+        from core import state as _state
+
+        try:
+            _state.set_setting(f"vm.desired_running.{vm.spec.name}", True)
+        except Exception:
+            pass
 
     def _stop_selected(self) -> None:
         vm = self._selected_vm()
@@ -795,8 +1014,10 @@ class VMPage(QWidget):
         ret = QMessageBox.question(
             self, "确认停止",
             f"确定要停止虚拟机「{vm.spec.name}」吗？\n\n"
-            "将发送关机信号，超时后强制结束进程。\n"
-            "未保存的 guest 内数据可能丢失。",
+            + ("这台虚拟机当前已释放内存，停止后需要手动启动才会恢复。"
+               if not vm.running else
+               "将发送关机信号，超时后强制结束进程。\n"
+               "未保存的 guest 内数据可能丢失。"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -807,11 +1028,17 @@ class VMPage(QWidget):
             "停止", vm_manager.stop_vm, vm,
             pending_vm=vm.spec.name,
             busy_text=f"正在停止 {vm.spec.name}…",
-            on_success=lambda r: notifier().info(
-                "虚拟机已停止" if r[0] else "停止失败", vm.spec.name
-            ),
+            on_success=lambda r: self._after_stop(vm, r),
         )
 
+    def _after_stop(self, vm, result) -> None:
+        """停止结果处理：清除保活意图（用户主动停止，不再自动拉起）"""
+        ok = bool(result and result[0])
+        notifier().info(
+            "虚拟机已停止" if ok else "停止失败", vm.spec.name
+        )
+        if ok:
+            self.keepalive.note_stopped(vm)
 
     def _restart_selected(self) -> None:
         vm = self._selected_vm()
@@ -839,19 +1066,109 @@ class VMPage(QWidget):
             pending_vm=vm.spec.name,
             release_when="ssh",
             busy_text=f"正在重启 {vm.spec.name}…（直到 SSH 可连）",
-            on_success=lambda r: notifier().info(
-                "虚拟机已重启" if r[0] else "重启失败", vm.spec.name
-            ),
+            on_success=lambda r: self._after_restart(vm, r),
         )
+
+    def _after_restart(self, vm, result) -> None:
+        ok = bool(result and result[0])
+        notifier().info(
+            "虚拟机已重启" if ok else "重启失败", vm.spec.name
+        )
+        if ok:
+            self.keepalive.note_started(vm)
+            self.keepalive.note_ready(vm)
 
     def _open_ssh(self) -> None:
         vm = self._selected_vm()
-        if not vm or not vm.running:
+        if not vm:
             return
-        # 同时显示命令（方便用户复制到自己的终端）并请求主窗口打开终端
+
+        # 资源已释放 → 后台恢复，用户不需要知道发生了什么
+        if not vm.running:
+            if self.keepalive.needs_wake(vm.spec.name):
+                self.status_message.emit(f"{vm.spec.name} 正在连接…")
+                self._wake_and_open(vm)
+                return
+            QMessageBox.information(
+                self, "未运行",
+                f"「{vm.spec.name}」当前未运行。\n\n"
+                "点击工具栏「启动」即可。",
+            )
+            return
+
+        self.keepalive.note_activity(vm.spec.name)
         cmd = vm.ssh_command()
         self.status_message.emit(f"SSH: {cmd}")
         self.request_terminal.emit(vm)
+
+    def _wake_and_open(self, vm) -> None:
+        """恢复已释放资源的 VM，就绪后自动打开 SSH"""
+        self.run_op(
+            "恢复", vm_manager.resume_vm, vm,
+            pending_vm=vm.spec.name,
+            release_when="ssh",
+            busy_text=f"正在连接 {vm.spec.name}…",
+            on_success=lambda r: self._after_wake(vm, r),
+        )
+
+    def _after_wake(self, vm, result) -> None:
+        ok = bool(result and result[0])
+        if not ok:
+            notifier().op_failed("恢复", vm.spec.name, result[1] if result else "")
+            return
+        self.keepalive.note_ready(vm)
+        # 唤醒完成后直接打开 SSH，用户感知不到中间状态
+        QTimer.singleShot(0, lambda: self._open_ssh_now(vm))
+
+    def _open_ssh_now(self, vm) -> None:
+        """SSH 就绪后打开终端"""
+        fresh = vm_manager.load(vm.spec.name) or vm
+        if not fresh.running:
+            # 极少数情况：恢复后进程又退出了，给个提示而不是静默失败
+            QMessageBox.information(
+                self, "连接失败",
+                f"「{vm.spec.name}」未能启动，请查看控制台日志。",
+            )
+            return
+        cmd = fresh.ssh_command()
+        self.status_message.emit(f"SSH: {cmd}")
+        self.request_terminal.emit(fresh)
+
+    def _on_row_activated(self, index) -> None:
+        """双击行：打开详情（仅限已启动的虚拟机）
+
+        未启动的机器不响应双击：
+        详情页里的文件、控制台、共享目录都依赖 guest 在运行，
+        进去也是一片空白。此时用户该做的是先「启动」。
+        """
+        vm = self._selected_vm()
+        if vm is None:
+            return
+        if not self._is_available(vm):
+            self.status_message.emit(
+                f"{vm.spec.name} 未启动，请先启动后再查看详情"
+            )
+            return
+        self._open_detail()
+
+    def _wake_then(self, vm, action) -> None:
+        """唤醒 VM，就绪后执行 action"""
+        def done(r):
+            if r and r[0]:
+                self.keepalive.note_ready(vm)
+                QTimer.singleShot(0, action)
+            else:
+                notifier().op_failed(
+                    "恢复", vm.spec.name, (r[1] if r else "")
+                )
+
+        self.run_op(
+            "恢复", vm_manager.resume_vm, vm,
+            pending_vm=vm.spec.name,
+            release_when="ssh",
+            busy_text=f"正在恢复 {vm.spec.name}…",
+            on_success=done,
+        )
 
     def _open_detail(self) -> None:
         vm = self._selected_vm()
@@ -888,17 +1205,19 @@ class VMPage(QWidget):
         self._hide_card()
 
         menu = QMenu(self)
-        running = vm.running
+        available = self._is_available(vm)
 
-        if not running:
+        if not available:
             menu.addAction(icon("play"), "启动", self._start_selected)
         else:
             menu.addAction(icon("stop"), "停止", self._stop_selected)
             menu.addAction(icon("restart"), "重启", self._restart_selected)
             menu.addAction(icon("terminal"), "SSH 连接", self._open_ssh)
 
-        menu.addSeparator()
-        menu.addAction(icon("info"), "详情…", self._open_detail)
+            # 详情页里的文件 / 控制台 / 共享目录都依赖 guest 在运行，
+            # 未启动时进去是空的 —— 所以这一项只在可用时出现。
+            menu.addSeparator()
+            menu.addAction(icon("info"), "详情…", self._open_detail)
 
         menu.addSeparator()
         act_del = menu.addAction(icon("delete", danger=True), "删除…", self._delete_selected)
@@ -975,6 +1294,16 @@ class VMPage(QWidget):
             on_success=done,
         )
 
+    def _on_vm_deleted(self, name: str) -> None:
+        """VM 删除后清掉保活记录与运行意图"""
+        self.keepalive.forget(name)
+        try:
+            from core import state as _state
+
+            _state.delete_setting(f"vm.desired_running.{name}")
+        except Exception:
+            pass
+
     def _delete_selected(self) -> None:
         vm = self._selected_vm()
         if not vm:
@@ -1001,8 +1330,17 @@ class VMPage(QWidget):
         self.run_op(
             "删除", vm_manager.delete_vm, vm,
             busy_text=f"正在删除 {vm.spec.name}…",
-            on_success=lambda r: notifier().info("虚拟机已删除", vm.spec.name),
+            on_success=lambda r: self._after_delete(vm, r),
         )
+
+    def _after_delete(self, vm, result) -> None:
+        ok = bool(result and result[0])
+        notifier().info(
+            "虚拟机已删除" if ok else "删除失败",
+            vm.spec.name if ok else (result[1] if result else ""),
+        )
+        if ok:
+            self._on_vm_deleted(vm.spec.name)
 
     # ─────────────────────────────────────────
     # 主题切换
@@ -1029,6 +1367,7 @@ class VMPage(QWidget):
 
     def stop_timers(self) -> None:
         self._list_timer.stop()
+        self.keepalive.shutdown()
 
 
 

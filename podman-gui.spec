@@ -28,6 +28,16 @@ hiddenimports = [
     "ptyprocess",
     "pyte",
     "wcwidth",
+    # VM 文件浏览（SFTP）：paramiko 在 core/vm/files.py 里于 try 内
+    # 延迟导入，显式列出避免静态分析漏掉
+    "paramiko",
+    "paramiko.sftp",
+    "paramiko.sftp_client",
+    "paramiko.transport",
+    "paramiko.channel",
+    "bcrypt",
+    "nacl",
+    "cryptography",
 ]
 
 # 排除不需要的大模块，减小体积

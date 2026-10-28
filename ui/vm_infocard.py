@@ -195,8 +195,13 @@ class VMInfoCard(QFrame):
     # ─────────────────────────────────────────
     # 数据
     # ─────────────────────────────────────────
-    def show_for(self, vm, running: bool) -> None:
-        """填充内容（不显示，由调用方决定何时 show）"""
+    def show_for(self, vm, available: bool) -> None:
+        """填充内容（不显示，由调用方决定何时 show）
+
+        available 表示「对用户可用」—— 包含真在运行和
+        资源已释放（访问时秒级恢复）两种底层状态。
+        用户视角没有区别，所以统一显示为运行中。
+        """
         from core.vm.cloudinit import DEFAULT_PASSWORD
 
         self._reset_copy_icons()
@@ -207,7 +212,7 @@ class VMInfoCard(QFrame):
 
         # 标题
         self.lbl_name.setText(spec.name)
-        if running:
+        if available:
             self.lbl_state.setText("● 运行中")
             self.lbl_state.setStyleSheet(
                 f"color: {RUNNING_COLOR}; font-weight: 500;"
@@ -252,7 +257,10 @@ class VMInfoCard(QFrame):
             self._ports_wrap.hide()
 
         # 未运行提示
-        if not running:
+        # 注意：参数已从 running 改名为 available（语义是「对用户可用」，
+        # 包含真在运行和资源已释放两种情况）。这里必须同步，
+        # 否则会 NameError → Qt 事件循环里抛异常 → 进程 abort。
+        if not available:
             self.lbl_hint.setText("未运行 · 启动后即可连接")
             self.lbl_hint.show()
         else:

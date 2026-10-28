@@ -50,6 +50,11 @@ class RemoteEntry:
         return stat_mod.filemode(self.mode)
 
 
+def _shq(s: str) -> str:
+    """shell 单引号转义"""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
 def _fmt_size(n: int) -> str:
     if n < 1024:
         return f"{n} B"
@@ -102,20 +107,55 @@ class SftpSession:
         # VM 是新建的临时机器，主机密钥每次都变，不校验
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        client.connect(
-            hostname="127.0.0.1",
-            port=int(port),
-            username=self.vm.spec.username,
-            key_filename=str(key),
-            timeout=10,
-            banner_timeout=15,
-            auth_timeout=15,
-            allow_agent=False,
-            look_for_keys=False,
-        )
+        # 重试几次：VM 刚从内存快照恢复时 sshd 可能还没完全就绪，
+        # 或宿主机端口代理正在交接，此时会读到 "Error reading SSH
+        # protocol banner" 或直接连接被拒。
+        last_err: Exception | None = None
+        for attempt in range(4):
+            try:
+                client.connect(
+                    hostname="127.0.0.1",
+                    port=int(port),
+                    username=self.vm.spec.username,
+                    key_filename=str(key),
+                    timeout=10,
+                    banner_timeout=20,
+                    auth_timeout=20,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+                self._client = client
+                self._sftp = client.open_sftp()
+                return
+            except (paramiko.SSHException, OSError) as e:
+                last_err = e
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                if attempt < 3:
+                    import time as _t
 
-        self._client = client
-        self._sftp = client.open_sftp()
+                    _t.sleep(1.5 * (attempt + 1))
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(
+                        paramiko.AutoAddPolicy()
+                    )
+
+        raise RuntimeError(f"SFTP 连接失败: {last_err}")
+
+    def _sudo_run(self, command: str) -> None:
+        """用 sudo 执行一条命令（SFTP 权限不足时的兜底）
+
+        SFTP 协议本身没有提权概念 —— 它就以登录用户身份操作。
+        遇到系统目录时只能走 SSH + sudo。
+        """
+        from core.vm import sudo as vm_sudo
+
+        ok, out = vm_sudo.run(self.vm, command, timeout=60)
+        if not ok:
+            # 把 sudo 的失败原因抛出去，让 UI 能显示
+            raise PermissionError(out or "操作失败（需要 root 权限）")
 
     def close(self) -> None:
         for obj in (self._sftp, self._client):
@@ -128,6 +168,66 @@ class SftpSession:
         self._client = None
 
     # ── 操作 ──
+    def ensure_home_writable(self) -> tuple[bool, str]:
+        """确保 home 目录属于当前用户且可写
+
+        云镜像（cloudimg）常见问题：cloud-init 创建用户时没来得及
+        修正 /home/<user> 的属主，导致它归 root 所有，普通用户
+        无法在里面创建文件 —— 表现为「上传/新建目录」全部失败，
+        但浏览还能用（读权限是有的）。
+
+        这里在连接后自动检查一次，发现不对就用 sudo 修掉，
+        用户不需要理解发生了什么。
+        """
+        try:
+            home = self.home()
+        except Exception:
+            return False, ""
+
+        # 用 stat 看属主
+        try:
+            st = self._sftp.stat(home)
+        except Exception:
+            return False, ""
+
+        uid = getattr(st, "st_uid", None)
+        if uid is None:
+            return False, ""
+
+        # 与登录用户比对（SFTP 侧拿到的是数字 uid）
+        # 简单可靠的做法：直接尝试在 home 下建临时目录
+        probe = home.rstrip("/") + "/.podman-gui-write-probe"
+        try:
+            self._sftp.mkdir(probe)
+            try:
+                self._sftp.rmdir(probe)
+            except Exception:
+                pass
+            return True, "可写"
+        except IOError:
+            pass
+        except Exception:
+            pass
+
+        # 不可写 → 用统一 sudo 层修复（会自动处理免密/密码/一次性提升）
+        from core.vm import sudo as vm_sudo
+
+        user = self.vm.spec.username
+        ok1, _ = vm_sudo.chown(self.vm, home, f"{user}:{user}")
+        ok2, _ = vm_sudo.chmod(self.vm, home, "u+rwx")
+
+        # 修复后重新验证
+        try:
+            self._sftp.mkdir(probe)
+            self._sftp.rmdir(probe)
+            return True, "已修复 home 目录权限"
+        except Exception:
+            pass
+
+        if ok1 and ok2:
+            return True, "已修复 home 目录权限"
+        return False, "home 目录不可写，且无法自动修复（需要 VM 内 root 权限）"
+
     def listdir(self, path: str) -> list[RemoteEntry]:
         """列目录（目录在前，各自按名称排序）"""
         self.connect()
@@ -159,20 +259,35 @@ class SftpSession:
 
     def mkdir(self, path: str) -> None:
         self.connect()
-        self._sftp.mkdir(path)
+        try:
+            self._sftp.mkdir(path)
+        except PermissionError:
+            # SFTP 以普通用户身份运行，写系统目录必然被拒。
+            # 有 sudo 权限时用命令行兜底 —— 否则用户会看到
+            # 「授权成功了但还是建不了」。
+            self._sudo_run(f"mkdir -p {_shq(path)}")
 
     def remove(self, path: str) -> None:
         """删除文件"""
         self.connect()
-        self._sftp.remove(path)
+        try:
+            self._sftp.remove(path)
+        except PermissionError:
+            self._sudo_run(f"rm -f {_shq(path)}")
 
     def rmdir(self, path: str) -> None:
         self.connect()
-        self._sftp.rmdir(path)
+        try:
+            self._sftp.rmdir(path)
+        except PermissionError:
+            self._sudo_run(f"rmdir {_shq(path)}")
 
     def rename(self, old: str, new: str) -> None:
         self.connect()
-        self._sftp.rename(old, new)
+        try:
+            self._sftp.rename(old, new)
+        except PermissionError:
+            self._sudo_run(f"mv {_shq(old)} {_shq(new)}")
 
     def get(self, remote: str, local: str) -> None:
         """下载"""
@@ -180,9 +295,19 @@ class SftpSession:
         self._sftp.get(remote, local)
 
     def put(self, local: str, remote: str) -> None:
-        """上传"""
+        """上传（目标不可写时用 sudo 兜底）"""
         self.connect()
-        self._sftp.put(local, remote)
+        try:
+            self._sftp.put(local, remote)
+        except (PermissionError, IOError) as e:
+            if "denied" not in str(e).lower():
+                raise
+            # 先传到用户可写的中转位置，再 sudo mv 过去
+            import tempfile
+
+            tmp = f"/tmp/.podman-gui-up-{Path(remote).name}"
+            self._sftp.put(local, tmp)
+            self._sudo_run(f"mv -f {_shq(tmp)} {_shq(remote)}")
 
     def read_text(self, path: str, max_bytes: int = 512 * 1024) -> str:
         """读文本文件（超长截断）"""

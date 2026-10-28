@@ -311,7 +311,7 @@ class ResourcePage(QWidget):
             self.refresh_silent()
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     # ─────────────────────────────────────────
@@ -449,7 +449,7 @@ class ResourcePage(QWidget):
             QMessageBox.critical(self, "删除失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     def delete_item(self, item: dict) -> None:

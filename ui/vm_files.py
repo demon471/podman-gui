@@ -34,12 +34,16 @@ from PyQt6.QtWidgets import (
 )
 
 from core.async_task import run_async
+from core.notify import notifier
 from core.vm import files as vm_files
 from resources.icons import ICON_SIZE_BUTTON, icon
 
 
 class FilePanel(QWidget):
     """VM 内文件浏览"""
+
+    # 忙碌状态变化（外层据此禁用/恢复「关闭」按钮）
+    busy_changed = pyqtSignal(bool)
 
     status = pyqtSignal(str)
 
@@ -51,8 +55,17 @@ class FilePanel(QWidget):
         self._session: vm_files.SftpSession | None = None
         self._tasks: list = []
         self._busy = False
+        # 导航请求序号：用于丢弃过期响应（快速连点时只认最后一次）
+        self._nav_seq = 0
 
         self._build_ui()
+
+        # 打开面板就加载当前目录 —— 否则表格一直是空的，
+        # 用户看到的「文件页没反应」就是这个原因。
+        # 用 singleShot 让界面先显示出来，再后台拉数据。
+        from PyQt6.QtCore import QTimer
+
+        QTimer.singleShot(0, lambda: self.navigate(self.cwd))
 
     # ─────────────────────────────────────────
     # UI
@@ -164,20 +177,38 @@ class FilePanel(QWidget):
     # 导航
     # ─────────────────────────────────────────
     def navigate(self, path: str) -> None:
-        """进入指定目录（后台加载）"""
-        if self._busy:
-            return
-        self._busy = True
+        """进入指定目录（后台加载）
+
+        允许并发导航：用户快速连点「上一级」或切目录时，
+        每次请求都发出去，只采用**最后一次**的结果。
+        用递增序号识别过期响应，避免旧目录数据覆盖新目录。
+
+        之前用「busy 就丢弃」的写法，导致快速操作被静默忽略，
+        用户看到的是按钮失灵（点了没反应）。
+        """
+        self._nav_seq += 1
+        seq = self._nav_seq
+
         self._set_busy(True)
 
         def work():
             # 复用连接（同一面板内一直用同一个 session）
             if self._session is None:
                 self._session = vm_files.SftpSession(self.vm)
+                # 首次连接顺手检查 home 可写性并自动修复 ——
+                # 云镜像常把 /home/<user> 留成 root 所有，
+                # 导致上传/新建目录全部失败（浏览却正常）。
+                # 放在这里做一次，用户不会遇到「莫名其妙写不进去」。
+                try:
+                    self._session.ensure_home_writable()
+                except Exception:
+                    pass
             return self._session.listdir(path)
 
         def done(entries):
-            self._busy = False
+            # 过期响应：期间用户已经切到别的目录，丢弃
+            if seq != self._nav_seq:
+                return
             self._set_busy(False)
             self.cwd = path
             self.ed_path.setText(path)
@@ -186,7 +217,8 @@ class FilePanel(QWidget):
             self.status.emit(f"{len(entries)} 项")
 
         def error(msg):
-            self._busy = False
+            if seq != self._nav_seq:
+                return
             self._set_busy(False)
             m = str(msg)
             self.status.emit(f"读取失败: {m}")
@@ -298,9 +330,26 @@ class FilePanel(QWidget):
 
         self._spawn(work, done, lambda m: self.status.emit(f"读取失败: {m}"))
 
+    @staticmethod
+    def _file_dialog_kwargs() -> dict:
+        """强制使用 Qt 内置文件对话框
+
+        为什么要这么做：
+        KDE Wayland 下 Qt 默认走 XDG Desktop Portal 的原生对话框。
+        PyInstaller 打包后，portal 通信常因缺少 D-Bus 服务名或
+        权限而静默失败 —— 表现为「对话框打开但选不中文件、
+        确认后返回空列表」。
+
+        用 Qt 自己的对话框（非原生）在所有环境下都可靠，
+        外观也由本应用的 QSS 统一控制。
+        """
+        return {"options": QFileDialog.Option.DontUseNativeDialog}
+
     def _upload(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择要上传的文件", str(Path.home())
+            self, "选择要上传的文件", str(Path.home()),
+            "所有文件 (*)",
+            **self._file_dialog_kwargs(),
         )
         if not files:
             return
@@ -323,32 +372,64 @@ class FilePanel(QWidget):
         self._spawn(work, done, self._op_error)
 
     def _download(self) -> None:
-        sel = [e for e in self._selected() if not e.is_dir]
+        sel = self._selected()
         if not sel:
-            self.status.emit("请选择要下载的文件")
+            self.status.emit("请先在列表中选择要下载的文件或目录")
             return
 
         target = QFileDialog.getExistingDirectory(
-            self, "选择保存位置", str(Path.home() / "下载")
+            self, "选择保存位置",
+            str(Path.home() / "下载"),
+            **self._file_dialog_kwargs(),
         )
         if not target:
             return
+
+        files = [e for e in sel if not e.is_dir]
+        dirs = [e for e in sel if e.is_dir]
 
         def work():
             if self._session is None:
                 self._session = vm_files.SftpSession(self.vm)
             n = 0
-            for e in sel:
+            # 普通文件直接下
+            for e in files:
                 local = str(Path(target) / e.name)
                 self._session.get(e.path, local)
                 n += 1
+            # 目录递归下（保持相对结构）
+            for d in dirs:
+                n += self._download_dir(d.path, Path(target) / d.name)
             return n
 
         def done(n):
-            self.status.emit(f"已下载 {n} 个文件到 {target}")
+            # 必须解除 busy —— 否则所有按钮永久变灰，
+            # 用户只能关掉窗口重开（之前就是这样）
+            self._set_busy(False)
+            self.status.emit(f"已下载 {n} 项到 {target}")
+            notifier().info("下载完成", f"{n} 项 → {target}")
 
         self._set_busy(True)
         self._spawn(work, done, self._op_error)
+
+    def _download_dir(self, remote: str, local: Path) -> int:
+        """递归下载目录（在工作线程里执行）"""
+        count = 0
+        try:
+            local.mkdir(parents=True, exist_ok=True)
+            entries = self._session.listdir(remote)
+        except Exception:
+            return 0
+        for e in entries:
+            if e.is_dir:
+                count += self._download_dir(e.path, local / e.name)
+            else:
+                try:
+                    self._session.get(e.path, str(local / e.name))
+                    count += 1
+                except Exception:
+                    pass
+        return count
 
     def _mkdir(self) -> None:
         name, ok = QInputDialog.getText(self, "新建目录", "目录名：")
@@ -553,17 +634,100 @@ class FilePanel(QWidget):
         self._spawn(work, done, self._op_error)
 
     def _set_busy(self, busy: bool) -> None:
+        """切换忙碌态
+
+        忙碌时禁用本面板所有按钮，并通过 busy_changed 信号
+        通知外层（详情对话框）也禁用「关闭」——
+        下载/上传进行中关掉窗口会让后台线程访问已销毁对象。
+        """
+        self._busy = busy
         for b in (self.btn_up, self.btn_home, self.btn_refresh,
                   self.btn_upload, self.btn_download, self.btn_mkdir,
                   self.btn_rename, self.btn_delete):
             b.setEnabled(not busy)
+        self.busy_changed.emit(busy)
         if busy:
             self.status.emit("加载中…")
 
     def _op_error(self, msg: str) -> None:
         self._set_busy(False)
-        self.status.emit(f"操作失败: {msg}")
-        QMessageBox.warning(self, "操作失败", msg)
+        text = str(msg)
+        self.status.emit(f"操作失败: {text}")
+
+        # 权限类失败 → 直接给一键提权入口
+        # 用户不必自己去概览页找那个按钮
+        if self._is_permission_error(text):
+            self._offer_sudo(text)
+
+    @staticmethod
+    def _is_permission_error(msg: str) -> bool:
+        low = msg.lower()
+        return any(k in low for k in (
+            "permission denied", "eacces", "operation not permitted",
+            "permission", "拒绝访问", "权限",
+        ))
+
+    def _offer_sudo(self, err: str) -> None:
+        """文件操作因权限失败时，提示并支持一键提权
+
+        提权成功后这台 VM 永久免密（规则写进 guest 的 sudoers），
+        用户只需要授权这一次。
+        """
+        from PyQt6.QtWidgets import QInputDialog
+
+        ret = QMessageBox.question(
+            self, "需要 root 权限",
+            f"操作失败：{err[:200]}\n\n"
+            "这个目录需要管理员权限才能写入。\n"
+            "是否现在授权一次？授权后该虚拟机的所有操作"
+            "都会自动获得 root 权限，不再询问。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        default_pwd = ""
+        try:
+            from core.vm.cloudinit import DEFAULT_PASSWORD
+
+            default_pwd = DEFAULT_PASSWORD
+        except Exception:
+            pass
+
+        pwd, ok = QInputDialog.getText(
+            self, "启用 root 权限",
+            f"请输入「{self.vm.spec.name}」内用户 "
+            f"{self.vm.spec.username} 的登录密码：",
+            QLineEdit.EchoMode.Password,
+            default_pwd,
+        )
+        if not ok or not pwd:
+            return
+
+        from core.vm import sudo as vm_sudo
+
+        vm_sudo.set_password(pwd)
+        self.status.emit("正在授权…")
+        self._set_busy(True)
+
+        def work():
+            return vm_sudo.ensure_nopass(self.vm)
+
+        def done(success):
+            self._set_busy(False)
+            if success:
+                self.status.emit("已获得 root 权限，正在重试…")
+                notifier().info("已启用 root 权限", self.vm.spec.name)
+                self.navigate(self.cwd)
+            else:
+                self.status.emit("授权失败：密码不正确或无 sudo 权限")
+
+        def on_err(m: str) -> None:
+            self._set_busy(False)
+            self.status.emit(f"授权失败: {m}")
+
+        self._spawn(work, done, on_err)
 
     def _spawn(self, work, done, error=None) -> None:
         """后台执行（保持引用，避免任务被回收）"""

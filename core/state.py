@@ -78,7 +78,15 @@ def _db() -> sqlite3.Connection:
     # 不用 isolation_level=""：那种模式下 execute 后仍持有事务，
     # 连接关闭时未提交的数据会被回滚（实测写入后立刻能读，
     # 重连就丢）。用默认隔离级别 + 写操作后显式 commit。
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    # check_same_thread=False：连接可能由 UI 线程建、后台线程用
+    # （run_op 的删除/保存都在工作线程）。所有访问已在 _lock
+    # 下串行化，跨线程共用是安全的；不关会有
+    # "created in a thread can only be used in that same thread"
+    # 异常 —— 之前删 VM 时 SQLite 行没删掉，列表刷新又读回来，
+    # 表现为「删除后列表不消失」。
+    conn = sqlite3.connect(
+        str(DB_PATH), timeout=10, check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
     # WAL 模式：读写不互斥，且崩溃后更易恢复
     conn.execute("PRAGMA journal_mode=WAL")

@@ -70,6 +70,154 @@ def default_timezone() -> str:
 # ─────────────────────────────────────────
 # user-data 生成
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# 串口控制台修复脚本
+#
+# 部分 cloud image（如 Alpine 3.22.7+）的内核 cmdline 里有多个
+# console=，Linux 取最后一个当 /dev/console。我们 -display none
+# 无显卡，若最后一个是 tty0，OpenRC 的服务日志就全进黑洞，
+# 「VM 起不来」时宿主机串口里只有 initramfs 的几行，无法排查。
+#
+# 这个脚本在首次启动时把 cmdline 收敛成单个 console=ttyS0。
+# 以独立常量保存、投放时 base64 内嵌，免去 YAML/shell 多层转义。
+# ─────────────────────────────────────────
+_SERIAL_CONSOLE_PY = r'''#!/usr/bin/env python3
+"""把内核与服务的日志收敛到串口（由 podman-gui 投放，幂等）
+
+问题
+────
+Alpine 3.22.7+ cloud image 的内核 cmdline 里有三个 console=：
+    console=ttyS0,115200n8 console=ttyAMA0,115200n8 console=tty0
+Linux 取**最后一个** console= 作为 /dev/console。我们的 VM 跑
+-display none（无显卡），tty0 是黑洞，于是 OpenRC 的服务日志和报错
+全部丢失，宿主机串口只剩 initramfs 那几行 —— VM 起不来时毫无线索。
+
+做法
+────
+把 cmdline 收敛成单个 console=ttyS0。直接补丁 /boot/grub/grub.cfg
+（GRUB 实际读取的文件），并把 /etc/default/grub 也写成规范单行，
+避免将来 update-grub 又生成回三 console 的形式。
+
+为什么不改完 /etc/default/grub 就交给 grub-mkconfig
+──────────────────────────────────────────────────
+该镜像的 GRUB_CMDLINE_LINUX_DEFAULT 值跨多行，里面还有
+    autodetect_serial=setconsole=[Aa]mazon,...^\\(7783-...\\|OracleCloud...
+这类带反斜杠转义与正则元字符的片段。行内 sed 会留下未闭合的引号，
+grub-mkconfig 直接报
+    syntax error: unterminated quoted string
+即使折叠成单行，那些元字符也会让 GRUB 解析器报 syntax error。
+所以这里直接补丁 grub.cfg，并把含元字符的 token 整个剔除。
+"""
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+FLAG = Path("/var/lib/podman-gui-serial-console.done")
+GRUB_CFG = Path("/boot/grub/grub.cfg")
+GRUB_DEFAULT = Path("/etc/default/grub")
+
+WANT = "console=ttyS0,115200n8"
+BAD_CHARS = set("$\\()[]|*^")
+
+
+def clean(tokens):
+    """保留有意义的 token；console= 只留一个；剔除元字符残留"""
+    kept = []
+    seen = False
+    for t in tokens:
+        if not t:
+            continue
+        if any(c in BAD_CHARS for c in t):
+            continue
+        if t.startswith("console="):
+            if seen:
+                continue
+            seen = True
+            kept.append(WANT)
+            continue
+        kept.append(t)
+    if not seen:
+        kept.append(WANT)
+    return kept
+
+
+def patch_grub_cfg():
+    if not GRUB_CFG.exists():
+        return False
+    rows = GRUB_CFG.read_text().split("\n")
+    changed = False
+    for i, row in enumerate(rows):
+        if not row.lstrip().startswith("linux") or "vmlinuz" not in row:
+            continue
+        parts = row.split()
+        head, tokens = parts[0], parts[1:]
+        new = clean(tokens)
+        if new != tokens:
+            rows[i] = head + "\t" + " ".join(new)
+            changed = True
+    if changed:
+        GRUB_CFG.write_text("\n".join(rows))
+    return changed
+
+
+def patch_grub_default():
+    if not GRUB_DEFAULT.exists():
+        return False
+    rows = GRUB_DEFAULT.read_text().split("\n")
+    out, changed, i = [], False, 0
+    while i < len(rows):
+        if rows[i].startswith("GRUB_CMDLINE_LINUX_DEFAULT="):
+            buf = rows[i]
+            while buf.count('"') % 2 == 1 and i + 1 < len(rows):
+                i += 1
+                buf += rows[i]
+            value = buf.split("=", 1)[1]
+            line = 'GRUB_CMDLINE_LINUX_DEFAULT="%s"' % " ".join(
+                clean(value.replace('"', "").split()))
+            if line != rows[i]:
+                changed = True
+            out.append(line)
+        else:
+            out.append(rows[i])
+        i += 1
+    if changed:
+        GRUB_DEFAULT.write_text("\n".join(out))
+    return changed
+
+
+def main():
+    if FLAG.exists():
+        return 0
+    did = patch_grub_cfg()
+    did = patch_grub_default() or did
+    if did:
+        if shutil.which("grub-mkconfig"):
+            subprocess.run(["grub-mkconfig", "-o", str(GRUB_CFG)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            patch_grub_cfg()
+        elif shutil.which("update-grub"):
+            subprocess.run(["update-grub"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            patch_grub_cfg()
+        FLAG.parent.mkdir(parents=True, exist_ok=True)
+        FLAG.touch()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def _b64_lines(text: str) -> list[str]:
+    """把文本 base64 编码并按 76 列折行（用于内嵌进 cloud-init）"""
+    import base64
+
+    raw = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return [raw[i:i + 76] for i in range(0, len(raw), 76)]
+
+
 def build_user_data(
     *,
     username: str = "",
@@ -222,9 +370,16 @@ def build_user_data(
 
     # 3. authorized_keys（保证末尾换行）
     lines += [
+    # owner 必须是 root，不能写 {username}：
+    # write_files 跑在 init-network 阶段，早于 users 模块创建用户；
+    # 此时 cloud-init 的 ensure_dir 会 chown 该用户并抛
+    #   OSError: Unknown user or group: getpwnam name not found
+    # 这个异常会**中断整个 write_files 模块**，排在后面的
+    # fix-perms.sh 与串口修复脚本会静默不落地。
+    # 属主由 runcmd 里的 fix-perms.sh 在用户存在后修正。
         f"  - path: /home/{username}/.ssh/authorized_keys",
         "    permissions: '0600'",
-        f"    owner: {username}:{username}",
+        "    owner: root:root",
         "    content: |",
         f"      {ssh_pubkey.strip()}",
     ]
@@ -256,10 +411,35 @@ def build_user_data(
     ]
     wf_count += 1
 
+    # 5. 串口控制台修复脚本
+    #
+    # 不能放 bootcmd：bootcmd 属于 local 阶段，早于 write_files 所在的
+    # config 阶段，脚本文件还不存在（会报 not found 并记一条 init error）。
+    # 用 runcmd 才能拿到这个脚本。
+    lines += [
+        "  - path: /usr/local/sbin/podman-gui-serial-console",
+        "    permissions: '0755'",
+        "    owner: root:root",
+        "    content: |",
+        "      #!/bin/sh",
+        "      # 自解压并执行内嵌的 python3 脚本",
+        "      base64 -d > /usr/local/sbin/podman-gui-serial-console.py <<'__PGPY__'",
+    ]
+    for _line in _b64_lines(_SERIAL_CONSOLE_PY):
+        lines.append("        " + _line)
+    lines += [
+        "      __PGPY__",
+        "      chmod 755 /usr/local/sbin/podman-gui-serial-console.py",
+        "      python3 /usr/local/sbin/podman-gui-serial-console.py || true",
+    ]
+    wf_count += 1
+
     lines.append("")
 
     # ── runcmd ──
     lines.append("runcmd:")
+    # 串口控制台修复（幂等；首启改 cmdline，下次开机日志完整）
+    lines.append("  - /usr/local/sbin/podman-gui-serial-console || true")
 
     # SSH 服务
     if family == "alpine":

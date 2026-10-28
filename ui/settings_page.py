@@ -68,10 +68,14 @@ class SettingsPage(QWidget):
     # ─────────────────────────────────────────
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # 留出与窗口边缘的间距 —— Breeze 的 tab 上方需要一点呼吸空间，
+        # 贴边会显得局促（系统设置、Dolphin 都有这个内边距）
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
 
         self.tabs = QTabWidget()
+        # 不要圆角/边框的 pane，tab 栏本身由 Breeze 绘制
+        self.tabs.setDocumentMode(False)
         self.tabs.addTab(self._build_overview_tab(), "概览")
         self.tabs.addTab(self._build_service_tab(), "服务")
         self.tabs.addTab(self._build_mirror_tab(), "镜像加速")
@@ -556,7 +560,7 @@ class SettingsPage(QWidget):
 
         from core.async_task import run_async
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     # ── 关于 ──

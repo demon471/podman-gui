@@ -309,30 +309,35 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
-/* ═══════════ 标签页 ═══════════ */
+/* ═══════════ 标签页 ═══════════
+ *
+ * 这里**故意不写任何 QTabBar::tab 规则**。
+ *
+ * 原因：本应用跑在 KDE/Breeze 上，QStyle 已经是 Breeze。
+ * Breeze 的 tab 有它自己的设计语言 ——
+ *   · 选中项：白底 + 顶部 2px 高亮条 + 下边框与内容区相连
+ *   · 未选中：灰底、无边框
+ *   · hover：轻微提亮
+ *
+ * 一旦在 QSS 里覆写 background/border，Qt 就会**放弃 Breeze
+ * 的原生绘制**，改用 QSS 的简化画法 —— 结果就是丢失顶部高亮条、
+ * 灰色块显得突兀，整体和 Dolphin、系统设置等 KDE 应用完全不像。
+ *
+ * 所以：tab 的视觉交给 Breeze。这里只处理 Breeze 没有覆盖到的
+ * 一点 —— 内容区不要额外边框（Breeze 默认给 pane 画了框，
+ * 和 tab 的下边框会叠成双线）。
+ */
 QTabWidget::pane {{
     border: none;
-    border-top: 1px solid {border};
-    background-color: {base};
+    /* 内容区用 window 色（浅灰），不是 base（纯白）。
+       这样内部的 GroupBox / 卡片（base 白）能浮在灰底上，
+       层次分明 —— 和系统设置、Dolphin 的观感一致。
+       用 base 的话白卡片贴白底，边界完全看不出来，显得「糊」。 */
+    background-color: {window};
 }}
 
-QTabBar::tab {{
-    background-color: transparent;
-    color: {window_text};
-    padding: 6px 14px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    margin-right: 1px;
-}}
-
-QTabBar::tab:selected {{
-    border-bottom-color: {highlight};
-    color: {window_text};
-}}
-
-QTabBar::tab:hover:!selected {{
-    background-color: {alternate};
-}}
+/* 内容区与 tab 之间保留 Breeze 的那条分界线。
+   Breeze 通过 QTabBar 的 bottom 线实现，这里不需要重复。 */
 
 /* ═══════════ 滚动条（极细、低干扰）═══════════
    设计要点：

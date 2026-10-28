@@ -57,14 +57,27 @@ def shutdown_tasks(tasks, timeout_ms: int = 3000) -> None:
     """
     import time as _t
 
+    import time as _t
+
+    # 这里的职责只有一件事：**确保线程都结束了**，
+    # 避免解释器关闭时强杀 QThread 导致 abort。
+    #
+    # 不在里面转事件循环：
+    # 这个函数是在 app.exec() 返回之后调用的，此时没有活跃的
+    # 事件循环；手动 processEvents() 会重入 Qt 内部状态，
+    # 实测直接 abort。
+    #
+    # _cleanup 里只做 deleteLater（不需要立即执行），
+    # 对象回收交给 Qt 在退出时处理，不影响进程安全退出。
     deadline = _t.monotonic() + timeout_ms / 1000
     for task in list(tasks):
         remaining = max(0, int((deadline - _t.monotonic()) * 1000))
         if not task.wait(remaining):
-            # 超时未完：让线程自然跑完（detach），
-            # 但对象由 _ACTIVE 继续持有防 GC，
-            # 回调 parent 已死则信号自动丢弃（Queued 安全）
-            task.setParent(None)
+            # 超时未完：对象由 _ACTIVE 继续持有防 GC
+            try:
+                task.setParent(None)
+            except RuntimeError:
+                pass
 
 
 class BackgroundTask(QObject):
@@ -87,6 +100,7 @@ class BackgroundTask(QObject):
         self._on_error = on_error
         self._thread: QThread | None = None
         self._worker: _Worker | None = None
+        self._finished = False
 
     def start(self) -> None:
         self._thread = QThread()
@@ -112,10 +126,44 @@ class BackgroundTask(QObject):
         self._worker.failed.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup)
 
+        # 清理不依赖 Qt 信号 —— parent 被销毁后 self 已死，
+        # 任何投递到 self 的连接都会失效，_cleanup 永远不执行。
+        # 改成让 worker 在退出前直接调用（在工作线程里，纯 Python
+        # 操作，不碰 Qt 对象，因此安全）。
+        self._worker.finished.connect(self._mark_finished)
+        self._worker.failed.connect(self._mark_finished)
+
         _ACTIVE.add(self)
         self._thread.start()
 
+    def _mark_finished(self, *_args) -> None:
+        """工作线程结束时调用（在工作线程里）
+
+        只做纯 Python 的记账：把 _thread/_worker 摘掉、
+        从 _ACTIVE 移除。不碰任何 Qt 对象，因此即使 self 的
+        C++ 部分已被销毁也不会崩。
+        """
+        _ACTIVE.discard(self)
+        self._finished = True
+
+    def _alive(self) -> bool:
+        """对象是否仍然有效
+
+        parent 被销毁后，Qt 会 deleteLater 掉子对象，此时
+        Python 包装层可能还活着但底层 C++ 对象已死 ——
+        继续调 setToolTip / emit 等会触发 Qt fatal（abort）。
+        用 sip 检查底层对象状态。
+        """
+        try:
+            import sip
+
+            return not sip.isdeleted(self)
+        except Exception:
+            return True
+
     def _handle_done(self, result: Any) -> None:
+        if not self._alive():
+            return
         if self._on_done is not None:
             try:
                 self._on_done(result)
@@ -123,6 +171,8 @@ class BackgroundTask(QObject):
                 pass
 
     def _handle_error(self, msg: str) -> None:
+        if not self._alive():
+            return
         if self._on_error is not None:
             try:
                 self._on_error(msg)
@@ -130,19 +180,67 @@ class BackgroundTask(QObject):
                 pass
 
     def _cleanup(self) -> None:
+        """UI 线程侧的清理（deleteLater 内部对象）"""
         _ACTIVE.discard(self)
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
-        if self._thread is not None:
-            self._thread.deleteLater()
-            self._thread = None
+        self._finished = True
+
+        worker, thread = self._worker, self._thread
+        self._worker = None
+        self._thread = None
+
+        if not self._alive():
+            return
+
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except RuntimeError:
+                pass
+
+    @property
+    def alive(self) -> bool:
+        if getattr(self, "_finished", False):
+            return False
+        """任务是否还在跑（对已销毁对象也安全）
+
+        为什么需要它：
+        任务结束后 `_cleanup` 会把 `_thread` 置 None 并 deleteLater
+        掉内部对象。如果外部还持有 BackgroundTask 引用并去读
+        `t._thread`，而该 QObject 已被 Qt 销毁，就是访问悬空指针
+        → SIGSEGV（进程直接消失，没有 Python traceback）。
+
+        用这个属性代替直接读 `_thread`，会先检查底层对象是否还在。
+        """
+        if not self._alive():
+            return False
+        return self._thread is not None
 
     def wait(self, ms: int = 5000) -> bool:
-        """同步等待（仅测试用）"""
-        if self._thread is None:
+        """同步等待线程结束
+
+        先 requestInterruption 再 wait。
+        只 wait 不 quit 的话，工作线程 emit finished 后
+        QThread 的 quit() 需要事件循环才生效 —— 而这里正卡在
+        wait 里，事件循环不动，线程永远不退出（实测 3 秒超时）。
+        主动 quit 让线程循环收到退出请求。
+        """
+        t = self._thread
+        if t is None:
             return True
-        return self._thread.wait(ms)
+        try:
+            if t.isRunning():
+                t.quit()
+        except RuntimeError:
+            return True
+        try:
+            return t.wait(ms)
+        except RuntimeError:
+            return True
 
 
 def run_async(

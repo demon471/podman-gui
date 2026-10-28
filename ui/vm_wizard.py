@@ -45,6 +45,14 @@ from resources.icons import ICON_SIZE_TOOLBAR, icon
 class VMWizard(QDialog):
     """新建虚拟机向导"""
 
+    # 下载进度/日志必须跨线程传回 UI 线程。
+    # 直接在工作线程里调 self.prog.setValue() / self.lbl_error.setText()
+    # 会触发 Qt 的 QMessageLogger::fatal → abort（进程闪退，
+    # 没有 Python traceback）。这两个信号用 Queued 连接，
+    # 由 Qt 自动投递到 UI 线程执行。
+    _sig_progress = pyqtSignal(int, int)
+    _sig_log = pyqtSignal(str)
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.created_vm = None
@@ -60,8 +68,41 @@ class VMWizard(QDialog):
         self._specs = images.list_images()
 
         self._build_ui()
+
+        # 下载回调 → 信号 → UI 线程更新控件
+        # 用 QueuedConnection 显式声明：worker 线程 emit，
+        # UI 线程执行槽，绝不跨线程碰 QWidget。
+        from PyQt6.QtCore import Qt as _Qt
+
+        self._sig_progress.connect(
+            self._on_dl_progress, _Qt.ConnectionType.QueuedConnection
+        )
+        self._sig_log.connect(
+            self._on_dl_log, _Qt.ConnectionType.QueuedConnection
+        )
+
         self._goto_step(0)
         QTimer.singleShot(80, self._check_deps)
+
+    # ─────────────────────────────────────────
+    # 下载回调（UI 线程执行）
+    # ─────────────────────────────────────────
+    def _on_dl_progress(self, cur: int, total: int) -> None:
+        """更新进度条（在 UI 线程）"""
+        try:
+            if total > 0:
+                self.prog.setRange(0, total)
+                self.prog.setValue(cur)
+        except RuntimeError:
+            # 向导已被关闭，控件已销毁
+            pass
+
+    def _on_dl_log(self, msg: str) -> None:
+        """更新日志标签（在 UI 线程）"""
+        try:
+            self.lbl_error.setText(msg)
+        except RuntimeError:
+            pass
 
     # ─────────────────────────────────────────
     # UI
@@ -406,13 +447,13 @@ class VMWizard(QDialog):
         self.prog.setRange(0, 0)
         self._fail("正在创建，首次创建需要下载镜像，请耐心等待…")
 
+        # 这两个回调在后台线程被调用 —— 只 emit 信号，
+        # 绝不直接碰控件（会 Qt fatal → 闪退）
         def on_log(msg: str) -> None:
-            self.lbl_error.setText(msg)
+            self._sig_log.emit(msg)
 
         def on_progress(cur: int, total: int) -> None:
-            if total > 0:
-                self.prog.setRange(0, total)
-                self.prog.setValue(cur)
+            self._sig_progress.emit(cur, total)
 
         def work():
             # 只传名称、镜像、用户名 —— 磁盘与内存全部用默认值

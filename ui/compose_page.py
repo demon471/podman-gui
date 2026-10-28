@@ -491,7 +491,7 @@ class ComposePage(QWidget):
             self.status_message.emit(f"扫描失败: {msg}")
 
         task = run_async(load, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def refresh_silent(self) -> None:
@@ -844,7 +844,7 @@ class ComposePage(QWidget):
             QMessageBox.critical(self, f"{label}失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def on_disconnected(self) -> None:
@@ -1015,7 +1015,7 @@ class ComposePage(QWidget):
             QMessageBox.critical(self, "删除失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _show_logs(self) -> None:
@@ -1037,7 +1037,7 @@ class ComposePage(QWidget):
             QMessageBox.warning(self, "读取日志失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _open_log_dialog(self, proj, text: str) -> None:

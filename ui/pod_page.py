@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QToolBar
 
 from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
-from resources.icons import icon
+from resources.icons import icon, state_icon
 from ui.widgets import ask_text
 from ui.resource_page import ResourcePage
 from ui.utils import fmt_time

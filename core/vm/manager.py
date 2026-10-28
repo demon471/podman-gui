@@ -225,11 +225,22 @@ def load_all() -> list[VM]:
     out: dict[str, VM] = {}
 
     # 1. SQLite
+    #
+    # 必须校验磁盘目录仍然存在：SQLite 是主存储，但目录可能被外部
+    # 删除（手工清理、脚本、或删除中途失败）。只信 SQLite 会在列表里
+    # 留下「幽灵 VM」—— 点启动报目录不存在，也删不掉（看起来像卡死）。
     try:
         from core import state
 
         for data in state.load_all_vms():
             d = MACHINES_DIR / data["name"]
+            if not d.is_dir():
+                # 目录已不在，顺手把这条僵尸记录清掉（自愈）
+                try:
+                    state.delete_vm_row(data["name"])
+                except Exception:
+                    pass
+                continue
             out[data["name"]] = VM(
                 spec=qemu.VMSpec.from_dict(data), dir=d
             )
@@ -389,7 +400,9 @@ def create_vm(
     # ── 5. 准备磁盘（共享基础 + 本机增量层）──
     # 共享基础首次创建，之后所有 VM 复用；
     # 每台 VM 的 disk.qcow2 只记录自己的改动，毫秒级完成。
-    ok, err = shared_disk.ensure_shared_base(spec_img, arch, on_log=log)
+    ok, err = shared_disk.ensure_shared_base(
+        spec_img, arch, on_log=log
+    )
     if not ok:
         shutil.rmtree(vm_dir, ignore_errors=True)
         return None, f"磁盘准备失败: {err}"
@@ -425,15 +438,33 @@ def create_vm(
 
 
 def cleanup_orphan_dirs() -> int:
-    """清理没有 vm.json 的空壳目录（历史失败残留）
+    """清理残留状态（启动时调一次，返回处理掉的条目数）
 
-    启动时调一次。返回清理的目录数。
-    不碰正在运行 VM 的目录（它们一定有 vm.json）。
+    两个方向都要清：
+      · 空壳目录 —— 目录在、没有 vm.json，也没有活着的 QEMU 进程
+      · 幽灵记录 —— SQLite 里有行，磁盘目录却已被删除
+    只清一个方向会让界面和磁盘长期不一致（列表里点不动的死条目，
+    或永远不出现的目录）。
     """
-    if not MACHINES_DIR.exists():
-        return 0
-
     n = 0
+
+    # ── 幽灵记录：SQLite 有行但目录没了 ──
+    try:
+        from core import state
+
+        for data in state.load_all_vms():
+            if not (MACHINES_DIR / data["name"]).is_dir():
+                try:
+                    state.delete_vm_row(data["name"])
+                    print(f"[vm] 清理幽灵记录: {data['name']}")
+                    n += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[vm] 清理幽灵记录失败: {e}")
+
+    if not MACHINES_DIR.exists():
+        return n
     for d in MACHINES_DIR.iterdir():
         if not d.is_dir():
             continue
@@ -451,6 +482,7 @@ def cleanup_orphan_dirs() -> int:
             except OSError:
                 continue
         shutil.rmtree(d, ignore_errors=True)
+        print(f"[vm] 清理空壳目录: {d.name}")
         n += 1
     return n
 
@@ -495,6 +527,39 @@ def start_vm(vm: VM, *, vnc: int | None = None, check_memory: bool = True) -> tu
     if vm.running:
         return True, "已在运行"
 
+    # 端口已被占用 = 很可能有残留的 QEMU 在跑（pidfile 丢了、
+    # 或上一轮启动的进程还没完全退出）。
+    # 直接再启动会报 "Could not set up host forwarding rule"，
+    # 用户看到的是「启动失败」，但机器其实在工作 —— 极易误导。
+    # 这里先确认一下：如果端口上已经有 SSH banner，就当它已启动。
+    if vm.ssh_port and not port_available(vm.ssh_port):
+        import socket as _socket
+
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            s.connect(("127.0.0.1", vm.ssh_port))
+            banner = s.recv(64)
+            s.close()
+            if b"SSH-" in banner:
+                return True, "已在运行"
+        except OSError:
+            pass
+
+    # ── 增量层与共享基础的指纹校验 ──
+    # qcow2 增量层只能配它创建时的那份基础。
+    # 基础被替换过（重新下载镜像、清理共享缓存）时，
+    # 新旧错位会让 guest 的文件系统内容错乱 —— 表现为能开机但
+    # 服务起不来、SSH 连不上，从宿主机侧极难定位。
+    # 这里提前拦下并给出可执行的提示。
+    spec_img = images.get_spec(vm.spec.image_key)
+    if spec_img is not None:
+        matched, why = shared_disk.check_vm_disk_base(
+            spec_img, vm.dir, vm.spec.arch
+        )
+        if not matched:
+            return False, why
+
     # 内存检查
     if check_memory:
         from core.vm import memory as mem_mod
@@ -513,6 +578,142 @@ def start_vm(vm: VM, *, vnc: int | None = None, check_memory: bool = True) -> tu
 def stop_vm(vm: VM, timeout: int = 30) -> tuple[bool, str]:
     """停止 VM"""
     return qemu.stop(vm.dir, timeout=timeout)
+
+
+def _ask_daemon_release(vm: VM, wait: float = 3.0) -> None:
+    """请守护进程释放该 VM 的唤醒代理端口
+
+    GUI 要启动 VM 时，守护进程可能正用代理占着同一端口。
+    不先释放，QEMU 启动会报
+    "Could not set up host forwarding rule"。
+
+    做法：
+      1. 往 state 写一个「交接中」标记，守护进程下一轮巡检会看到
+      2. 轮询等待端口真正空出来（最多 wait 秒）
+    """
+    import socket as _socket
+    import time as _t
+
+    name = vm.spec.name
+    port = vm.ssh_port
+    if not port:
+        return
+
+    try:
+        from core import state
+
+        state.set_setting(f"vm.handoff.{name}", _t.time())
+    except Exception:
+        pass
+
+    deadline = _t.time() + wait
+    while _t.time() < deadline:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            return          # 端口已空
+        except OSError:
+            _t.sleep(0.2)
+        finally:
+            s.close()
+
+
+def soft_stop(vm: VM, timeout: int = 30) -> tuple[bool, str]:
+    """休眠：把内存状态存到磁盘，然后退出 QEMU
+
+    这是真休眠，不是关机 —— guest 的进程、内存、打开的文件
+    全部冻结进快照，恢复时原样继续。
+
+    与 stop_vm 的区别：
+      · stop_vm  = 用户主动停止（ACPI 关机，意图变为「不要运行」）
+      · soft_stop = 系统自动休眠（保存内存快照，意图仍是「要运行」）
+
+    实测（1GB Rocky）：保存约 5–9s，恢复约 1s；
+    对比冷启动 19s，恢复快约 20 倍。
+
+    快照失败时退化为普通关机，不影响正确性（只是下次要冷启动）。
+    """
+    if not vm.running:
+        return True, "未在运行"
+
+    ok, msg = qemu.snapshot_save(vm.dir, timeout=max(timeout, 180))
+    if ok:
+        return True, ""
+
+    # 快照不可用（内核不支持迁移、磁盘满等）→ 退化为正常关机
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "VM %s 内存快照失败，退化为关机: %s", vm.spec.name, msg
+    )
+    qemu.drop_snapshot(vm.dir)
+    return qemu.stop(vm.dir, timeout=timeout)
+
+
+def resume_vm(vm: VM) -> tuple[bool, str]:
+    """从休眠恢复
+
+    有内存快照 → 秒级恢复（约 1s）；
+    没有快照（或快照失效）→ 退回冷启动（约 19s）。
+    """
+    if vm.running:
+        return True, "已在运行"
+
+    # 守护进程可能正用唤醒代理占着端口，先让它释放
+    _ask_daemon_release(vm)
+
+    if qemu.has_snapshot(vm.dir):
+        ok, msg = qemu.snapshot_restore(vm.dir)
+        if ok:
+            return True, ""
+        # 快照坏了 → 丢掉，冷启动兜底
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "VM %s 从快照恢复失败，改为冷启动: %s", vm.spec.name, msg
+        )
+        qemu.drop_snapshot(vm.dir)
+
+    return start_vm(vm)
+
+
+def desired_running_vms() -> list[VM]:
+    """列出「用户希望其运行」的 VM
+
+    用于应用启动时自动恢复上次的运行状态：
+    QEMU 用 -daemonize 独立运行，应用退出不会停 VM，
+    因此正常退出再启动时这些 VM 仍在跑；只有应用被强杀、
+    或系统重启后，才需要在这里重新拉起。
+    """
+    from core import state
+
+    out = []
+    for vm in load_all():
+        try:
+            want = state.get_setting(f"vm.desired_running.{vm.name}", False)
+        except Exception:
+            want = False
+        if want:
+            out.append(vm)
+    return out
+
+
+def restore_desired_vms() -> list[tuple[str, bool, str]]:
+    """应用启动时调用：把「希望运行但当前没跑」的 VM 拉起来
+
+    返回 [(名字, 是否成功, 消息)]
+    已在运行的会被跳过（不产生返回值），避免打断用户正在用的 VM。
+    """
+    results: list[tuple[str, bool, str]] = []
+
+    for vm in desired_running_vms():
+        if vm.running:
+            continue
+        ok, err = start_vm(vm)
+        results.append((vm.name, ok, err))
+
+    return results
 
 
 def restart_vm(vm: VM, timeout: int = 30) -> tuple[bool, str]:

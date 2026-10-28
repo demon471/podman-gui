@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import subprocess
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QGuiApplication
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -33,16 +33,14 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from core.async_task import run_async
 from core.notify import notifier
-from core.vm import dns as vm_dns
 from core.vm import manager as vm_manager
-from core.vm import memory as vm_memory
-from core.vm import network as vm_network
 from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
 from resources.icons import ICON_SIZE_BUTTON, ICON_SIZE_DIALOG, icon
@@ -95,16 +93,38 @@ class VMDetailDialog(QDialog):
         self.lbl_name.setFont(f)
         col.addWidget(self.lbl_name)
 
+        # 副标题：镜像 + 状态（原来在「概览」页的两项，合并到头部）
         self.lbl_sub = QLabel("")
         self.lbl_sub.setObjectName("hintLabel")
         col.addWidget(self.lbl_sub)
 
+        # SSH 访问地址：详情页唯一真正需要「看一眼」的信息。
+        # 可选中复制，右侧按钮一键复制完整命令。
+        ssh_row = QHBoxLayout()
+        ssh_row.setContentsMargins(0, 2, 0, 0)
+        ssh_row.setSpacing(6)
+
+        self.lbl_ssh = QLabel("")
+        self.lbl_ssh.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        ssh_row.addWidget(self.lbl_ssh)
+
+        self.btn_copy_ssh = QToolButton()
+        self.btn_copy_ssh.setIcon(icon("copy", 16))
+        self.btn_copy_ssh.setToolTip("复制 SSH 命令")
+        self.btn_copy_ssh.setAutoRaise(True)
+        self.btn_copy_ssh.clicked.connect(self._copy_ssh)
+        ssh_row.addWidget(self.btn_copy_ssh)
+        ssh_row.addStretch()
+
+        col.addLayout(ssh_row)
+
         head.addLayout(col, 1)
         v.addLayout(head)
 
-        # ── 标签页 ──
+        # ── 标签页（概览已合并到头部，这里只留实际操作面板）──
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_overview(), "概览")
         self.tabs.addTab(self._build_files(), "文件")
         self.tabs.addTab(self._build_shares(), "共享目录")
         self.tabs.addTab(self._build_console(), "控制台")
@@ -118,32 +138,18 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setObjectName("hintLabel")
         bar.addWidget(self.lbl_status, 1)
 
-        # 启动 / 停止 独立按钮（运行态决定启用哪个）
-        self.btn_start = QPushButton("启动")
-        self.btn_start.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
-        self.btn_start.clicked.connect(self._do_start)
-        bar.addWidget(self.btn_start)
-
-        self.btn_stop = QPushButton("停止")
-        self.btn_stop.setIcon(icon("stop", ICON_SIZE_BUTTON.width()))
-        self.btn_stop.clicked.connect(self._do_stop)
-        bar.addWidget(self.btn_stop)
-
-        # 重启：跟在停止后面
-        self.btn_restart = QPushButton("重启")
-        self.btn_restart.setIcon(icon("restart", ICON_SIZE_BUTTON.width()))
-        self.btn_restart.setToolTip("先停止再启动虚拟机")
-        self.btn_restart.clicked.connect(self._restart)
-        bar.addWidget(self.btn_restart)
-
-        self.btn_ssh = QPushButton("SSH 登录")
-        self.btn_ssh.setIcon(icon("terminal", ICON_SIZE_BUTTON.width()))
-        self.btn_ssh.setToolTip("复制 SSH 命令到剪贴板")
-        self.btn_ssh.clicked.connect(self._copy_ssh)
-        bar.addWidget(self.btn_ssh)
-
+        # 底部只保留「关闭」。启动/停止/重启/SSH 这些操作在
+        # 主列表页的工具栏里已经齐全，详情页里重复一遍反而
+        # 让界面变嘈杂 —— 详情页的职责是「查看和调整配置」。
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btns.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
+        btn_close = btns.button(QDialogButtonBox.StandardButton.Close)
+        btn_close.setText("关闭")
+        # 保存引用：文件面板忙碌时要禁用这个按钮
+        self.btn_close = btn_close
+        # 关闭按钮用红色（离开/危险语义），与其它页的删除按钮一致。
+        # 用 stop 图标（方框形，视觉上接近「关闭」），因为图标库里
+        # 没有单独的 close 线条图标。
+        btn_close.setIcon(icon("stop", ICON_SIZE_BUTTON.width(), danger=True))
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
         bar.addWidget(btns)
@@ -156,70 +162,6 @@ class VMDetailDialog(QDialog):
             self.file_panel.status.connect(self.lbl_status.setText)
 
     # ── 概览 ──
-    def _build_overview(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(10, 12, 10, 10)
-        v.setSpacing(10)
-
-        g1 = QGroupBox("系统")
-        f1 = QFormLayout(g1)
-        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        f1.setSpacing(8)
-        self.lbl_os = QLabel("-")
-        self.lbl_created = QLabel("-")
-        f1.addRow("操作系统", self.lbl_os)
-        f1.addRow("创建时间", self.lbl_created)
-        v.addWidget(g1)
-
-        g2 = QGroupBox("运行状态")
-        f2 = QFormLayout(g2)
-        f2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        f2.setSpacing(8)
-        self.lbl_state = QLabel("-")
-        self.lbl_uptime = QLabel("-")
-        self.lbl_host = QLabel("-")
-        f2.addRow("状态", self.lbl_state)
-        f2.addRow("运行时长", self.lbl_uptime)
-        f2.addRow("guest 系统", self.lbl_host)
-        v.addWidget(g2)
-
-        # 端口转发（只读展示，原独立的「端口转发」标签页）
-        #
-        # 为什么并进概览而不是单开一页：
-        # 端口是「看一眼地址」的信息，不需要重交互。
-        # 列表页已有端口列，这里给出完整访问地址即可。
-        self.g_ports = QGroupBox("端口转发")
-        f3 = QFormLayout(self.g_ports)
-        f3.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        f3.setSpacing(8)
-
-        self.lbl_ports = QLabel("-")
-        self.lbl_ports.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.lbl_ports.setWordWrap(True)
-        f3.addRow("映射", self.lbl_ports)
-
-        self.lbl_access = QLabel("-")
-        self.lbl_access.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.lbl_access.setWordWrap(True)
-        f3.addRow("访问地址", self.lbl_access)
-
-        v.addWidget(self.g_ports)
-
-        row = QHBoxLayout()
-        self.btn_refresh_sys = QPushButton("读取 guest 信息")
-        self.btn_refresh_sys.clicked.connect(self._load_guest_info)
-        row.addWidget(self.btn_refresh_sys)
-        row.addStretch()
-        v.addLayout(row)
-        v.addStretch()
-
-        return w
-
     # ── 文件 ──
     def _build_files(self) -> QWidget:
         """VM 内文件浏览（SFTP，走已有 SSH 通道，零配置）"""
@@ -232,6 +174,10 @@ class VMDetailDialog(QDialog):
 
         self.file_panel = FilePanel(self.vm, self)
         v.addWidget(self.file_panel)
+
+        # 下载/上传进行中禁用「关闭」：
+        # 中途关窗口会让后台线程 emit 命中已销毁对象 → abort
+        self.file_panel.busy_changed.connect(self._on_file_busy)
 
         return w
 
@@ -407,7 +353,9 @@ class VMDetailDialog(QDialog):
             self.lbl_chpwd_status.setText("新密码至少 4 位")
             return
         if not self.vm.running:
-            self.lbl_chpwd_status.setText("虚拟机未运行")
+            # 资源已释放 → 先恢复再改密码，不让用户手动启动
+            self.lbl_chpwd_status.setText("正在恢复虚拟机…")
+            self._ensure_running(self._change_password)
             return
 
         self.btn_chpwd.setEnabled(False)
@@ -464,83 +412,85 @@ class VMDetailDialog(QDialog):
     # ─────────────────────────────────────────
     # 刷新
     # ─────────────────────────────────────────
+    def _is_available(self) -> bool:
+        """对用户而言是否可用（含资源已释放、访问时秒级恢复的情况）"""
+        if self.vm.running:
+            return True
+        try:
+            from core.vm import keepalive as ka
+
+            enabled, _ = ka.load_config()
+            if not enabled:
+                return False
+            from core import state
+
+            return bool(state.get_setting(
+                f"vm.desired_running.{self.vm.spec.name}", False
+            ))
+        except Exception:
+            return False
+
+    def _ensure_running(self, then) -> None:
+        """确保 VM 在跑；资源已释放则先恢复，然后执行 then"""
+        if self.vm.running:
+            then()
+            return
+
+        self.lbl_status.setText("正在恢复…")
+        self._set_busy(True)
+
+        def work():
+            from core.vm import manager as mgr
+
+            return mgr.resume_vm(self.vm)
+
+        def done(res):
+            self._set_busy(False)
+            ok = bool(res and res[0])
+            if not ok:
+                QMessageBox.warning(
+                    self, "恢复失败",
+                    (res[1] if res else "") or "未知错误",
+                )
+                self.lbl_status.setText("恢复失败")
+                return
+            self.lbl_status.setText("")
+            self.refresh()
+            then()
+
+        self._spawn(work, done, self._op_error)
+
     def refresh(self) -> None:
         vm = self.vm
         spec = vm.spec
+        available = self._is_available()
 
-        self.lbl_sub.setText(spec.image_key)
+        # 副标题：镜像 · 状态
+        state_text = "运行中" if available else "已停止"
+        self.lbl_sub.setText(f"{spec.image_key} · {state_text}")
 
-        # 概览
-        self.lbl_os.setText(spec.image_key)
-        import time as _t
+        # SSH 地址
+        from core.vm.dns import vm_domain
 
-        self.lbl_created.setText(
-            _t.strftime("%Y-%m-%d %H:%M", _t.localtime(spec.created_at))
-            if spec.created_at
-            else "-"
-        )
-
-        running = vm.running
-        self.lbl_state.setText("运行中" if running else "已停止")
-
-        if running:
-            up = vm.uptime
-            h, rem = divmod(up, 3600)
-            m, s = divmod(rem, 60)
-            self.lbl_uptime.setText(f"{h} 小时 {m} 分 {s} 秒" if h else f"{m} 分 {s} 秒")
-        else:
-            self.lbl_uptime.setText("-")
-
-        # 端口（标签形式）
-        self._fill_ports()
+        self.lbl_ssh.setText(f"ssh {vm_domain(spec.name)}")
 
         # 共享目录
         self._fill_shares()
 
-        # 底部按钮状态：运行中 → 停止/重启/SSH 可用；停止态 → 启动可用
-        self.btn_start.setEnabled(not running)
-        self.btn_stop.setEnabled(running)
-        self.btn_restart.setEnabled(running)
-        self.btn_ssh.setEnabled(running)
+    def _on_file_busy(self, busy: bool) -> None:
+        """文件面板忙碌时禁用关闭按钮（避免中途关窗口导致崩溃）"""
+        btn = getattr(self, "btn_close", None)
+        if btn is not None:
+            btn.setEnabled(not busy)
+        if busy:
+            self.lbl_status.setText("操作进行中，请稍候…")
 
     def _tick(self) -> None:
+        """定时刷新副标题里的状态文字"""
         if not self.isVisible():
             return
-        self.lbl_state.setText("运行中" if self.vm.running else "已停止")
-
-
-    def _fill_ports(self) -> None:
-        """端口转发 —— 文本标签形式（原表格版改为只读摘要）"""
-        forwards = self.vm.spec.forwards
-
-        if not forwards:
-            self.lbl_ports.setText("无")
-            self.lbl_access.setText("-")
-            return
-
-        # 映射关系
-        self.lbl_ports.setText(
-            "\n".join(
-                f"127.0.0.1:{f.host_port}  →  VM:{f.guest_port} "
-                f"({f.protocol})"
-                for f in forwards
-            )
-        )
-
-        # 访问地址
-        domain = vm_dns.vm_domain(self.vm.spec.name)
-        addrs = []
-        for f in forwards:
-            if f.guest_port == 22:
-                addrs.append(f"ssh {domain}")
-            elif f.guest_port == 443:
-                addrs.append("https://" + domain + ":" + str(f.host_port))
-            elif f.guest_port == 80:
-                addrs.append("http://" + domain + ":" + str(f.host_port))
-            else:
-                addrs.append(domain + ":" + str(f.host_port))
-
-        self.lbl_access.setText("\n".join(addrs))
+        state_text = "运行中" if self._is_available() else "已停止"
+        self.lbl_sub.setText(f"{self.vm.spec.image_key} · {state_text}")
 
     def _fill_shares(self) -> None:
         shares = self.vm.spec.shares
@@ -562,48 +512,6 @@ class VMDetailDialog(QDialog):
             self.console.verticalScrollBar().maximum()
         )
 
-    def _load_guest_info(self) -> None:
-        if not self.vm.running:
-            QMessageBox.information(self, "未运行", "请先启动虚拟机。")
-            return
-
-        self.btn_refresh_sys.setEnabled(False)
-        self.lbl_status.setText("正在读取 guest 信息…")
-
-        def work():
-            return vm_ssh.get_system_info(self.vm)
-
-        def done(info):
-            self.btn_refresh_sys.setEnabled(True)
-            self.lbl_status.setText("")
-            if not info:
-                self.lbl_status.setText("无法读取 guest 信息（SSH 未就绪）")
-                return
-            # get_system_info 直接以 os-release 的键名存入（PRETTY_NAME / ID）
-            pretty = (
-                info.get("PRETTY_NAME")
-                or info.get("ID")
-                or info.get("os")
-                or "-"
-            )
-            self.lbl_os.setText(pretty)
-
-            parts = [f"内核 {info.get('kernel', '-')}"]
-            if info.get("cpus"):
-                parts.append(f"{info['cpus']} 核")
-            if info.get("disk"):
-                parts.append(f"磁盘 {info['disk']}")
-            self.lbl_host.setText(" · ".join(parts))
-
-        def error(msg):
-            self.btn_refresh_sys.setEnabled(True)
-            self.lbl_status.setText(f"读取失败: {msg}")
-
-        self._spawn(work, done, error)
-
-    # ─────────────────────────────────────────
-    # 操作
-    # ─────────────────────────────────────────
     def _copy_ssh(self) -> None:
         cmd = self.vm.ssh_command()
         QGuiApplication.clipboard().setText(cmd)
@@ -748,9 +656,9 @@ class VMDetailDialog(QDialog):
         self._spawn(work, done, self._op_error)
 
     def _open_ssh_terminal(self) -> None:
-        """用外部终端打开 SSH 会话"""
+        """用外部终端打开 SSH 会话（资源已释放则先恢复）"""
         if not self.vm.running:
-            QMessageBox.information(self, "未运行", "请先启动虚拟机。")
+            self._ensure_running(self._open_ssh_terminal)
             return
 
         cmd = self.vm.ssh_command()
@@ -882,9 +790,15 @@ class VMDetailDialog(QDialog):
         self.lbl_status.setText("操作失败: " + str(msg))
 
     def _set_busy(self, busy: bool) -> None:
-        for b in (self.btn_start, self.btn_stop, self.btn_restart,
-                  self.btn_ssh):
-            b.setEnabled(not busy)
+        """忙碌时禁用会发起操作的控件
+
+        底部按钮已精简为只有「关闭」，操作入口都在主列表页，
+        这里只需要管住文件面板和各 Tab 的操作按钮。
+        """
+        try:
+            self.file_panel.setEnabled(not busy)
+        except Exception:
+            pass
 
     def _spawn(self, work, done, error) -> None:
         task = run_async(work, on_done=done, on_error=error, parent=self)

@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -188,6 +190,7 @@ def build_command(
     *,
     headless: bool = True,
     vnc_display: int | None = None,
+    incoming: str | None = None,
 ) -> list[str]:
     """构建 QEMU 启动命令
 
@@ -335,8 +338,15 @@ def build_command(
     cmd += [
         "-pidfile", str(pid_file),
         "-monitor", f"unix:{monitor},server,nowait",
-        "-daemonize",
     ]
+
+    # 从内存快照恢复：QEMU 启动后先不跑，等迁移流灌完再继续。
+    # 这是「真休眠」的关键 —— guest 内存原样恢复，
+    # 不用重走 UEFI/GRUB/dracut/systemd，所以是秒级而非十几秒。
+    if incoming:
+        cmd += ["-incoming", incoming]
+
+    cmd.append("-daemonize")
 
     return cmd
 
@@ -562,6 +572,218 @@ def stop(vm_dir: Path, timeout: int = 30) -> tuple[bool, str]:
 
     time.sleep(0.5)
     return (not is_running(vm_dir)), "已强制终止"
+
+
+# ─────────────────────────────────────────
+# 内存快照（真休眠）
+# ─────────────────────────────────────────
+SNAPSHOT_NAME = "state.bin.zst"
+# 保存内存状态用 zstd 压缩：实测 583MB → 251MB（43%），
+# 压缩耗时约 5s，恢复只多 0.4s，磁盘收益明显。
+_ZSTD_LEVEL = "3"
+
+
+def snapshot_path(vm_dir: Path) -> Path:
+    return vm_dir / SNAPSHOT_NAME
+
+
+def has_snapshot(vm_dir: Path) -> bool:
+    p = snapshot_path(vm_dir)
+    try:
+        return p.exists() and p.stat().st_size > 1024
+    except OSError:
+        return False
+
+
+def drop_snapshot(vm_dir: Path) -> None:
+    """删除内存快照（快照只能恢复一次，恢复后即失效）"""
+    for name in (SNAPSHOT_NAME, "state.bin"):
+        try:
+            (vm_dir / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _monitor_cmd(vm_dir: Path, cmd: str, *, wait: float = 0.05) -> str:
+    """向 QEMU monitor 发命令，返回清理过 ANSI 的输出
+
+    wait 是「发完命令后等多久开始读」的最短时间。monitor 是
+    本地 unix socket，响应很快；用小值 + 读到空闲为止，
+    避免每次调用固定 sleep 造成累积延迟（恢复路径对延迟敏感）。
+    """
+    import socket
+
+    monitor = vm_dir / "monitor.sock"
+    if not monitor.exists():
+        return ""
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(str(monitor))
+        # 吃掉 banner / 提示符（非阻塞式读一次）
+        s.settimeout(0.15)
+        try:
+            s.recv(65536)
+        except (socket.timeout, OSError):
+            pass
+
+        s.settimeout(3)
+        s.sendall((cmd + "\n").encode())
+        if wait:
+            time.sleep(wait)
+
+        out = b""
+        s.settimeout(0.25)          # 读不到新数据就认为输出结束
+        idle = 0
+        while idle < 2:
+            try:
+                d = s.recv(65536)
+                if not d:
+                    break
+                out += d
+                idle = 0
+            except socket.timeout:
+                idle += 1
+        s.close()
+    except OSError:
+        return ""
+
+    text = out.decode("utf-8", errors="replace").replace("\r", "")
+    # 去掉 monitor 的行内编辑回显（info status 会逐字符重画）
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text).strip()
+
+
+def _migrate_status(vm_dir: Path) -> str:
+    out = _monitor_cmd(vm_dir, "info migrate", wait=0.05)
+    for line in out.splitlines():
+        if line.strip().lower().startswith("status:"):
+            return line.split(":", 1)[1].strip().lower()
+    return ""
+
+
+def snapshot_save(vm_dir: Path, timeout: int = 180) -> tuple[bool, str]:
+    """把 VM 的完整内存状态保存到磁盘，然后退出 QEMU
+
+    这是「真休眠」：guest 的运行状态（进程、内存、打开的文件）
+    全部冻结进快照，恢复时原样继续，不需要重新启动系统。
+
+    实测（1GB 内存的 Rocky）：保存约 5–9s，恢复约 1s，
+    而冷启动需要 19s。
+
+    保存动作发生在后台（用户已离开），所以耗时不敏感。
+    """
+    if not is_running(vm_dir):
+        return False, "虚拟机未运行"
+
+    snap = snapshot_path(vm_dir)
+    try:
+        snap.unlink(missing_ok=True)
+    except OSError as e:
+        return False, f"无法清理旧快照: {e}"
+
+    # 通过 zstd 管道写快照，边迁移边压缩
+    expr = f"exec:zstd -{_ZSTD_LEVEL} -T0 -q -c > {snap}"
+    _monitor_cmd(vm_dir, f'migrate "{expr}"', wait=0.05)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = _migrate_status(vm_dir)
+        if st == "completed":
+            break
+        if st in ("failed", "cancelled"):
+            drop_snapshot(vm_dir)
+            return False, f"保存内存状态失败（{st}）"
+        time.sleep(0.15)
+    else:
+        drop_snapshot(vm_dir)
+        return False, "保存内存状态超时"
+
+    if not has_snapshot(vm_dir):
+        return False, "快照文件未生成"
+
+    # 迁移完成后 QEMU 停在 paused(postmigrate)，直接结束进程
+    pid = read_pid(vm_dir)
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        for _ in range(150):
+            if not is_running(vm_dir):
+                break
+            time.sleep(0.2)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            time.sleep(0.5)
+
+    size_mb = snap.stat().st_size / 1e6 if snap.exists() else 0
+    return True, f"{size_mb:.0f}MB"
+
+
+def snapshot_restore(vm_dir: Path) -> tuple[bool, str]:
+    """从内存快照恢复 VM
+
+    调用前 VM 必须是停止状态。成功后快照文件即被删除
+    （内存状态已被消费，不能重复恢复）。
+    """
+    if is_running(vm_dir):
+        return False, "虚拟机正在运行"
+
+    snap = snapshot_path(vm_dir)
+    if not has_snapshot(vm_dir):
+        return False, "没有可用的内存快照"
+
+    # 读配置重建启动命令
+    cfg = vm_dir / "vm.json"
+    if not cfg.exists():
+        return False, "配置文件缺失"
+    try:
+        spec = VMSpec.from_dict(json.loads(cfg.read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError) as e:
+        return False, f"读取配置失败: {e}"
+
+    incoming = f"exec:zstd -d -q -c {snap}"
+    try:
+        cmd = build_command(spec, vm_dir, headless=True, incoming=incoming)
+    except RuntimeError as e:
+        return False, str(e)
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:400]
+
+    # 等 QEMU 起来（进程存在即可，迁移流在后台灌入）
+    for _ in range(100):
+        if is_running(vm_dir):
+            break
+        time.sleep(0.05)
+    else:
+        return False, "进程未启动"
+
+    # 等迁移真正完成
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        st = _migrate_status(vm_dir)
+        if st == "completed":
+            drop_snapshot(vm_dir)
+            return True, ""
+        if st in ("failed", "cancelled"):
+            return False, f"恢复失败（{st}）"
+        if st == "" and is_running(vm_dir):
+            # 有的 QEMU 版本不上报 completed，进程在跑即可
+            drop_snapshot(vm_dir)
+            return True, ""
+        time.sleep(0.05)
+
+    return False, "恢复超时"
 
 
 def kill(vm_dir: Path) -> tuple[bool, str]:
