@@ -250,12 +250,6 @@ class VMPage(QWidget):
         self._empty = EmptyState(
             icon_name="vm",
             title="还没有虚拟机",
-            subtitle=(
-                "虚拟机基于 QEMU + KVM，可直接加载各发行版云镜像。\n"
-                "默认用户名与宿主机一致，密码 12345，支持 SSH 与端口转发。"
-            ),
-            action_text="新建虚拟机",
-            on_action=self._create,
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)

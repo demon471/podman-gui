@@ -346,3 +346,60 @@ class TestSudoFallback:
         )
         with pytest.raises(PermissionError):
             s._sudo_run("mkdir /opt/x")
+
+
+class TestConnectionRetry:
+    """首次打开文件页时 VM 可能还在开机
+
+    SSH 没就绪就必然失败，必须自动重连，而不是把
+    「读取失败」丢给用户让他自己点刷新。
+    """
+
+    def test_retry_constants(self):
+        from ui import vm_files as vf
+
+        assert vf.RETRY_ATTEMPTS >= 20, "重试次数太少，覆盖不了冷启动"
+        assert vf.RETRY_DELAY_MS >= 1000
+
+    def test_conn_error_detection(self):
+        from ui.vm_files import _is_conn_error
+
+        for msg in (
+            "Error reading SSH protocol banner",
+            "Connection refused",
+            "timed out",
+            "Socket is closed",
+            "Unable to connect to port 2222",
+        ):
+            assert _is_conn_error(msg), msg
+
+    def test_non_conn_errors_not_retried(self):
+        from ui.vm_files import _is_conn_error
+
+        for msg in (
+            "Permission denied",
+            "No such file or directory",
+            "读取失败: 权限不足",
+        ):
+            assert not _is_conn_error(msg), msg
+
+    def test_navigate_retries_on_conn_error(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "vm_files.py").read_text(
+            encoding="utf-8"
+        )
+        start = src.find("def error(msg)")
+        body = src[start:start + 900]
+        assert "_is_conn_error" in body
+        assert "_retry_left" in body
+        assert "_retry_navigate" in body
+
+    def test_retry_does_not_reset_budget(self):
+        """自动重试不能把额度重置，否则会无限重连"""
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "vm_files.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_retrying" in src

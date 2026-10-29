@@ -119,16 +119,13 @@ class ResourcePage(QWidget):
 
         self.build_actions(tb)
 
-        # 删除按钮（紧接其他操作，图标红色）
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        # 删除按钮（与其他工具栏按钮同色，危险性由确认框承担）
+        self.act_delete = QAction(icon("delete"), "删除", self)
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.setToolTip("删除选中项（支持多选，Delete 键）")
         self.act_delete.triggered.connect(self._delete_selected)
         tb.addAction(self.act_delete)
 
-        btn = tb.widgetForAction(self.act_delete)
-        if btn is not None:
-            btn.setObjectName("dangerDelete")
 
         # 搜索框
         self.search = QLineEdit()
@@ -196,9 +193,6 @@ class ResourcePage(QWidget):
         self._empty = EmptyState(
             icon_name=self.icon_name,
             title=f"还没有{self.unit}",
-            subtitle=self.empty_hint(),
-            action_text=self.empty_action_text(),
-            on_action=self.empty_action(),
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
@@ -472,23 +466,12 @@ class ResourcePage(QWidget):
 
     def on_reconnected(self) -> None:
         """重连后恢复空状态文案并刷新"""
-        self._empty.set_text(
-            f"还没有{self.unit}",
-            self.empty_hint(),
-        )
+        self._empty.set_text(f"还没有{self.unit}")
         self.refresh_silent()
 
     def empty_hint(self) -> str:
         """空状态副说明（子类可覆盖）"""
         return f"当前没有{self.unit}。可以点下方按钮创建。"
-
-    def empty_action_text(self) -> str:
-        """空状态按钮文字（返回空串表示不显示按钮）"""
-        return ""
-
-    def empty_action(self):
-        """空状态按钮回调"""
-        return None
 
     def _current_item_id(self) -> str:
         """当前选中行的资源 ID（未选中返回空串）"""

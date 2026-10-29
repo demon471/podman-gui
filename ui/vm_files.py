@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,36 @@ from core.notify import notifier
 from core.vm import files as vm_files
 from resources.icons import ICON_SIZE_BUTTON, icon
 
+# 首次打开文件页时 VM 可能还在开机，SSH 没就绪。
+# 2 秒一次、最多 45 次 ≈ 90 秒，够覆盖冷启动（约 19 秒）
+# 加上快照恢复和 SSH 就绪的抖动。
+RETRY_ATTEMPTS = 45
+RETRY_DELAY_MS = 2000
+
+# 这些错误说明「还连不上」，值得重试；
+# 而权限、路径不存在之类的重试也没用，直接报给用户。
+_CONN_ERROR_HINTS = (
+    "banner",
+    "connection refused",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "no route to host",
+    "unable to connect",
+    "eof",
+    "socket is closed",
+    "not connected",
+    "connection error",
+)
+
+
+def _is_conn_error(msg: str) -> bool:
+    """是否是「暂时连不上」类错误（可重试）"""
+    low = (msg or "").lower()
+    if any(k in low for k in _CONN_ERROR_HINTS):
+        return True
+    return False
+
 
 class FilePanel(QWidget):
     """VM 内文件浏览"""
@@ -57,14 +87,16 @@ class FilePanel(QWidget):
         self._busy = False
         # 导航请求序号：用于丢弃过期响应（快速连点时只认最后一次）
         self._nav_seq = 0
+        # 自动重连：VM 刚启动时 SSH 还没就绪，第一次打开文件页
+        # 必然失败。不重试的话用户看到的是一个空白表格，
+        # 得自己点刷新 —— 而他并不知道要等多久。
+        self._retry_left = 0
 
         self._build_ui()
 
         # 打开面板就加载当前目录 —— 否则表格一直是空的，
         # 用户看到的「文件页没反应」就是这个原因。
         # 用 singleShot 让界面先显示出来，再后台拉数据。
-        from PyQt6.QtCore import QTimer
-
         QTimer.singleShot(0, lambda: self.navigate(self.cwd))
 
     # ─────────────────────────────────────────
@@ -173,6 +205,13 @@ class FilePanel(QWidget):
         row.addStretch()
         v.addLayout(row)
 
+        # 连接中的提示（表格为空时显示，避免用户盯着空白表格）
+        self.lbl_connecting = QLabel("")
+        self.lbl_connecting.setObjectName("hintLabel")
+        self.lbl_connecting.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_connecting.hide()
+        v.addWidget(self.lbl_connecting)
+
     # ─────────────────────────────────────────
     # 导航
     # ─────────────────────────────────────────
@@ -188,6 +227,10 @@ class FilePanel(QWidget):
         """
         self._nav_seq += 1
         seq = self._nav_seq
+
+        # 用户主动导航时重置重试额度（自动重试不算）
+        if not getattr(self, "_retrying", False):
+            self._retry_left = RETRY_ATTEMPTS
 
         self._set_busy(True)
 
@@ -214,6 +257,8 @@ class FilePanel(QWidget):
             self.ed_path.setText(path)
             self._entries = entries
             self._fill_table(entries)
+            self._retry_left = 0
+            self.lbl_connecting.hide()
             # 不再显示「N 项」——目录里有多少条肉眼可见，
             # 这个计数占了左下角却没提供任何信息。
             self.status.emit("")
@@ -223,12 +268,39 @@ class FilePanel(QWidget):
                 return
             self._set_busy(False)
             m = str(msg)
+
+            # 连接类失败（VM 刚开机、SSH 还没起来）→ 自动重试，
+            # 而不是把「读取失败」丢给用户让他自己点刷新。
+            if _is_conn_error(m) and self._retry_left > 0:
+                self._retry_left -= 1
+                # 会话可能已失效，下次重新连
+                self._session = None
+                left = self._retry_left
+                self.status.emit("正在连接虚拟机…")
+                self.lbl_connecting.setText(
+                    f"正在连接虚拟机…（第 {RETRY_ATTEMPTS - left} 次重试）"
+                )
+                self.lbl_connecting.show()
+                QTimer.singleShot(
+                    RETRY_DELAY_MS, lambda: self._retry_navigate(path)
+                )
+                return
+
+            self.lbl_connecting.hide()
             self.status.emit(f"读取失败: {m}")
             # 权限类错误提示修复（home 目录 owner 被镜像置成 root 的情况）
             if "Permission denied" in m or "EACCES" in m:
                 self._offer_fix_perms(path)
 
         self._spawn(work, done, error)
+
+    def _retry_navigate(self, path: str) -> None:
+        """自动重连后重新加载（不重置重试额度）"""
+        self._retrying = True
+        try:
+            self.navigate(path)
+        finally:
+            self._retrying = False
 
     def _go_up(self) -> None:
         if self.cwd == "/":

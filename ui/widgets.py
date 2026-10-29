@@ -348,7 +348,15 @@ def ask_text(
 class EmptyState(QWidget):
     """列表空状态
 
-    居中显示：大图标 + 主标题 + 副说明 + 可选操作按钮
+    只显示：大图标 + 主标题（+ 可选的单行副说明）。
+
+    刻意不带操作按钮：
+      · 空状态里的按钮和工具栏上的按钮重复，还多占一块视觉重量
+      · 「可以点下方按钮查看可用镜像…」这类文字是在教用户用界面，
+        而按钮就在工具栏上，一眼就能看到
+
+    副说明只留给「不是空、而是出错」的场景（比如 Podman 断开），
+    那种情况下用户确实需要知道该怎么办。
     """
 
     def __init__(
@@ -356,8 +364,6 @@ class EmptyState(QWidget):
         icon_name: str = "info",
         title: str = "暂无数据",
         subtitle: str = "",
-        action_text: str = "",
-        on_action=None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -368,53 +374,32 @@ class EmptyState(QWidget):
         v.setSpacing(10)
         v.addStretch(1)
 
-        # 图标
         from resources.icons import icon
 
         self._icon_label = QLabel()
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon_label.setPixmap(
-            icon(icon_name, 48).pixmap(48, 48)
-        )
+        self._icon_label.setPixmap(icon(icon_name, 48).pixmap(48, 48))
         self._icon_label.setObjectName("emptyIcon")
         v.addWidget(self._icon_label)
 
-        # 标题
         self._title = QLabel(title)
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setObjectName("emptyTitle")
         v.addWidget(self._title)
 
-        # 副说明
-        if subtitle:
-            self._subtitle = QLabel(subtitle)
-            self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._subtitle.setObjectName("emptySubtitle")
-            self._subtitle.setWordWrap(True)
-            v.addWidget(self._subtitle)
-        else:
-            self._subtitle = None
-
-        # 操作按钮
-        if action_text and on_action:
-            row = QHBoxLayout()
-            row.addStretch()
-            btn = QPushButton(action_text)
-            btn.clicked.connect(on_action)
-            row.addWidget(btn)
-            row.addStretch()
-            v.addSpacing(6)
-            v.addLayout(row)
-            self._action_btn = btn
-        else:
-            self._action_btn = None
+        self._subtitle = QLabel(subtitle)
+        self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._subtitle.setObjectName("emptySubtitle")
+        self._subtitle.setWordWrap(True)
+        self._subtitle.setVisible(bool(subtitle))
+        v.addWidget(self._subtitle)
 
         v.addStretch(1)
 
     def set_text(self, title: str, subtitle: str = "") -> None:
         self._title.setText(title)
-        if self._subtitle is not None:
-            self._subtitle.setText(subtitle)
+        self._subtitle.setText(subtitle)
+        self._subtitle.setVisible(bool(subtitle))
 
 
 def install_empty_state(
@@ -423,9 +408,6 @@ def install_empty_state(
     *,
     icon_name: str = "info",
     title: str = "暂无数据",
-    subtitle: str = "",
-    action_text: str = "",
-    on_action=None,
 ) -> EmptyState:
     """把空状态叠加到表格上（表格隐藏时显示）
 
@@ -436,9 +418,6 @@ def install_empty_state(
     state = EmptyState(
         icon_name=icon_name,
         title=title,
-        subtitle=subtitle,
-        action_text=action_text,
-        on_action=on_action,
         parent=table_widget.parentWidget(),
     )
     # 直接作为兄弟控件插入布局

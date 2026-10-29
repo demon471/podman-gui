@@ -190,13 +190,10 @@ class ComposePage(QWidget):
         self.act_new.triggered.connect(self._new_project)
         tb.addAction(self.act_new)
 
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        self.act_delete = QAction(icon("delete"), "删除", self)
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.triggered.connect(self._delete_project)
         tb.addAction(self.act_delete)
-        _btn = tb.widgetForAction(self.act_delete)
-        if _btn is not None:
-            _btn.setObjectName("dangerDelete")
 
         self.act_up = QAction(icon("play"), "启动", self)
 

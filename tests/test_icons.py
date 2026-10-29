@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # 允许的线宽：1.75 是标准描边，1.4 只用于实心图形的圆角描边
 ALLOWED_STROKE = {"1.75", "1.4"}
 
-# 只有传送控制允许实心（描边的三角形/竖条在 16px 下看不清）
-SOLID_ALLOWED = {"play", "pause", "stop"}
+# 整套图标一律描边，不允许出现实心块
+SOLID_ALLOWED: set[str] = set()
 
 
 @pytest.fixture(scope="module")
@@ -146,7 +146,29 @@ class TestTrayIcon:
         assert len(sizes) >= 5, f"尺寸太少: {sizes}"
         assert 22 in sizes or 24 in sizes, "缺少托盘常用尺寸"
 
-    def test_tray_uses_app_icon(self):
+    def test_tray_uses_line_art_icon(self):
+        """托盘用线条风图标，且必须是简化过的（小尺寸不糊）"""
         src = (ROOT / "ui" / "tray.py").read_text(encoding="utf-8")
-        assert "app_icon()" in src, "托盘应使用彩色应用图标"
-        assert 'icon("seal", 64)' not in src, "不要再用单色 seal 当托盘图标"
+        assert 'icon("seal"' in src, "托盘应使用线条风 seal 图标"
+
+    def test_seal_is_simplified(self, svg):
+        """托盘图标线条数必须少 —— 多了在 16px 下糊成一团"""
+        body = svg["seal"]
+        strokes = body.count("<path") + body.count("<rect") + body.count(
+            "<circle"
+        )
+        assert strokes <= 5, f"seal 有 {strokes} 条线，小尺寸会糊"
+
+    def test_seal_renders_clearly_at_16px(self, qapp):
+        """16px 下必须画得出足够墨量（不能细到看不见）"""
+        from resources.icons import icon
+
+        pm = icon("seal", 16).pixmap(16, 16)
+        img = pm.toImage()
+        ink = sum(
+            1
+            for y in range(16)
+            for x in range(16)
+            if img.pixelColor(x, y).alpha() > 40
+        )
+        assert ink > 30, f"16px 下墨量太少（ink={ink}），会糊或看不见"

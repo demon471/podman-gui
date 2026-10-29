@@ -143,14 +143,13 @@ class ContainerPage(QWidget):
         self.act_open.triggered.connect(self._open_container_url)
         tb.addAction(self.act_open)
 
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        # 不用红色图标：工具栏里只有它一个红块，显得突兀。
+        # 删除的危险性由二次确认对话框承担，不靠颜色。
+        self.act_delete = QAction(icon("delete"), "删除", self)
 
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.triggered.connect(self._delete)
         tb.addAction(self.act_delete)
-        _btn = tb.widgetForAction(self.act_delete)
-        if _btn is not None:
-            _btn.setObjectName("dangerDelete")
 
         self.act_refresh = QAction(icon("refresh"), "刷新", self)
 
@@ -233,10 +232,6 @@ class ContainerPage(QWidget):
         self._empty = EmptyState(
             icon_name="container",
             title="还没有容器",
-            subtitle="当前没有任何容器。\n"
-                     "可以点下方按钮查看可用镜像，或用 podman run 创建容器。",
-            action_text="查看镜像",
-            on_action=lambda: self._goto_images(),
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
@@ -540,12 +535,6 @@ class ContainerPage(QWidget):
             return
         self._open_logs()
 
-    def _goto_images(self) -> None:
-        """跳转到镜像页（空状态按钮用）"""
-        win = self.window()
-        if hasattr(win, "sidebar"):
-            win.sidebar.select("images")
-
     def on_disconnected(self) -> None:
         """Podman 断开：清空容器列表"""
         self._containers = []
@@ -561,11 +550,7 @@ class ContainerPage(QWidget):
 
     def on_reconnected(self) -> None:
         """重连后恢复"""
-        self._empty.set_text(
-            "还没有容器",
-            "当前没有任何容器。\n"
-            "可以点下方按钮查看可用镜像，或用 podman run 创建容器。",
-        )
+        self._empty.set_text("还没有容器")
         self._set_actions_enabled(True)
         self.refresh_silent()
 

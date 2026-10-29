@@ -411,3 +411,107 @@ class TestPasswordPanel:
         for line in src.splitlines():
             if "操作进行中" in line:
                 assert line.strip().startswith("#") or "不再" in line, line
+
+
+class TestEmptyStateSimplified:
+    """空状态只留图标 + 标题
+
+    说明文字是在教用户用界面（按钮就在工具栏上），
+    操作按钮又和工具栏重复，两者都去掉。
+    """
+
+    def test_no_action_button(self, qapp):
+        from ui.widgets import EmptyState
+
+        es = EmptyState(icon_name="volume", title="还没有卷")
+        buttons = es.findChildren(type(es).__mro__[0])  # 占位，真正检查在下面
+        from PyQt6.QtWidgets import QPushButton
+
+        assert es.findChildren(QPushButton) == [], "空状态不应再有按钮"
+        es.deleteLater()
+
+    def test_subtitle_hidden_by_default(self, qapp):
+        from ui.widgets import EmptyState
+
+        es = EmptyState(icon_name="volume", title="还没有卷")
+        assert es._subtitle.isVisible() is False
+        es.deleteLater()
+
+    def test_subtitle_usable_for_errors(self, qapp):
+        """连接断开这类「不是空而是出错」的场景仍需要说明"""
+        from ui.widgets import EmptyState
+
+        es = EmptyState(icon_name="volume", title="Podman 服务已断开")
+        es.set_text("Podman 服务已断开", "无法连接到 Podman，正在等待重连…")
+        assert es._subtitle.text().startswith("无法连接")
+        es.deleteLater()
+
+    def test_pages_do_not_pass_action(self):
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent / "ui"
+        for name in ("container_page.py", "resource_page.py", "vm_page.py"):
+            src = (root / name).read_text(encoding="utf-8")
+            start = src.find("EmptyState(")
+            assert start > 0, name
+            block = src[start:start + 400]
+            assert "action_text" not in block, f"{name} 仍在传 action_text"
+            assert "on_action" not in block, f"{name} 仍在传 on_action"
+
+
+class TestTrayMenuStability:
+    """托盘菜单不能在弹出过程中被重建
+
+    aboutToShow 里 menu.clear() 会销毁正在展示的 QAction，
+    KDE/Wayland 下点击落空 —— 用户看到「点退出没反应」。
+    """
+
+    @staticmethod
+    def _src() -> str:
+        from pathlib import Path
+
+        return (Path(__file__).parent.parent / "ui" / "tray.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_not_rebuilt_on_about_to_show(self):
+        src = self._src()
+        assert "aboutToShow.connect(self._rebuild_menu)" not in src, (
+            "不能在 aboutToShow 里重建菜单"
+        )
+
+    def test_guarded_while_visible(self):
+        src = self._src()
+        start = src.find("def _rebuild_menu")
+        body = src[start:start + 700]
+        assert "isVisible()" in body, "菜单可见时必须跳过重建"
+
+    def test_rebuilds_after_data_refresh(self):
+        src = self._src()
+        start = src.find("def refresh")
+        end = src.find("def _menu_signature", start)
+        body = src[start:end]
+        assert "_rebuild_menu()" in body, "数据刷新后应重建菜单"
+
+    def test_quit_action_uses_explicit_lambda(self):
+        src = self._src()
+        assert "lambda *_: self.quit_app.emit()" in src
+
+
+class TestToolbarDangerColor:
+    """工具栏删除按钮不再用红色
+
+    整排按钮只有它一个红块，显得突兀；
+    危险性由二次确认对话框承担。
+    """
+
+    def test_no_danger_icon_in_toolbars(self):
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent / "ui"
+        for name in ("container_page.py", "resource_page.py",
+                     "compose_page.py"):
+            src = (root / name).read_text(encoding="utf-8")
+            assert 'icon("delete", danger=True)' not in src, (
+                f"{name} 的删除按钮仍是红色"
+            )
