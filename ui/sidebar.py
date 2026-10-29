@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from ui.widgets import apply_aligned_delegate
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QLabel,
@@ -68,6 +69,8 @@ class Sidebar(QWidget):
         layout.setSpacing(0)
 
         self.list = QListWidget()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.list)
         self.list.setObjectName("sidebarList")
         self.list.setIconSize(ICON_SIZE_SIDEBAR)
         self.list.setSpacing(0)

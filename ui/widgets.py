@@ -12,13 +12,23 @@ Qt 原生滚动条无法"不滚动时淡出"，这里通过覆写 QPlainTextEdit
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPropertyAnimation, QTimer, Qt, pyqtProperty
-from PyQt6.QtGui import QColor, QPainter, QPalette
+from PyQt6.QtCore import (
+    QPropertyAnimation,
+    QRect,
+    QTimer,
+    Qt,
+    pyqtProperty,
+)
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -344,6 +354,104 @@ def ask_text(
 # ─────────────────────────────────────────
 # 空状态提示
 # ─────────────────────────────────────────
+
+class AlignedItemDelegate(QStyledItemDelegate):
+    """让列表里的图标与文字视觉居中对齐
+
+    问题：Qt 把图标按「单元格矩形」垂直居中，文字却按字体基线
+    居中。字体有下伸部（p/g/_ 等），文字的视觉中心被拉低，
+    于是图标总是比文字高 2–3px —— 表格里一眼就能看出来。
+
+    做法：先让基类照常画背景和文字（临时把图标换成透明占位，
+    保留横向留白），再用样式算出的装饰矩形把真实图标画在
+    「文字的视觉中心」高度上。
+    """
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        # 记住视图：subElementRect 必须传一个真实 widget，
+        # 传 None 会返回空矩形（那样就等于没生效）
+        self._view = view
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        icon = opt.icon
+        if icon.isNull():
+            super().paint(painter, option, index)
+            return
+
+        view = self._view if self._view is not None else opt.widget
+        style = view.style() if view is not None else QApplication.style()
+        # 样式算出的真实装饰矩形：横向位置和尺寸都与 Qt 完全一致
+        deco = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemDecoration, opt, view
+        )
+        if deco.width() <= 0 or deco.height() <= 0:
+            super().paint(painter, option, index)
+            return
+
+        # 1) 背景 + 文字：用透明占位图标保留横向留白。
+        #    这里必须直接调 style.drawControl —— 不能调 super().paint()，
+        #    因为 QStyledItemDelegate.paint 内部会重新 initStyleOption，
+        #    把图标又装回去，导致画两个图标。
+        blank = QPixmap(deco.size())
+        blank.fill(Qt.GlobalColor.transparent)
+        text_opt = QStyleOptionViewItem(opt)
+        text_opt.icon = QIcon(blank)
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, text_opt, painter, view
+        )
+
+        # 2) 自己把图标画在「文字的视觉中心」高度上
+        fm = opt.fontMetrics
+        text_top = opt.rect.top() + (opt.rect.height() - fm.height()) // 2
+        baseline = text_top + fm.ascent()
+        visual_center = baseline - fm.xHeight() / 2.0
+
+        # 向上取整：图标字形在自身方框里略微偏下（约 0.5px），
+        # 用 ceil 让「墨迹中心」而不是「方框中心」落在文字中心上
+        import math
+
+        y = int(math.ceil(visual_center - deco.height() / 2.0))
+        # 不允许画出单元格
+        y = max(opt.rect.top(),
+                min(y, opt.rect.bottom() - deco.height() + 1))
+        target = QRect(deco.left(), y, deco.width(), deco.height())
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            # 选中行：图标要跟着文字变高亮色，否则深色图标
+            # 压在蓝底上几乎看不见
+            painter.drawPixmap(target, _tint_icon(icon, deco.size(),
+                                                  opt.palette.highlightedText().color()))
+        else:
+            icon.paint(painter, target)
+
+
+def _tint_icon(icon, size, color) -> QPixmap:
+    """把图标整体染成指定颜色（保留透明度）
+
+    QIcon 自身不认识「选中态」颜色，主题引擎只按窗口前景色渲染，
+    所以选中行必须自己染色，否则深色图标压在选中蓝底上看不清。
+    """
+    src_pm = icon.pixmap(size)
+    out = QPixmap(src_pm.size())
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.drawPixmap(0, 0, src_pm)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(out.rect(), color)
+    p.end()
+    return out
+
+
+def apply_aligned_delegate(view) -> None:
+    """给列表/表格装上下图标对齐的委托（幂等）"""
+    if isinstance(view.itemDelegate(), AlignedItemDelegate):
+        return
+    view.setItemDelegate(AlignedItemDelegate(view))
+
 
 class EmptyState(QWidget):
     """列表空状态

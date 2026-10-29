@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ui.widgets import apply_aligned_delegate
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import manager as vm_manager
@@ -267,6 +268,8 @@ class VMDetailDialog(QDialog):
         v.addWidget(hint)
 
         self.tbl_shares = QTableWidget(0, 3)
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.tbl_shares)
         self.tbl_shares.setHorizontalHeaderLabels(
             ["宿主机目录", "VM 内路径", "状态"]
         )

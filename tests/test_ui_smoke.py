@@ -606,3 +606,128 @@ class TestToolbarDangerColor:
             assert 'icon("delete", danger=True)' not in src, (
                 f"{name} 的删除按钮仍是红色"
             )
+
+
+class TestListIconAlignment:
+    """列表里图标和文字必须视觉居中对齐
+
+    Qt 把图标按单元格矩形居中、文字按字体基线居中，
+    字体下伸部把文字视觉中心拉低，图标总是高 2px。
+    """
+
+    def _table(self, qapp, use_delegate=True):
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtGui import QStandardItem, QStandardItemModel
+        from PyQt6.QtWidgets import QTableView
+
+        from resources.icons import icon
+        from ui.widgets import apply_aligned_delegate
+
+        t = QTableView()
+        t.horizontalHeader().setVisible(False)
+        t.verticalHeader().setVisible(False)
+        t.verticalHeader().setDefaultSectionSize(26)
+        t.setIconSize(QSize(16, 16))
+        if use_delegate:
+            apply_aligned_delegate(t)
+        m = QStandardItemModel(1, 1)
+        m.setItem(0, 0, QStandardItem(icon("pod", 16), "pod_compose"))
+        t.setModel(m)
+        t.resize(200, 40)
+        t.show()
+        for _ in range(6):
+            qapp.processEvents()
+        return t
+
+    @staticmethod
+    def _ink_center_y(view, qapp, x0, x1):
+        img = view.grab().toImage()
+        ys = []
+        for y in range(img.height()):
+            for x in range(x0, x1):
+                c = img.pixelColor(x, y)
+                if c.alpha() > 60 and c.lightness() < 140:
+                    ys.append(y)
+        return (min(ys) + max(ys)) / 2.0 if ys else None
+
+    def test_icon_centered_with_text(self, qapp):
+        """图标墨迹中心与文字墨迹中心重合（容差 1px）"""
+        t = self._table(qapp)
+        try:
+            icon_c = self._ink_center_y(t, qapp, 2, 32)
+            text_c = self._ink_center_y(t, qapp, 34, 200)
+            assert icon_c is not None and text_c is not None
+            assert abs(icon_c - text_c) <= 1.0, (
+                f"图标中心 {icon_c} 与文字中心 {text_c} 偏差过大"
+            )
+        finally:
+            t.close()
+
+    def test_delegate_shifts_icon_by_font_metrics(self, qapp):
+        """委托算出的 y 必须基于字体度量，而不是写死的偏移
+
+        换字体后偏差值会变（测试环境字体恰好偏差为 0），
+        所以这里验证的是「计算方式」而不是某个具体像素。
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "widgets.py").read_text(
+            encoding="utf-8"
+        )
+        start = src.find("class AlignedItemDelegate")
+        body = src[start:src.find("def _tint_icon", start)]
+        assert "fm.ascent()" in body, "必须用字体 ascent 计算基线"
+        assert "fm.xHeight()" in body, "必须用 x-height 计算视觉中心"
+        assert "SE_ItemViewItemDecoration" in body, "横向位置要沿用样式计算结果"
+
+    def test_delegate_installed_and_idempotent(self, qapp):
+        from ui.widgets import AlignedItemDelegate, apply_aligned_delegate
+
+        t = self._table(qapp, use_delegate=False)
+        try:
+            apply_aligned_delegate(t)
+            first = t.itemDelegate()
+            assert isinstance(first, AlignedItemDelegate)
+            apply_aligned_delegate(t)
+            assert t.itemDelegate() is first, "重复调用不应换新委托"
+        finally:
+            t.close()
+
+    def test_selected_row_icon_tinted(self, qapp):
+        """选中行图标要跟文字一起变高亮色"""
+        t = self._table(qapp)
+        try:
+            t.selectRow(0)
+            for _ in range(6):
+                qapp.processEvents()
+            img = t.grab().toImage()
+            # 选中行图标区域应有浅色像素（高亮前景）
+            light = 0
+            for y in range(img.height()):
+                for x in range(2, 32):
+                    c = img.pixelColor(x, y)
+                    if c.alpha() > 60 and c.lightness() > 200:
+                        light += 1
+            assert light > 10, "选中态图标没有变亮，压在蓝底上看不清"
+        finally:
+            t.close()
+
+    def test_all_main_lists_use_delegate(self):
+        """所有主列表都要装上这个委托"""
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent / "ui"
+        expected = {
+            "container_page.py": "self.table",
+            "resource_page.py": "self.table",
+            "vm_page.py": "self.table",
+            "vm_files.py": "self.table",
+            "vm_detail.py": "self.tbl_shares",
+            "compose_page.py": "self.tbl_svc",
+            "sidebar.py": "self.list",
+        }
+        for name, attr in expected.items():
+            src = (root / name).read_text(encoding="utf-8")
+            assert f"apply_aligned_delegate({attr})" in src, (
+                f"{name} 的列表没有接入对齐委托"
+            )

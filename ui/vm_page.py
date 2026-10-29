@@ -59,7 +59,7 @@ from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
 from resources.icons import ICON_SIZE_TOOLBAR, STATE_COLORS, icon
 from ui.utils import fmt_size
-from ui.widgets import EmptyState
+from ui.widgets import apply_aligned_delegate, EmptyState
 
 ROW_HEIGHT = 28
 
@@ -190,6 +190,8 @@ class VMPage(QWidget):
         self.model.setHorizontalHeaderLabels(self.COLUMNS)
 
         self.table = QTableView()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)

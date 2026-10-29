@@ -35,6 +35,7 @@ from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
 from resources.icons import ICON_SIZE_TOOLBAR, icon, state_icon
 from ui.utils import fmt_time
+from ui.widgets import apply_aligned_delegate
 
 COLUMNS = ["名称", "状态", "镜像", "端口", "创建时间", "ID"]
 
@@ -183,6 +184,8 @@ class ContainerPage(QWidget):
         self.proxy.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
         self.table = QTableView()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

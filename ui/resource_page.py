@@ -30,6 +30,7 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
 from resources.icons import ICON_SIZE_TOOLBAR, icon
+from ui.widgets import apply_aligned_delegate
 
 
 class ResourcePage(QWidget):
@@ -151,6 +152,8 @@ class ResourcePage(QWidget):
         self.proxy.setFilterKeyColumn(-1)
 
         self.table = QTableView()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

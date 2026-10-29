@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ui.widgets import apply_aligned_delegate
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import files as vm_files
@@ -141,6 +142,8 @@ class FilePanel(QWidget):
 
         # ── 文件列表 ──
         self.table = QTableWidget(0, 4)
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setHorizontalHeaderLabels(
             ["名称", "大小", "权限", "修改时间"]
         )

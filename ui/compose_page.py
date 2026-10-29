@@ -48,7 +48,7 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.podman_client import PodmanClient
 from resources.icons import ICON_SIZE_TOOLBAR, icon, state_icon
-from ui.widgets import AutoHidePlainTextEdit, ask_text
+from ui.widgets import apply_aligned_delegate, AutoHidePlainTextEdit, ask_text
 
 # 默认根目录（可在界面切换，记住到 QSettings）
 DEFAULT_COMPOSE_ROOT = "/data"
@@ -342,6 +342,8 @@ class ComposePage(QWidget):
         g2.setContentsMargins(12, 14, 12, 10)
 
         self.tbl_svc = QTableWidget(0, 5)
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.tbl_svc)
         self.tbl_svc.setHorizontalHeaderLabels(
             ["服务", "状态", "镜像", "端口", "容器名"]
         )
