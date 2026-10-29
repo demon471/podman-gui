@@ -677,7 +677,7 @@ class TestListIconAlignment:
         start = src.find("class AlignedItemDelegate")
         body = src[start:src.find("def _tint_icon", start)]
         assert "fm.ascent()" in body, "必须用字体 ascent 计算基线"
-        assert "fm.xHeight()" in body, "必须用 x-height 计算视觉中心"
+        assert "fm.capHeight()" in body, "必须用 cap-height 计算视觉中心"
         assert "SE_ItemViewItemDecoration" in body, "横向位置要沿用样式计算结果"
 
     def test_delegate_installed_and_idempotent(self, qapp):

@@ -408,7 +408,10 @@ class AlignedItemDelegate(QStyledItemDelegate):
         fm = opt.fontMetrics
         text_top = opt.rect.top() + (opt.rect.height() - fm.height()) // 2
         baseline = text_top + fm.ascent()
-        visual_center = baseline - fm.xHeight() / 2.0
+        # 用 capHeight（大写字母高度）而不是 xHeight 来定视觉中心：
+        # 列表里多是 nginx_web / pod_compose 这种带升部的名字，
+        # 只按小写字母高度对齐会让图标明显偏低（看起来「下沉」）。
+        visual_center = baseline - fm.capHeight() / 2.0
 
         # 向上取整：图标字形在自身方框里略微偏下（约 0.5px），
         # 用 ceil 让「墨迹中心」而不是「方框中心」落在文字中心上
