@@ -30,7 +30,7 @@ class TestTabLayout:
     def test_tab_order(self, page):
         """按「多久用一次」排：服务在最前，关于在最后"""
         names = [page.tabs.tabText(i) for i in range(page.tabs.count())]
-        assert names == ["服务", "资源", "镜像加速", "存储", "关于"], names
+        assert names == ["服务", "资源", "镜像", "存储", "关于"], names
 
     def test_overview_merged_into_about(self, page):
         """概览页已删除，数据进关于"""
@@ -83,6 +83,15 @@ class TestServiceTab:
 
 
 class TestResourcesTab:
+    @pytest.fixture(autouse=True)
+    def _restore_limit(self):
+        """测试会真的写配置，结束后必须还原用户原值"""
+        from core import podman_config as cfg
+
+        original = cfg.get_memory_limit_gb()
+        yield
+        cfg.set_memory_limit_gb(original)
+
     def test_has_slider_and_presets(self, page):
         assert hasattr(page, "sld_mem")
         assert hasattr(page, "lbl_mem_value")
@@ -108,16 +117,21 @@ class TestResourcesTab:
         page._rebuild_presets(256.0)
         assert len(page._preset_values) <= 7, "档位太多会撑爆一行"
 
-    def test_selecting_preset_syncs_slider(self, page, qapp):
+    def test_slider_updates_display(self, page, qapp):
+        page._rebuild_presets(16.0)
+        page.sld_mem.setValue(4)
+        assert page.lbl_mem_value.text() == "4 GB"
+
+    def test_slider_zero_means_unlimited(self, page, qapp):
+        page._rebuild_presets(16.0)
+        page.sld_mem.setValue(0)
+        assert page.lbl_mem_value.text() == "不限制"
+
+    def test_preset_click_syncs_slider(self, page, qapp):
         page._rebuild_presets(16.0)
         page._select_preset(4)
         assert page.sld_mem.value() == 4
         assert page.lbl_mem_value.text() == "4 GB"
-
-    def test_selecting_unlimited_shows_text(self, page, qapp):
-        page._rebuild_presets(16.0)
-        page._select_preset(0)
-        assert page.lbl_mem_value.text() == "不限制"
 
 
 class TestMirrorTab:

@@ -332,11 +332,24 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
-/* 设置 · 服务状态卡片 */
-QFrame#serviceCard {{
-    background-color: {base};
-    border: 1px solid {border};
-    border-radius: 6px;
+/* ═══════════ 设置页（KDE HIG 风格）═══════════
+   小节靠「加粗标题 + 留白 + 细线」分隔，不用边框盒子。
+   满屏方框会显得很重，也和 Breeze 的细线质感冲突。 */
+QLabel#sectionTitle {{
+    font-weight: 600;
+    font-size: {fs['base']};
+    padding-top: 2px;
+}}
+
+QFrame#sectionRule {{
+    border: none;
+    border-top: 1px solid {border};
+    max-height: 1px;
+}}
+
+QLabel#monoValue {{
+    font-family: "JetBrains Mono", "Maple Mono NF CN", monospace;
+    color: {text};
 }}
 
 QLabel#serviceStateBig {{

@@ -358,8 +358,8 @@ class MainWindow(QMainWindow):
         self._on_nav("settings")
         self.sidebar.select("settings")
         if hasattr(self.page_settings, "tabs"):
-            # 服务标签是第 1 个（概览=0, 服务=1）
-            self.page_settings.tabs.setCurrentIndex(1)
+            # 服务是第一个标签
+            self.page_settings.tabs.setCurrentIndex(0)
 
     def _check_connection(self, show_error: bool = True) -> None:
         """检测连接状态并更新状态栏指示器
