@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from core import podman_config as cfg
 from core.podman_client import PodmanClient, PodmanError
+from core.vm import manager
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 
 
@@ -437,6 +438,55 @@ class SettingsPage(QWidget):
         sv.addLayout(act)
         v.addWidget(sec)
 
+        # ══ 虚拟机目录 ══
+        sec3, s3 = _section("虚拟机目录")
+        s3.addWidget(_rule())
+
+        row_vm, self.st_vm_root = _kv("目录", mono=True)
+        s3.addWidget(row_vm)
+
+        row_vm_disk, self.lbl_vm_disk = _kv("磁盘")
+        s3.addWidget(row_vm_disk)
+
+        row_vm_used, self.lbl_vm_used = _kv("占用")
+        s3.addWidget(row_vm_used)
+
+        s3.addWidget(_rule())
+
+        f2 = _form()
+        vm_row = QHBoxLayout()
+        vm_row.setSpacing(6)
+        self.ed_vm_root = QLineEdit()
+        self.ed_vm_root.setPlaceholderText(
+            str(manager.DEFAULT_VM_ROOT)
+        )
+        vm_row.addWidget(self.ed_vm_root, 1)
+        btn_vm_browse = QPushButton("浏览…")
+        btn_vm_browse.clicked.connect(self._browse_vm_root)
+        vm_row.addWidget(btn_vm_browse)
+        f2.addRow("新目录", vm_row)
+        s3.addLayout(f2)
+
+        s3.addWidget(_help(
+            "虚拟机磁盘、内存快照都放在这里，占空间较大。"
+            "更改后现有虚拟机会一并搬过去（需先停止所有虚拟机）。"
+        ))
+
+        vm_act = QHBoxLayout()
+        vm_act.setSpacing(6)
+        vm_act.addStretch()
+
+        btn_vm_reset = QPushButton("恢复默认")
+        btn_vm_reset.clicked.connect(self._reset_vm_root)
+        vm_act.addWidget(btn_vm_reset)
+
+        btn_vm_apply = QPushButton("应用")
+        btn_vm_apply.clicked.connect(self._apply_vm_root)
+        vm_act.addWidget(btn_vm_apply)
+
+        s3.addLayout(vm_act)
+        v.addWidget(sec3)
+
         # ══ 危险区 ══
         sec2, sv2 = _section("重置")
         sv2.addWidget(_rule())
@@ -461,10 +511,98 @@ class SettingsPage(QWidget):
         sv2.addLayout(reset_bar)
 
         v.addWidget(sec2)
+
         v.addStretch()
 
         QTimer.singleShot(120, self._refresh_storage_status)
         return scroll
+
+    def _refresh_vm_root_info(self) -> None:
+        """刷新虚拟机目录的路径 / 磁盘 / 占用"""
+        root = manager.vm_root()
+        self.st_vm_root.setText(str(root))
+
+        free, total = cfg.disk_free(str(root)) if root.exists() else (0, 0)
+        self.lbl_vm_disk.setText(
+            f"{free / 1024**3:.1f} GB 可用 / {total / 1024**3:.1f} GB 总计"
+            if total else "—"
+        )
+
+        size = 0
+        if root.exists():
+            for f in root.rglob("*"):
+                try:
+                    if f.is_file():
+                        size += f.stat().st_size
+                except OSError:
+                    pass
+        self.lbl_vm_used.setText(f"{size / 1024**3:.2f} GB")
+
+    def _browse_vm_root(self) -> None:
+        d = QFileDialog.getExistingDirectory(
+            self, "选择虚拟机目录",
+            self.ed_vm_root.text().strip() or str(manager.DEFAULT_VM_ROOT),
+            QFileDialog.Option.DontUseNativeDialog,
+        )
+        if d:
+            self.ed_vm_root.setText(d)
+
+    def _apply_vm_root(self) -> None:
+        """应用虚拟机目录（含数据搬迁）"""
+        target = self.ed_vm_root.text().strip()
+        if not target:
+            QMessageBox.information(
+                self, "请选择目录", "请先选择一个新的虚拟机目录。"
+            )
+            return
+
+        current = manager.vm_root()
+        if str(Path(target).expanduser()) == str(current):
+            QMessageBox.information(
+                self, "无需更改", "新目录与当前目录相同。"
+            )
+            return
+
+        running = [v.spec.name for v in manager.load_all() if v.running]
+        if running:
+            QMessageBox.warning(
+                self, "有虚拟机在运行",
+                "请先停止这些虚拟机再更改目录：\n  "
+                + "\n  ".join(running),
+            )
+            return
+
+        has_data = any(
+            (current / sub).is_dir() and any((current / sub).iterdir())
+            for sub in ("machines", "shared")
+        )
+        msg = f"将虚拟机目录更改为：\n{target}\n\n"
+        msg += ("现有虚拟机会被移动到新目录。\n\n" if has_data
+                else "")
+        msg += "确定继续？"
+        if QMessageBox.question(
+            self, "更改虚拟机目录", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, msg2 = manager.set_vm_root(target, move=True)
+        if ok:
+            self.status_message.emit(f"虚拟机目录已更改为 {msg2}")
+            self.ed_vm_root.clear()
+            self._refresh_storage_status()
+        else:
+            QMessageBox.critical(self, "更改失败", msg2)
+
+    def _reset_vm_root(self) -> None:
+        """恢复默认目录"""
+        current = manager.vm_root()
+        if current == manager.DEFAULT_VM_ROOT:
+            QMessageBox.information(self, "已是默认", "当前就在默认目录。")
+            return
+        self.ed_vm_root.setText(str(manager.DEFAULT_VM_ROOT))
+        self._apply_vm_root()
 
     def _refresh_storage_status(self) -> None:
         """刷新存储状态（只读展示 + 重置预览）"""
@@ -500,6 +638,9 @@ class SettingsPage(QWidget):
             )
         except Exception as e:
             self.st_root.setText(f"读取失败: {e}")
+
+        # 虚拟机目录与 podman 连接无关，独立刷新
+        self._refresh_vm_root_info()
 
     def _run_full_reset(self) -> None:
         """完全重置：三重确认"""
@@ -636,8 +777,10 @@ class SettingsPage(QWidget):
         head = QHBoxLayout()
         head.setSpacing(14)
 
+        from resources.icons import app_icon
+
         ic = QLabel()
-        ic.setPixmap(icon("seal", 56).pixmap(56, 56))
+        ic.setPixmap(app_icon().pixmap(56, 56))
         head.addWidget(ic)
 
         txt = QVBoxLayout()

@@ -188,3 +188,86 @@ class TestStartupAutoStart:
         ok, msg = cfg.install_podman()
         assert ok is False
         assert "手动安装" in msg
+
+
+class TestAboutIcon:
+    def test_uses_colored_app_icon(self):
+        """关于页头部用彩色应用图标，不是单色线条 seal"""
+        src = (ROOT / "ui" / "settings_page.py").read_text(encoding="utf-8")
+        start = src.find("def _build_about_tab")
+        body = src[start:start + 900]
+        assert "app_icon()" in body
+        assert 'icon("seal"' not in body
+
+
+class TestVmRootSetting:
+    """虚拟机目录可配置（存储页）"""
+
+    def test_core_helpers(self):
+        from core.vm import manager
+
+        assert callable(manager.vm_root)
+        assert callable(manager.machines_dir)
+        assert callable(manager.set_vm_root)
+
+    def test_default_when_unset(self):
+        from core import state
+        from core.vm import manager
+
+        state.set_setting(manager.KEY_VM_ROOT, "")
+        assert manager.vm_root() == manager.DEFAULT_VM_ROOT
+        assert manager.machines_dir() == manager.DEFAULT_VM_ROOT / "machines"
+
+    def test_rejects_relative_path(self):
+        from core.vm import manager
+
+        ok, msg = manager.set_vm_root("relative/dir", move=False)
+        assert ok is False
+        assert "绝对路径" in msg
+
+    def test_rejects_same_dir(self, tmp_path, monkeypatch):
+        from core import state
+        from core.vm import manager
+
+        state.set_setting(manager.KEY_VM_ROOT, str(tmp_path))
+        try:
+            ok, msg = manager.set_vm_root(str(tmp_path), move=False)
+            assert ok is False
+            assert "相同" in msg
+        finally:
+            state.set_setting(manager.KEY_VM_ROOT, "")
+
+    def test_sets_and_persists(self, tmp_path, monkeypatch):
+        from core import state
+        from core.vm import manager
+
+        # 本机可能有 VM 在跑，这里只验证写入/读取逻辑
+        monkeypatch.setattr(manager, "load_all", lambda: [])
+
+        target = tmp_path / "vms"
+        try:
+            ok, msg = manager.set_vm_root(str(target), move=False)
+            assert ok, msg
+            assert manager.vm_root() == target
+            assert manager.machines_dir() == target / "machines"
+            assert target.is_dir()
+        finally:
+            state.set_setting(manager.KEY_VM_ROOT, "")
+
+    def test_storage_tab_has_vm_section(self, page):
+        assert hasattr(page, "st_vm_root")
+        assert hasattr(page, "ed_vm_root")
+        assert hasattr(page, "lbl_vm_used")
+
+    def test_vm_section_ordered_before_reset(self):
+        """危险操作放最后，符合设置页惯例"""
+        src = (ROOT / "ui" / "settings_page.py").read_text(encoding="utf-8")
+        start = src.find("def _build_storage_tab")
+        body = src[start:start + 6000]
+        assert body.find('_section("虚拟机目录")') < body.find('_section("重置")')
+
+    def test_refresh_shows_path(self, page, qapp):
+        from core.vm import manager
+
+        page._refresh_vm_root_info()
+        assert page.st_vm_root.text() == str(manager.vm_root())

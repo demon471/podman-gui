@@ -40,9 +40,93 @@ from core.vm import (
     shared_disk,
 )
 
-# 数据根目录
-VM_ROOT = Path.home() / ".local" / "share" / "podman-gui" / "vm"
-MACHINES_DIR = VM_ROOT / "machines"
+# 数据根目录（默认位置；用户可在「设置 → 存储」里改）
+DEFAULT_VM_ROOT = Path.home() / ".local" / "share" / "podman-gui" / "vm"
+KEY_VM_ROOT = "vm.root_dir"
+
+
+def vm_root() -> Path:
+    """虚拟机数据根目录（可配置）
+
+    每次调用都读设置，这样用户改完目录立刻生效，
+    不需要重启应用。
+    """
+    try:
+        from core import state
+
+        val = state.get_setting(KEY_VM_ROOT, "")
+    except Exception:
+        val = ""
+    if val:
+        try:
+            return Path(str(val)).expanduser()
+        except (OSError, ValueError):
+            pass
+    return DEFAULT_VM_ROOT
+
+
+def machines_dir() -> Path:
+    """虚拟机实例目录"""
+    return vm_root() / "machines"
+
+
+def set_vm_root(path: str, move: bool = True) -> tuple[bool, str]:
+    """更改虚拟机目录
+
+    move=True 时把现有虚拟机（含共享基础镜像）搬到新位置。
+    有虚拟机在运行时拒绝操作 —— 搬正在写的 qcow2 必然损坏。
+    """
+    import shutil
+
+    from core import state
+
+    raw = (path or "").strip()
+    if not raw:
+        return False, "目录不能为空"
+
+    try:
+        target = Path(raw).expanduser()
+    except (OSError, ValueError) as e:
+        return False, f"路径无效: {e}"
+
+    if not target.is_absolute():
+        return False, "请使用绝对路径"
+
+    old_root = vm_root()
+    if target == old_root:
+        return False, "新目录与当前目录相同"
+
+    # 有 VM 在跑就不能搬
+    for vm in load_all():
+        if vm.running:
+            return False, f"虚拟机「{vm.spec.name}」正在运行，请先停止"
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return False, f"无法创建目录: {e}"
+
+    if not os.access(target, os.W_OK):
+        return False, f"{target} 不可写"
+
+    if move and old_root.exists():
+        for sub in ("machines", shared_disk.SHARED_DIR_NAME):
+            src_dir = old_root / sub
+            if not src_dir.is_dir():
+                continue
+            dst_dir = target / sub
+            try:
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                for item in src_dir.iterdir():
+                    dest = dst_dir / item.name
+                    if dest.exists():
+                        return False, f"{dest} 已存在，请先清理"
+                    shutil.move(str(item), str(dest))
+            except OSError as e:
+                return False, f"迁移 {sub} 失败: {e}"
+
+    state.set_setting(KEY_VM_ROOT, str(target))
+    return True, str(target)
 
 # SSH 端口起始值（避免与常见端口冲突）
 SSH_PORT_BASE = 2222
@@ -233,7 +317,7 @@ def load_all() -> list[VM]:
         from core import state
 
         for data in state.load_all_vms():
-            d = MACHINES_DIR / data["name"]
+            d = machines_dir() / data["name"]
             if not d.is_dir():
                 # 目录已不在，顺手把这条僵尸记录清掉（自愈）
                 try:
@@ -248,8 +332,8 @@ def load_all() -> list[VM]:
         print(f"[vm] 读取 SQLite 失败: {e}")
 
     # 2. vm.json 补充（SQLite 里没有的）
-    if MACHINES_DIR.exists():
-        for d in sorted(MACHINES_DIR.iterdir()):
+    if machines_dir().exists():
+        for d in sorted(machines_dir().iterdir()):
             if not d.is_dir() or d.name in out:
                 continue
             cfg = d / "vm.json"
@@ -281,7 +365,7 @@ def name_taken(name: str) -> bool:
     「名称已被占用」），且无法自愈。
     空壳目录会在 create_vm 里被复用并重新填充。
     """
-    return (MACHINES_DIR / name / "vm.json").exists()
+    return (machines_dir() / name / "vm.json").exists()
 
 
 # ─────────────────────────────────────────
@@ -326,7 +410,7 @@ def create_vm(
     if not cloudinit.iso_tool_available():
         return None, "缺少 ISO 生成工具（xorriso），无法生成 cloud-init 配置"
 
-    vm_dir = MACHINES_DIR / name
+    vm_dir = machines_dir() / name
     # 已存在说明是上次创建失败留下的空壳（无 vm.json，
     # name_taken 已确认不是有效 VM）。直接复用，rmtree 清底
     # 避免残留半个 seed.iso / disk 干扰本次创建。
@@ -453,7 +537,7 @@ def cleanup_orphan_dirs() -> int:
         from core import state
 
         for data in state.load_all_vms():
-            if not (MACHINES_DIR / data["name"]).is_dir():
+            if not (machines_dir() / data["name"]).is_dir():
                 try:
                     state.delete_vm_row(data["name"])
                     print(f"[vm] 清理幽灵记录: {data['name']}")
@@ -463,9 +547,9 @@ def cleanup_orphan_dirs() -> int:
     except Exception as e:
         print(f"[vm] 清理幽灵记录失败: {e}")
 
-    if not MACHINES_DIR.exists():
+    if not machines_dir().exists():
         return n
-    for d in MACHINES_DIR.iterdir():
+    for d in machines_dir().iterdir():
         if not d.is_dir():
             continue
         # 有效 VM：有 vm.json 或有 QEMU 进程（异常情况保底）
@@ -923,7 +1007,7 @@ def rename_vm(vm: VM, new_name: str) -> tuple[bool, str]:
 
     old_name = vm.spec.name
     old_dir = vm.dir
-    new_dir = MACHINES_DIR / new_name
+    new_dir = machines_dir() / new_name
 
     if new_dir.exists():
         return False, "目录已存在: " + str(new_dir)

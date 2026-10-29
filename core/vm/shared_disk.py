@@ -74,9 +74,9 @@ SHARED_DIR_NAME = "shared"
 
 def shared_base_path(spec: images.ImageSpec, arch: str = "amd64") -> Path:
     """共享基础磁盘路径"""
-    from core.vm.manager import VM_ROOT
+    from core.vm.manager import vm_root
 
-    return VM_ROOT / SHARED_DIR_NAME / f"{spec.key}-{arch}.qcow2"
+    return vm_root() / SHARED_DIR_NAME / f"{spec.key}-{arch}.qcow2"
 
 
 # ─────────────────────────────────────────
