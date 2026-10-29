@@ -17,186 +17,266 @@ from core.kde_theme import is_dark_mode
 # 内置 SVG（currentColor 会被替换）
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# 图标设计规范（改动前务必先读）
+#
+# 一套图标要看起来协调，靠的是「同一套参数」，不是逐个画得像。
+# 之前每个图标手写 stroke-width（1.3 / 1.6 / 1.9 / 2 / 2.4 混用），
+# 还有几个是实心填充、其余是描边 —— 放在一起必然违和。
+#
+# 现在统一由下面的构造函数生成，规则只有一条：
+#   · 24×24 网格，描边 1.75，圆头圆角，一律不填充
+#   · 内容限制在 3–21 之间（留 3 单位呼吸空间）
+#   · 只有「传送控制」（播放/暂停/停止）用实心：
+#     描边的三角形和竖条在 16–20px 下几乎看不清，
+#     Breeze 本身也是这么处理的
+#
+# 新增图标请用 _svg/_p/_c/_r/_rect，不要手写 <path>，
+# 否则线宽会再次漂移。
+# ─────────────────────────────────────────────
+
+_STROKE = 1.75
+_ATTR = (
+    'fill="none" stroke="currentColor" '
+    f'stroke-width="{_STROKE}" '
+    'stroke-linecap="round" stroke-linejoin="round"'
+)
+_SOLID_ATTR = (
+    'fill="currentColor" stroke="currentColor" stroke-width="1.4" '
+    'stroke-linecap="round" stroke-linejoin="round"'
+)
+
+
+def _svg(*parts: str) -> str:
+    """包一层 <svg>（24×24 网格）"""
+    return (
+        '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
+        + "".join(parts)
+        + "</svg>"
+    )
+
+
+def _p(d: str) -> str:
+    """描边路径"""
+    return f'<path {_ATTR} d="{d}"/>'
+
+
+def _pf(d: str) -> str:
+    """实心路径（仅传送控制用）"""
+    return f'<path {_SOLID_ATTR} d="{d}"/>'
+
+
+def _c(cx: float, cy: float, r: float, solid: bool = False) -> str:
+    """圆：solid=True 用实心（小圆点/状态标记）"""
+    attr = 'fill="currentColor" stroke="none"' if solid else _ATTR
+    return f'<circle cx="{cx}" cy="{cy}" r="{r}" {attr}/>'
+
+
+def _rect(x: float, y: float, w: float, h: float, rx: float = 2.0,
+          solid: bool = False) -> str:
+    attr = 'fill="currentColor" stroke="none"' if solid else _ATTR
+    return (
+        f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+        f'rx="{rx}" {attr}/>'
+    )
+
+
+def _e(cx: float, cy: float, rx: float, ry: float) -> str:
+    """椭圆（圆柱顶面）"""
+    return f'<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" {_ATTR}/>'
+
+
 SVG = {
-    "seal": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4 16.5l8-4 8 4-8 4-8-4z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 9.5l6-3 3.5 1.8-6 3-3.5-1.8z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M17 8.3v4.2"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 9.5v4.2l6 3.1v-4.3"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M13.5 12.3l3.5-1.8"/>
-</svg>""",
-    "podman": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12.5h18v4a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5v-4z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6.5 9.5V6M10.5 9.5V5M14.5 9.5V6M18 9.5V7.5"/>
-<circle cx="6.5" cy="12.5" r="1" fill="currentColor"/>
-<circle cx="17.5" cy="12.5" r="1" fill="currentColor"/>
-</svg>""",
+    # ══════════ 侧边导航 ══════════
+    # 立方体：容器
+    "container": _svg(
+        _p("M12 3.4 20.3 7.9 12 12.4 3.7 7.9Z"),
+        _p("M3.7 7.9v8.4L12 20.7v-8.3"),
+        _p("M20.3 7.9v8.4L12 20.7"),
+    ),
+    # 三层叠片：镜像
+    "image": _svg(
+        _p("M12 3 20 7 12 11 4 7Z"),
+        _p("M4 11.4 12 15.4 20 11.4"),
+        _p("M4 15.8 12 19.8 20 15.8"),
+    ),
+    # 圆柱：卷
+    "volume": _svg(
+        _e(12, 6.4, 7.4, 2.8),
+        _p("M4.6 6.4v11.4c0 1.55 3.31 2.8 7.4 2.8s7.4-1.25 7.4-2.8V6.4"),
+        _p("M4.6 12.1c0 1.55 3.31 2.8 7.4 2.8s7.4-1.25 7.4-2.8"),
+    ),
+    # 三节点连线：网络
+    "network": _svg(
+        _c(12, 5.4, 2.5),
+        _c(5.2, 18.2, 2.5),
+        _c(18.8, 18.2, 2.5),
+        _p("M10.7 7.6 6.5 15.9"),
+        _p("M13.3 7.6 17.5 15.9"),
+        _p("M7.7 18.2h8.6"),
+    ),
+    # 六边形：Pod（k8s 语义）
+    "pod": _svg(
+        _p("M12 2.9 19.9 7.45 19.9 16.55 12 21.1 4.1 16.55 4.1 7.45Z"),
+        _c(12, 12, 1.6),
+    ),
+    # 四宫格 + 对勾：Compose
+    "compose": _svg(
+        _rect(3.2, 3.2, 7.4, 7.4, 1.6),
+        _rect(13.4, 3.2, 7.4, 7.4, 1.6),
+        _rect(3.2, 13.4, 7.4, 7.4, 1.6),
+        _p("M13.4 17.6 16 20.2 20.8 15.4"),
+    ),
+    # 显示器：虚拟机
+    "vm": _svg(
+        _rect(2.8, 4.2, 18.4, 12.6, 2.2),
+        _p("M12 16.8v3.8"),
+        _p("M8.8 20.6h6.4"),
+    ),
+    # 双滑块：设置
+    "settings": _svg(
+        _p("M3.6 7.2h4.9"),
+        _p("M13.5 7.2h6.9"),
+        _c(11, 7.2, 2.3),
+        _p("M3.6 16.8h7.1"),
+        _p("M15.7 16.8h4.7"),
+        _c(13.3, 16.8, 2.3),
+    ),
 
-    "container": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M4.5 17.5l7.5-3.8 7.5 3.8-7.5 3.8-7.5-3.8z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 11l4.5-2.3 4.5 2.3-4.5 2.3L7.5 11z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M16.5 11v3.6"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M7.5 11v3.6l4.5 2.4v-3.7"/>
-</svg>""",
-    "vm": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M3 5.5h18v11H3v-11z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M9 20.5h6"/>
-<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M12 16.5v4"/>
-<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M8.5 11.3l3.5-1.8 3.5 1.8-3.5 1.8-3.5-1.8z"/>
-<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M8.5 11.3v1.9l3.5 1.8v-1.9"/>
-<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M15.5 11.3v1.9l-3.5 1.8v-1.9"/>
-</svg>""",
+    # ══════════ 应用/托盘标识 ══════════
+    # 两层集装箱堆叠（托盘与菜单里用；主窗口用彩色 appicon）
+    "seal": _svg(
+        _rect(3.6, 5.0, 16.8, 14.0, 2.4),
+        _p("M3.6 9.8h16.8"),
+    ),
+    "podman": _svg(
+        _rect(3.6, 5.0, 16.8, 14.0, 2.4),
+        _p("M3.6 9.8h16.8"),
+    ),
 
-    "image": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2.5l9.5 5-9.5 5-9.5-5 9.5-5z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12l9.5 5 9.5-5"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2.5 16.5l9.5 5 9.5-5"/>
-</svg>""",
+    # ══════════ 传送控制（实心，见文件头说明） ══════════
+    "play": _svg(_pf("M8.4 5.2 18.6 12 8.4 18.8Z")),
+    "pause": _svg(
+        _rect(8.6, 5.8, 3.0, 12.4, 1.4, solid=True),
+        _rect(12.4, 5.8, 3.0, 12.4, 1.4, solid=True),
+    ),
+    "stop": _svg(_rect(7.0, 7.0, 10.0, 10.0, 2.2, solid=True)),
 
-    "volume": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<ellipse cx="12" cy="6" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>
-</svg>""",
-
-    "network": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="currentColor" d="M9 2h6a1 1 0 011 1v4a1 1 0 01-1 1h-2v2h5a2 2 0 012 2v3h2a1 1 0 011 1v4a1 1 0 01-1 1h-6a1 1 0 01-1-1v-4a1 1 0 011-1h2v-3H6v3h2a1 1 0 011 1v4a1 1 0 01-1 1H2a1 1 0 01-1-1v-4a1 1 0 011-1h2v-3a2 2 0 012-2h5V8H9a1 1 0 01-1-1V3a1 1 0 011-1zM4 16v3h3v-3H4zm13 0v3h3v-3h-3zM10 4v3h4V4h-4z"/>
-</svg>""",
-
-    "pod": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="currentColor" d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2zm0 2.3L6.4 7.5 12 10.7l5.6-3.2L12 4.3zM5.6 9v5.6l5.6 3.2v-5.6L5.6 9zm12.8 0l-5.6 3.2v5.6l5.6-3.2V9z"/>
-</svg>""",
-
-    "terminal": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<rect x="2.5" y="4" width="19" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M7 9.5l3 2.5-3 2.5M13 15h4"/>
-</svg>""",
-
-    "log": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3v6h6M8 13h8M8 17h5"/>
-</svg>""",
-
-    "play": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M7.5 4.5l12 7.5-12 7.5z"/>
-</svg>""",
-
-    "stop": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
-</svg>""",
-
-    "restart": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 12.5a8.5 8.5 0 1 0 2.6-6.1"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 5.5v6h6"/>
-</svg>""",
-
-    "delete": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 6.5h17M8.5 6.5V4a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v2.5"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5.5 6.5l1 13a1.5 1.5 0 0 0 1.5 1.4h8a1.5 1.5 0 0 0 1.5-1.4l1-13"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M10 11v6M14 11v6"/>
-</svg>""",
-
-    "refresh": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20.5 11.5a8.5 8.5 0 1 1-2.6-6.1"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20.5 4.5v6h-6"/>
-</svg>""",
-
-    "search": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 15.5L20 20"/>
-</svg>""",
-
-    "add": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/>
-</svg>""",
-
-    "clean": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 20l6-6M9 9l6 6M13.5 3.5l7 7-9 9-7-7z"/>
-</svg>""",
-
-    "settings": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 6.5h9M17 6.5h3M4 12h3M11 12h9M4 17.5h11M19 17.5h1"/>
-<circle cx="15" cy="6.5" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/>
-<circle cx="9" cy="12" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/>
-<circle cx="17" cy="17.5" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/>
-</svg>""",
-
-    "info": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 11v5.5"/>
-<circle cx="12" cy="7.8" r="1.2" fill="currentColor"/>
-</svg>""",
-
-    "compose": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<rect x="3" y="3.5" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
-<rect x="13.5" y="3.5" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
-<rect x="3" y="14" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 18.5l2.5 2.5 5-5"/>
-</svg>""",
-    "edit": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16.5 3.5l4 4L8 20H4v-4L16.5 3.5z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M14 6l4 4"/>
-</svg>""",
-    "save": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M17 21v-8H7v8M7 3v5h8"/>
-</svg>""",
-    "folder": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 7.5a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-10.5z"/>
-</svg>""",
-    "up": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 19.5V5M5.5 11.5L12 5l6.5 6.5"/>
-</svg>""",
-    "down": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4.5V19M5.5 12.5L12 19l6.5-6.5"/>
-</svg>""",
-    "build": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14.5 6.5a3.5 3.5 0 1 0 4.9-3.2l-2.4 2.4-2.5-.6-.6-2.5 2.4-2.4a3.5 3.5 0 0 0-3.2 4.9l-8.3 8.3a2 2 0 1 0 2.8 2.8l8.3-8.3"/>
-</svg>""",
-
-    "pause": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<rect x="6" y="4.5" width="4" height="15" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
-<rect x="14" y="4.5" width="4" height="15" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
-</svg>""",
-
-    "file": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M14 3v5h5"/>
-</svg>""",
-    "upload": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 15.5V4M7.5 8.5L12 4l4.5 4.5"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
-</svg>""",
-    "download": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v11.5M7.5 11L12 15.5 16.5 11"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
-</svg>""",
-    "home": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3.5 10.5L12 3.5l8.5 7"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M5.5 9.5V20h13V9.5"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M10 20v-5.5h4V20"/>
-</svg>""",
-    "more": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<circle cx="5.5" cy="12" r="1.8" fill="currentColor"/>
-<circle cx="12" cy="12" r="1.8" fill="currentColor"/>
-<circle cx="18.5" cy="12" r="1.8" fill="currentColor"/>
-</svg>""",
-    "check": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.5l5 5L19.5 7"/>
-</svg>""",
-    "copy": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
-<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15.5 5.5v-1a2 2 0 0 0-2-2h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1"/>
-</svg>""",
-    # 密码可见性切换（眼睛 / 划掉的眼睛）
-    "eye": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/>
-<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.9"/>
-</svg>""",
-    "eye_off": """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5c1.6 0 3 .5 4.2 1.2M21.5 12S18 18.5 12 18.5c-1.6 0-3-.5-4.2-1.2"/>
-<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M4 20L20 4"/>
-</svg>""",
+    # ══════════ 动作 ══════════
+    "terminal": _svg(
+        _rect(2.8, 4.2, 18.4, 15.6, 2.2),
+        _p("M7 9.6 10.2 12.4 7 15.2"),
+        _p("M12.8 15.2h4.4"),
+    ),
+    "log": _svg(
+        _p("M13.6 3.2H6.4a2 2 0 0 0-2 2v13.6a2 2 0 0 0 2 2h11.2"
+           "a2 2 0 0 0 2-2V9.2Z"),
+        _p("M13.6 3.2v6h6"),
+        _p("M7.8 13h8.4"),
+        _p("M7.8 16.6h5.6"),
+    ),
+    # 循环箭头 + 中心点：重启
+    "restart": _svg(
+        _p("M20.2 12a8.2 8.2 0 1 1-2.6-6"),
+        _p("M20.8 3.8v5.4h-5.4"),
+        _c(12, 12, 1.6, solid=True),
+    ),
+    # 循环箭头：刷新
+    "refresh": _svg(
+        _p("M20.2 12a8.2 8.2 0 1 1-2.6-6"),
+        _p("M20.8 3.8v5.4h-5.4"),
+    ),
+    "delete": _svg(
+        _p("M4.6 6.8h14.8"),
+        _p("M9.4 6.8V4.6a1.4 1.4 0 0 1 1.4-1.4h2.4a1.4 1.4 0 0 1 "
+           "1.4 1.4v2.2"),
+        _p("M6.6 6.8l.9 12.2a1.8 1.8 0 0 0 1.8 1.7h5.4a1.8 1.8 0 0 0 "
+           "1.8-1.7l.9-12.2"),
+        _p("M10.4 10.8v6"),
+        _p("M13.6 10.8v6"),
+    ),
+    "search": _svg(
+        _c(10.8, 10.8, 6.4),
+        _p("M15.6 15.6 20.6 20.6"),
+    ),
+    "add": _svg(
+        _p("M12 5.2v13.6"),
+        _p("M5.2 12h13.6"),
+    ),
+    # 清理：星星（区别于删除用的垃圾桶）
+    "clean": _svg(
+        _p("M11 3.4l2 4.9 4.9 2-4.9 2-2 4.9-2-4.9-4.9-2 4.9-2Z"),
+        _p("M17.6 14.2l1 2.4 2.4 1-2.4 1-1 2.4-1-2.4-2.4-1 2.4-1Z"),
+    ),
+    "info": _svg(
+        _c(12, 12, 8.6),
+        _p("M12 11.2v5.4"),
+        _c(12, 7.9, 1.05, solid=True),
+    ),
+    "edit": _svg(
+        _p("M16.4 3.6a2.3 2.3 0 0 1 3.2 3.2L8.2 18.2l-4.6 1.4 1.4-4.6Z"),
+        _p("M14.6 5.4 18 8.8"),
+    ),
+    "save": _svg(
+        _p("M5 3.8h10.6l4.6 4.6v11.8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.8"
+           "a1 1 0 0 1 1-1Z"),
+        _p("M8 3.8v5.4h6.6V3.8"),
+        _p("M7.4 20.2v-6.4h9.2v6.4"),
+    ),
+    "folder": _svg(
+        _p("M3.6 7.4a1.8 1.8 0 0 1 1.8-1.8h3.6l2.2 2.6h7.4a1.8 1.8 0 0 1 "
+           "1.8 1.8v8.6a1.8 1.8 0 0 1-1.8 1.8H5.4a1.8 1.8 0 0 1-1.8-1.8Z"),
+    ),
+    "file": _svg(
+        _p("M13.4 3.4H7a1.8 1.8 0 0 0-1.8 1.8v13.6A1.8 1.8 0 0 0 7 20.6"
+           "h10a1.8 1.8 0 0 0 1.8-1.8V9Z"),
+        _p("M13.4 3.4V9h5.4"),
+    ),
+    "up": _svg(_p("M6.4 14.4 12 8.8l5.6 5.6")),
+    "down": _svg(_p("M6.4 9.6 12 15.2l5.6-5.6")),
+    "upload": _svg(
+        _p("M12 15.6V4.4"),
+        _p("M7.8 8.6 12 4.4l4.2 4.2"),
+        _p("M4.6 15.4v3.2a1.8 1.8 0 0 0 1.8 1.8h11.2a1.8 1.8 0 0 0 "
+           "1.8-1.8v-3.2"),
+    ),
+    "download": _svg(
+        _p("M12 4.4v11.2"),
+        _p("M7.8 11.4 12 15.6l4.2-4.2"),
+        _p("M4.6 15.4v3.2a1.8 1.8 0 0 0 1.8 1.8h11.2a1.8 1.8 0 0 0 "
+           "1.8-1.8v-3.2"),
+    ),
+    # 扳手：构建
+    "build": _svg(
+        _p("M4.6 19.4 12.4 11.6"),
+        _p("M10.6 6.2l7.2 7.2 3.4-3.4-7.2-7.2Z"),
+    ),
+    "home": _svg(
+        _p("M3.8 10.4 12 3.6l8.2 6.8"),
+        _p("M5.8 9v10a1 1 0 0 0 1 1h10.4a1 1 0 0 0 1-1V9"),
+        _p("M9.8 20v-5.4h4.4V20"),
+    ),
+    "more": _svg(
+        _c(5.4, 12, 1.5, solid=True),
+        _c(12, 12, 1.5, solid=True),
+        _c(18.6, 12, 1.5, solid=True),
+    ),
+    "check": _svg(_p("M4.8 12.6 9.6 17.4 19.2 6.6")),
+    "copy": _svg(
+        _rect(8.6, 8.6, 11.8, 11.8, 2.0),
+        _p("M15.4 5.6V4.8a1.8 1.8 0 0 0-1.8-1.8H4.8a1.8 1.8 0 0 0-1.8 "
+           "1.8v8.8a1.8 1.8 0 0 0 1.8 1.8h.8"),
+    ),
+    "eye": _svg(
+        _p("M2.6 12S6.1 5.6 12 5.6 21.4 12 21.4 12 17.9 18.4 12 18.4 "
+           "2.6 12 2.6 12Z"),
+        _c(12, 12, 3.2),
+    ),
+    "eye_off": _svg(
+        _p("M2.6 12S6.1 5.6 12 5.6c1.6 0 3 .5 4.2 1.2"),
+        _p("M21.4 12S17.9 18.4 12 18.4c-1.6 0-3-.5-4.2-1.2"),
+        _p("M4.2 19.8 19.8 4.2"),
+    ),
 }
 
 # KDE 系统图标映射（优先使用）
@@ -369,6 +449,25 @@ def _render_svg(svg_content: str, color: str, size: int, optical: bool = True) -
     renderer.render(painter)
     painter.end()
     return pix
+
+
+def app_icon() -> QIcon:
+    """应用图标（彩色，多尺寸）
+
+    托盘用它而不是内置单色 seal：托盘是 16–24px 的小尺寸，
+    彩色实心图标在任务栏里辨识度远高于描边线条。
+    """
+    from pathlib import Path
+
+    from PyQt6.QtCore import QSize
+
+    ic = QIcon()
+    base = Path(__file__).resolve().parent / "appicon"
+    for s in (16, 22, 24, 32, 36, 42, 48, 64, 128, 256):
+        f = base / f"podman-gui-{s}.png"
+        if f.exists():
+            ic.addFile(str(f), QSize(s, s))
+    return ic
 
 
 def icon(name: str, size: int = 16, danger: bool = False,

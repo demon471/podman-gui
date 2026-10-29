@@ -111,7 +111,11 @@ class TrayIcon(QObject):
             ok = False
 
         # 托盘图标用海豹（随主题自动黑白变色）
-        self.tray.setIcon(icon("seal", 64))
+        # 托盘用彩色应用图标：16–24px 下描边图形几乎糊成一团，
+        # 实心彩色在任务栏里辨识度高得多
+        from resources.icons import app_icon
+
+        self.tray.setIcon(app_icon())
 
     # ─────────────────────────────────────────
     # 数据刷新
