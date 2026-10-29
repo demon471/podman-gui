@@ -40,7 +40,7 @@ if "--daemon" in sys.argv:
 
     sys.exit(_daemon_main(_args))
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -207,6 +207,87 @@ def _run_autotest(win) -> None:
     QTimer.singleShot(3000, step1)
 
 
+def _ensure_podman_ready(win) -> None:
+    """启动时确保 Podman 可用
+
+    用户视角：打开软件就该能用，不该先教他去敲 systemctl。
+      · 没装 podman → 弹窗引导一键安装（pkexec 走系统授权）
+      · 装了但用户级 socket 没开 → 静默 enable --now
+    整个过程放后台，不阻塞窗口显示。
+    """
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QMessageBox
+
+    from core import podman_config as pcfg
+    from core.async_task import run_async
+
+    def work():
+        if not pcfg.podman_installed():
+            return {"state": "missing"}
+        ok, msg = pcfg.ensure_user_service()
+        return {"state": "ok" if ok else "failed", "msg": msg}
+
+    def done(res):
+        state = res.get("state")
+        if state == "ok":
+            # 服务刚起来，让客户端重连一次
+            try:
+                win.client.check_connection()
+            except Exception:
+                pass
+            return
+
+        if state == "missing":
+            ret = QMessageBox.question(
+                win, "未检测到 Podman",
+                "系统中没有找到 Podman，无法管理容器。\n\n"
+                "现在自动安装吗？（会弹出系统授权框）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                win._set_status("未安装 Podman，部分功能不可用")
+                return
+
+            def inst():
+                return pcfg.install_podman()
+
+            def inst_done(r):
+                ok, msg = r
+                if ok:
+                    QMessageBox.information(
+                        win, "安装完成", "Podman 已安装，正在启动服务…"
+                    )
+                    ok2, msg2 = pcfg.ensure_user_service()
+                    if ok2:
+                        win.client.check_connection()
+                        win._set_status("Podman 已就绪")
+                    else:
+                        win._set_status(f"服务启动失败: {msg2}")
+                else:
+                    QMessageBox.warning(
+                        win, "安装失败",
+                        f"{msg}\n\n可手动安装：\n"
+                        "Arch: sudo pacman -S podman\n"
+                        "Debian/Ubuntu: sudo apt install podman\n"
+                        "Fedora: sudo dnf install podman",
+                    )
+
+            win._set_status("正在安装 Podman…")
+            run_async(inst, on_done=inst_done,
+                      on_error=lambda m: QMessageBox.critical(win, "安装失败", str(m)),
+                      parent=win)
+            return
+
+        # failed：服务没起来，但不打扰用户，只更新状态栏
+        win._set_status(f"Podman 服务未就绪：{res.get('msg', '')[:60]}")
+
+    def error(msg):
+        win._set_status(f"检测 Podman 失败: {msg}")
+
+    run_async(work, on_done=done, on_error=error, parent=win)
+
+
 def _restore_vms(win) -> None:
     """后台恢复上次希望运行的虚拟机（不阻塞界面）"""
     from core.async_task import run_async
@@ -290,6 +371,9 @@ def main() -> int:
     # 恢复上次希望运行的虚拟机
     # QEMU 用 -daemonize 独立运行，正常退出应用不会停 VM，
     # 所以通常这里是空操作；只有应用被强杀或系统重启后才需要拉起。
+    # 先确保 Podman 可用（未安装则引导安装，未启动则自动拉起）
+    QTimer.singleShot(300, lambda: _ensure_podman_ready(win))
+
     _restore_vms(win)
 
     rc = app.exec()

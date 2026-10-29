@@ -333,6 +333,99 @@ def restart_podman_socket() -> tuple[bool, str]:
         return False, str(e)
 
 
+def podman_installed() -> bool:
+    """是否安装了 podman 可执行文件"""
+    import shutil
+
+    return shutil.which("podman") is not None
+
+
+def podman_version() -> str:
+    """podman 版本号（取不到返回空串）"""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["podman", "--version"], capture_output=True, text=True, timeout=8
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    out = (r.stdout or "").strip()
+    # 形如 "podman version 5.4.2"
+    return out.split()[-1] if out else ""
+
+
+def install_podman() -> tuple[bool, str]:
+    """引导安装 podman（按发行版调用包管理器）
+
+    用 pkexec 弹系统授权框，不需要用户自己开终端。
+    """
+    import subprocess
+
+    from core.vm import deps
+
+    distro = deps.detect_distro()
+    pkgs = "podman"
+
+    # 非交互参数：没有 TTY 时包管理器会卡在确认提示上
+    cmds = {
+        "arch": f"pacman -S --needed --noconfirm {pkgs}",
+        "debian": f"apt-get install -y {pkgs}",
+        "fedora": f"dnf install -y {pkgs}",
+    }
+    inner = cmds.get(distro)
+    if not inner:
+        label = deps.DISTRO_LABELS.get(distro, distro)
+        return False, (
+            f"无法自动识别发行版（{label}），请手动安装 podman。"
+        )
+
+    try:
+        r = subprocess.run(
+            ["pkexec", "sh", "-c", inner],
+            capture_output=True, text=True, timeout=600,
+        )
+    except FileNotFoundError:
+        return False, "系统缺少 pkexec（polkit），请手动安装 podman。"
+    except subprocess.TimeoutExpired:
+        return False, "安装超时，请手动安装 podman。"
+
+    if r.returncode == 0 and podman_installed():
+        return True, "Podman 安装完成"
+
+    detail = (r.stderr or r.stdout or "").strip().splitlines()
+    tail = " / ".join(detail[-3:])[:300] if detail else "未知错误"
+    if r.returncode in (126, 127):
+        tail = "已取消授权"
+    return False, tail
+
+
+def ensure_user_service() -> tuple[bool, str]:
+    """确保用户级 podman.socket 已启用并在运行（幂等）
+
+    应用启动时调用：用户不需要知道 systemd 的存在，
+    打开软件就能用。
+    """
+    import subprocess
+
+    if not podman_installed():
+        return False, "未安装 podman"
+
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", "podman.socket"],
+            capture_output=True, text=True, timeout=25,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+
+    if res.returncode == 0:
+        return True, ""
+
+    detail = (res.stderr or res.stdout or "").strip()[:300]
+    return False, detail or "systemctl 返回非零"
+
+
 def socket_status() -> tuple[bool, str]:
     """检查 podman.socket 状态"""
     try:

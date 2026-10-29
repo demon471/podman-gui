@@ -76,16 +76,23 @@ class SettingsPage(QWidget):
         self.tabs = QTabWidget()
         # 不要圆角/边框的 pane，tab 栏本身由 Breeze 绘制
         self.tabs.setDocumentMode(False)
-        self.tabs.addTab(self._build_overview_tab(), "概览")
+        # 顺序按「用户多久用一次」排：
+        #   服务（出问题才来）→ 资源（偶尔调）→ 镜像加速（装完就忘）
+        #   → 存储（基本不动）→ 关于（纯查看）
         self.tabs.addTab(self._build_service_tab(), "服务")
+        self.tabs.addTab(self._build_resources_tab(), "资源")
         self.tabs.addTab(self._build_mirror_tab(), "镜像加速")
         self.tabs.addTab(self._build_storage_tab(), "存储")
         self.tabs.addTab(self._build_about_tab(), "关于")
         layout.addWidget(self.tabs)
 
-    # ── 概览 ──
     # ── 镜像加速 ──
     def _build_mirror_tab(self) -> QWidget:
+        """镜像加速：改完即生效，不需要点保存
+
+        加速地址写在 registries.conf 里，每次拉镜像都会重新读取，
+        所以没必要让用户再点一次「保存」—— 改了就落盘。
+        """
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -95,17 +102,14 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
-        hint = QLabel(
-            "镜像加速用于加快 docker.io 等仓库的拉取速度。"
-            "列表按从上到下的顺序尝试，前一个失败自动降级到下一个。"
-        )
-        hint.setObjectName("hintLabel")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        # ══════════ 状态 ══════════
+        self.lbl_mirror_status = QLabel("")
+        self.lbl_mirror_status.setObjectName("mirrorStatus")
+        layout.addWidget(self.lbl_mirror_status)
 
-        # ── 加速地址 ──
-        grp1 = QGroupBox("加速地址")
-        v1 = QVBoxLayout(grp1)
+        # ══════════ 加速地址 ══════════
+        g1 = QGroupBox("加速地址")
+        v1 = QVBoxLayout(g1)
         v1.setContentsMargins(12, 12, 12, 10)
         v1.setSpacing(8)
 
@@ -113,12 +117,14 @@ class SettingsPage(QWidget):
         body.setSpacing(8)
 
         self.lst_mirrors = QListWidget()
-        self.lst_mirrors.setMinimumHeight(110)
-        self.lst_mirrors.setMaximumHeight(170)
+        self.lst_mirrors.setMinimumHeight(120)
+        self.lst_mirrors.setMaximumHeight(180)
         self.lst_mirrors.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection
         )
-        self.lst_mirrors.itemSelectionChanged.connect(self._update_mirror_buttons)
+        self.lst_mirrors.itemSelectionChanged.connect(
+            self._update_mirror_buttons
+        )
         body.addWidget(self.lst_mirrors, 1)
 
         btncol = QVBoxLayout()
@@ -133,13 +139,16 @@ class SettingsPage(QWidget):
             btncol.addWidget(b)
             return b
 
-        self.btn_mirror_up = icon_btn("up", "上移（提高优先级）",
-                                      lambda: self._move_mirror(-1))
-        self.btn_mirror_down = icon_btn("down", "下移（降低优先级）",
-                                        lambda: self._move_mirror(1))
+        self.btn_mirror_up = icon_btn(
+            "up", "上移（优先级更高）", lambda: self._move_mirror(-1)
+        )
+        self.btn_mirror_down = icon_btn(
+            "down", "下移", lambda: self._move_mirror(1)
+        )
         btncol.addSpacing(6)
-        self.btn_mirror_del = icon_btn("delete", "移除选中的地址",
-                                       self._del_mirror)
+        self.btn_mirror_del = icon_btn(
+            "delete", "移除选中的地址", self._del_mirror
+        )
         btncol.addStretch()
 
         body.addLayout(btncol)
@@ -149,7 +158,7 @@ class SettingsPage(QWidget):
         add_row.setSpacing(6)
 
         self.cmb_preset = QComboBox()
-        self.cmb_preset.addItem("从预设选择…", "")
+        self.cmb_preset.addItem("从常用地址选择…", "")
         for name, url in cfg.MIRROR_PRESETS:
             self.cmb_preset.addItem(name, url)
         self.cmb_preset.currentIndexChanged.connect(self._on_preset_selected)
@@ -161,11 +170,31 @@ class SettingsPage(QWidget):
         add_row.addWidget(btn_add)
 
         v1.addLayout(add_row)
-        layout.addWidget(grp1)
 
-        # ── 代理 ──
-        grp2 = QGroupBox("HTTP 代理（访问境外 registry）")
-        f2 = QFormLayout(grp2)
+        hint = QLabel(
+            "按从上到下的顺序尝试，前一个失败自动降级到下一个。"
+            "未配置时直连官方仓库。"
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        v1.addWidget(hint)
+
+        layout.addWidget(g1)
+
+        # ══════════ 高级：HTTP 代理 ══════════
+        self.btn_mirror_adv = QPushButton("显示代理设置")
+        self.btn_mirror_adv.setCheckable(True)
+        self.btn_mirror_adv.setFlat(True)
+        self.btn_mirror_adv.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mirror_adv.toggled.connect(self._toggle_mirror_advanced)
+        adv_row2 = QHBoxLayout()
+        adv_row2.setContentsMargins(0, 0, 0, 0)
+        adv_row2.addWidget(self.btn_mirror_adv)
+        adv_row2.addStretch()
+        layout.addLayout(adv_row2)
+
+        self.box_proxy = QGroupBox("HTTP 代理")
+        f2 = QFormLayout(self.box_proxy)
         f2.setContentsMargins(12, 12, 12, 10)
         f2.setSpacing(8)
 
@@ -174,50 +203,96 @@ class SettingsPage(QWidget):
         f2.addRow(self.chk_proxy)
 
         self.cmb_proxy_preset = QComboBox()
-        self.cmb_proxy_preset.addItem("从预设选择…", "")
+        self.cmb_proxy_preset.addItem("从常用地址选择…", "")
         for name, url in cfg.PROXY_PRESETS:
             self.cmb_proxy_preset.addItem(name, url)
         self.cmb_proxy_preset.currentIndexChanged.connect(
             self._on_proxy_preset_selected
         )
-        f2.addRow("常用地址:", self.cmb_proxy_preset)
+        f2.addRow("常用地址", self.cmb_proxy_preset)
 
         self.ed_proxy = QLineEdit()
         self.ed_proxy.setPlaceholderText("http://127.0.0.1:7890")
-        f2.addRow("代理地址:", self.ed_proxy)
+        self.ed_proxy.editingFinished.connect(self._autosave_mirrors)
+        f2.addRow("代理地址", self.ed_proxy)
 
         self.ed_noproxy = QLineEdit()
         self.ed_noproxy.setPlaceholderText("localhost,127.0.0.1,10.88.0.0/16")
-        f2.addRow("排除地址:", self.ed_noproxy)
+        self.ed_noproxy.editingFinished.connect(self._autosave_mirrors)
+        f2.addRow("排除地址", self.ed_noproxy)
 
-        layout.addWidget(grp2)
+        self.box_proxy.hide()
+        layout.addWidget(self.box_proxy)
 
-        # ── 底部操作 ──
+        # ══════════ 底部 ══════════
         bar = QHBoxLayout()
         bar.setSpacing(8)
+        bar.addStretch()
 
-        self.lbl_mirror_status = QLabel("")
-        self.lbl_mirror_status.setObjectName("hintLabel")
-        bar.addWidget(self.lbl_mirror_status, 1)
-
-        btn_reload = QPushButton("重新读取")
-        btn_reload.clicked.connect(self.load_config)
-        bar.addWidget(btn_reload)
-
-        btn_clear = QPushButton("清除配置")
+        btn_clear = QPushButton("清除全部加速配置")
         btn_clear.clicked.connect(self._clear_all)
         bar.addWidget(btn_clear)
-
-        btn_save = QPushButton(icon("save"), "保存")
-        btn_save.setDefault(True)
-        btn_save.clicked.connect(self._save_mirror_config)
-        bar.addWidget(btn_save)
 
         layout.addLayout(bar)
         layout.addStretch()
 
         scroll.setWidget(w)
         return scroll
+
+    def _toggle_mirror_advanced(self, on: bool) -> None:
+        self.box_proxy.setVisible(on)
+        self.btn_mirror_adv.setText(
+            "隐藏代理设置" if on else "显示代理设置"
+        )
+
+    def _autosave_mirrors(self) -> None:
+        """把当前界面状态写入 registries.conf（静默，失败才提示）"""
+        mirrors = []
+        for i in range(self.lst_mirrors.count()):
+            it = self.lst_mirrors.item(i)
+            if not (it.flags() & Qt.ItemFlag.ItemIsEnabled):
+                continue
+            mirrors.append(it.text())
+
+        try:
+            if mirrors:
+                ok, msg = cfg.safe_write_config(
+                    "registries", {"docker.io": mirrors}
+                )
+                if not ok:
+                    QMessageBox.warning(self, "保存失败", msg)
+                    return
+            else:
+                cfg.clear_registries()
+
+            if self.chk_proxy.isChecked() and self.ed_proxy.text().strip():
+                p = self.ed_proxy.text().strip()
+                ok, msg = cfg.safe_write_config(
+                    "proxy", p, p, self.ed_noproxy.text().strip()
+                )
+                if not ok:
+                    QMessageBox.warning(self, "保存失败", msg)
+                    return
+            else:
+                cfg.clear_proxy()
+        except OSError as e:
+            QMessageBox.warning(self, "保存失败", f"写入配置出错：\n{e}")
+            return
+
+        self._update_mirror_status(len(mirrors))
+        self.status_message.emit("镜像加速配置已保存")
+
+    def _update_mirror_status(self, count: int | None = None) -> None:
+        if count is None:
+            count = 0
+            for i in range(self.lst_mirrors.count()):
+                it = self.lst_mirrors.item(i)
+                if it.flags() & Qt.ItemFlag.ItemIsEnabled:
+                    count += 1
+        if count:
+            self.lbl_mirror_status.setText(f"已配置 {count} 个加速地址 · 改动即时生效")
+        else:
+            self.lbl_mirror_status.setText("当前直连官方仓库（未使用加速）")
 
     # ── 存储 ──
     def _build_storage_tab(self) -> QWidget:
@@ -565,59 +640,55 @@ class SettingsPage(QWidget):
 
     # ── 关于 ──
     def _build_about_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
-
-        from core.config import APP_NAME, APP_VERSION
-
-        lbl = QLabel(f"<h2>{APP_NAME}</h2><p>版本 {APP_VERSION}</p>")
-        layout.addWidget(lbl)
-
-        info = QLabel(
-            "<p>KDE Plasma 原生 Podman 图形管理工具</p>"
-            "<p>基于 PyQt6 + Podman REST API 构建</p>"
-            "<hr>"
-            "<p><b>配置文件位置</b><br>"
-            f"registries.conf: {cfg.REGISTRIES_CONF}<br>"
-            f"containers.conf: {cfg.CONTAINERS_CONF}<br>"
-            f"storage.conf: {cfg.STORAGE_CONF}</p>"
-        )
-        info.setTextFormat(Qt.TextFormat.RichText)
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        layout.addStretch()
-        return w
-
-    def _build_overview_tab(self) -> QWidget:
-        """Podman 系统概览（原侧边栏「概览」页内容）"""
-        from PyQt6.QtWidgets import QGridLayout, QFormLayout
-        from core.async_task import run_async
-        from ui.utils import fmt_size
-
+        """关于：应用信息 + Podman 运行环境（原「概览」并入）"""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         w = QWidget()
-        grid = QGridLayout(w)
-        grid.setContentsMargins(16, 14, 16, 14)
-        grid.setSpacing(12)
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
 
-        def info_row(label, mono=False):
-            """一行「标签 + 值」"""
+        from core.config import APP_NAME, APP_VERSION
+
+        # ══════════ 头部：图标 + 名称 + 版本 ══════════
+        head = QHBoxLayout()
+        head.setSpacing(14)
+
+        ic = QLabel()
+        ic.setPixmap(icon("seal", 48).pixmap(48, 48))
+        head.addWidget(ic)
+
+        txt = QVBoxLayout()
+        txt.setSpacing(2)
+        name = QLabel(APP_NAME)
+        name.setObjectName("aboutTitle")
+        txt.addWidget(name)
+        sub = QLabel(f"版本 {APP_VERSION} · KDE Plasma 原生 Podman 管理工具")
+        sub.setObjectName("hintLabel")
+        txt.addWidget(sub)
+        head.addLayout(txt)
+        head.addStretch()
+
+        layout.addLayout(head)
+
+        def info_row(label: str, mono: bool = False):
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(12)
             k = QLabel(label)
             k.setObjectName("formLabel")
-            k.setFixedWidth(88)
+            k.setFixedWidth(96)
             h.addWidget(k)
             v = QLabel("—")
-            v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            v.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            v.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            v.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+            )
             if mono:
                 v.setStyleSheet(
                     "font-family: 'JetBrains Mono', 'Maple Mono NF CN', monospace;"
@@ -625,62 +696,176 @@ class SettingsPage(QWidget):
             h.addWidget(v, 1)
             return row, v
 
-        # ── 版本信息 ──
-        g1 = QGroupBox("版本信息")
+        # ══════════ Podman 运行环境 ══════════
+        g1 = QGroupBox("Podman 运行环境")
         f1 = QFormLayout(g1)
         f1.setContentsMargins(12, 12, 12, 10)
         f1.setSpacing(6)
-        r1, self._ov_version = info_row("Podman")
+        r1, self._ov_version = info_row("版本")
         r2, self._ov_api = info_row("API 版本")
-        r3, self._ov_platform = info_row("平台")
-        for r in (r1, r2, r3):
+        r3, self._ov_rootless = info_row("Rootless")
+        r4, self._ov_cgroup = info_row("Cgroup")
+        r5, self._ov_kernel = info_row("内核")
+        r6, self._ov_platform = info_row("平台")
+        for r in (r1, r2, r3, r4, r5, r6):
             f1.addRow(r)
-        grid.addWidget(g1, 0, 0)
+        layout.addWidget(g1)
 
-        # ── 运行环境 ──
-        g2 = QGroupBox("运行环境")
+        # ══════════ 存储位置 ══════════
+        g2 = QGroupBox("存储位置")
         f2 = QFormLayout(g2)
         f2.setContentsMargins(12, 12, 12, 10)
         f2.setSpacing(6)
-        r4, self._ov_rootless = info_row("Rootless")
-        r5, self._ov_cgroup = info_row("Cgroup")
-        r6, self._ov_os = info_row("操作系统")
-        r7, self._ov_kernel = info_row("内核")
-        for r in (r4, r5, r6, r7):
+        r7, self._ov_driver = info_row("驱动")
+        r8, self._ov_root = info_row("数据目录", mono=True)
+        r9, self._ov_socket = info_row("Socket", mono=True)
+        for r in (r7, r8, r9):
             f2.addRow(r)
-        grid.addWidget(g2, 0, 1)
+        layout.addWidget(g2)
 
-        # ── 存储 ──
-        g3 = QGroupBox("存储")
+        # ══════════ 占用统计 ══════════
+        g3 = QGroupBox("占用统计")
         f3 = QFormLayout(g3)
         f3.setContentsMargins(12, 12, 12, 10)
         f3.setSpacing(6)
-        r8, self._ov_driver = info_row("驱动")
-        r9, self._ov_root = info_row("数据目录", mono=True)
-        r10, self._ov_runroot = info_row("运行时", mono=True)
-        r11, self._ov_socket = info_row("Socket", mono=True)
-        for r in (r8, r9, r10, r11):
+        r10, self._ov_images = info_row("镜像")
+        r11, self._ov_containers = info_row("容器")
+        r12, self._ov_volumes = info_row("卷")
+        for r in (r10, r11, r12):
             f3.addRow(r)
-        grid.addWidget(g3, 1, 0, 1, 2)
+        layout.addWidget(g3)
 
-        # ── 资源占用 ──
-        g4 = QGroupBox("资源占用")
+        # ══════════ 配置文件 ══════════
+        g4 = QGroupBox("配置文件")
         f4 = QFormLayout(g4)
         f4.setContentsMargins(12, 12, 12, 10)
         f4.setSpacing(6)
-        r12, self._ov_images = info_row("镜像")
-        r13, self._ov_containers = info_row("容器")
-        r14, self._ov_volumes = info_row("卷")
-        for r in (r12, r13, r14):
-            f4.addRow(r)
-        grid.addWidget(g4, 2, 0, 1, 2)
+        r13, _ = info_row("目录", mono=True)
+        r13.layout().itemAt(1).widget().setText(str(cfg.CONFIG_DIR))
+        for name in ("registries.conf", "containers.conf", "storage.conf"):
+            rr, vv = info_row(name, mono=True)
+            vv.setText(str(cfg.CONFIG_DIR / name))
+            f4.addRow(rr)
+        layout.addWidget(g4)
 
-        grid.setRowStretch(3, 1)
+        # ══════════ 底部按钮 ══════════
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        btn_open = QPushButton(icon("folder"), "打开配置目录")
+        btn_open.clicked.connect(self._open_config_dir)
+        bar.addWidget(btn_open)
+
+        btn_copy = QPushButton(icon("copy"), "复制诊断信息")
+        btn_copy.setToolTip("把上面的版本与运行环境复制到剪贴板，方便反馈问题")
+        btn_copy.clicked.connect(self._copy_diagnostics)
+        bar.addWidget(btn_copy)
+
+        bar.addStretch()
+        layout.addLayout(bar)
+        layout.addStretch()
 
         scroll.setWidget(w)
-        # 首次加载延后，避免阻塞窗口显示
-        QTimer.singleShot(80, self._load_overview)
+        QTimer.singleShot(120, self._load_about)
         return scroll
+
+    def _open_config_dir(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        cfg._ensure_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(cfg.CONFIG_DIR)))
+
+    def _copy_diagnostics(self) -> None:
+        from PyQt6.QtGui import QGuiApplication
+
+        lines = [
+            f"Podman: {self._ov_version.text()}",
+            f"API: {self._ov_api.text()}",
+            f"Rootless: {self._ov_rootless.text()}",
+            f"Cgroup: {self._ov_cgroup.text()}",
+            f"内核: {self._ov_kernel.text()}",
+            f"平台: {self._ov_platform.text()}",
+            f"驱动: {self._ov_driver.text()}",
+            f"数据目录: {self._ov_root.text()}",
+            f"Socket: {self._ov_socket.text()}",
+        ]
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        self.status_message.emit("诊断信息已复制到剪贴板")
+
+    def _load_about(self) -> None:
+        """异步加载 Podman 运行环境信息"""
+        from core.async_task import run_async
+        from ui.utils import fmt_size
+
+        def work():
+            out = {}
+            try:
+                out["version"] = self.client.version()
+            except Exception as e:
+                out["version_error"] = str(e)
+            try:
+                out["info"] = self.client.system_info()
+            except Exception as e:
+                out["info_error"] = str(e)
+            try:
+                out["df"] = self.client.system_df()
+            except Exception as e:
+                out["df_error"] = str(e)
+            return out
+
+        def done(d):
+            v = d.get("version")
+            if v:
+                comps = v.get("Components", [])
+                eng = next(
+                    (x for x in comps if x.get("Name") == "Podman Engine"), {}
+                )
+                self._ov_version.setText(eng.get("Version", "—"))
+                self._ov_api.setText(
+                    str(eng.get("Details", {}).get("APIVersion", "—"))
+                )
+                self._ov_platform.setText(
+                    v.get("Platform", {}).get("Name", "—")
+                )
+            elif "version_error" in d:
+                self._ov_version.setText("未连接")
+
+            info = d.get("info")
+            if info:
+                store = info.get("store") or {}
+                host = info.get("host") or {}
+                sec = host.get("security") or {}
+                self._ov_driver.setText(store.get("graphDriverName", "—"))
+                self._ov_root.setText(store.get("graphRoot", "—"))
+                self._ov_socket.setText(self.client.socket_path or "—")
+                self._ov_rootless.setText(
+                    "是" if sec.get("rootless") else "否"
+                )
+                self._ov_cgroup.setText(host.get("cgroupVersion", "—"))
+                self._ov_kernel.setText(host.get("kernel", "—"))
+            elif "info_error" in d:
+                self._ov_rootless.setText("—")
+
+            df = d.get("df")
+            if df:
+                imgs = df.get("Images") or []
+                ctrs = df.get("Containers") or []
+                vols = df.get("Volumes") or []
+                self._ov_images.setText(
+                    f"{len(imgs)} 个 · "
+                    f"{fmt_size(sum(x.get('Size', 0) or 0 for x in imgs))}"
+                )
+                self._ov_containers.setText(
+                    f"{len(ctrs)} 个 · "
+                    f"{fmt_size(sum(x.get('SizeRw', 0) or 0 for x in ctrs))}"
+                )
+                self._ov_volumes.setText(
+                    f"{len(vols)} 个 · "
+                    f"{fmt_size(sum((x.get('UsageData') or {}).get('Size', 0) or 0 for x in vols))}"
+                )
+
+        run_async(work, on_done=done, on_error=lambda m: None, parent=self)
 
     # ── 配置加载 ──
     def load_config(self) -> None:
@@ -703,10 +888,7 @@ class SettingsPage(QWidget):
             self.lst_mirrors.addItem(ph)
 
         if hasattr(self, "lbl_mirror_status"):
-            self.lbl_mirror_status.setText(
-                f"已配置 {count} 个加速地址" if count
-                else "当前直连官方仓库（未使用加速）"
-            )
+            self._update_mirror_status(count)
         self._update_mirror_buttons()
 
         # 代理
@@ -808,6 +990,8 @@ class SettingsPage(QWidget):
         self.cmb_preset.setCurrentIndex(0)
         self._refresh_mirror_status()
         self.status_message.emit(f"已添加 {url}")
+        self._autosave_mirrors()
+
 
     def _add_mirror(self) -> None:
         from ui.widgets import ask_text
@@ -843,6 +1027,8 @@ class SettingsPage(QWidget):
         self.lst_mirrors.setCurrentItem(item)
         self._refresh_mirror_status()
         self.status_message.emit(f"已添加 {url}")
+        self._autosave_mirrors()
+
 
     def _del_mirror(self) -> None:
         row = self.lst_mirrors.currentRow()
@@ -857,6 +1043,8 @@ class SettingsPage(QWidget):
         self._refresh_mirror_status()
         self._update_mirror_buttons()
         self.status_message.emit(f"已移除 {text}")
+        self._autosave_mirrors()
+
 
     def _move_mirror(self, delta: int) -> None:
         row = self.lst_mirrors.currentRow()
@@ -867,51 +1055,22 @@ class SettingsPage(QWidget):
         self.lst_mirrors.insertItem(new, item)
         self.lst_mirrors.setCurrentRow(new)
         self._update_mirror_buttons()
+        self._autosave_mirrors()
+
 
     def _on_proxy_toggled(self, on: bool) -> None:
         self.ed_proxy.setEnabled(on)
         self.ed_noproxy.setEnabled(on)
         self.cmb_proxy_preset.setEnabled(on)
+        self._autosave_mirrors()
+
 
     def _on_proxy_preset_selected(self, idx: int) -> None:
         url = self.cmb_proxy_preset.itemData(idx)
         if url:
             self.ed_proxy.setText(url)
+        self._autosave_mirrors()
 
-    def _save_mirror_config(self) -> None:
-        mirrors = []
-        for i in range(self.lst_mirrors.count()):
-            it = self.lst_mirrors.item(i)
-            if not (it.flags() & Qt.ItemFlag.ItemIsEnabled):
-                continue
-            mirrors.append(it.text())
-
-        try:
-            if mirrors:
-                ok, msg = cfg.safe_write_config(
-                    "registries", {"docker.io": mirrors}
-                )
-                if not ok:
-                    QMessageBox.critical(self, "保存失败", msg)
-                    return
-            else:
-                cfg.clear_registries()
-
-            if self.chk_proxy.isChecked() and self.ed_proxy.text().strip():
-                p = self.ed_proxy.text().strip()
-                ok, msg = cfg.safe_write_config(
-                    "proxy", p, p, self.ed_noproxy.text().strip()
-                )
-                if not ok:
-                    QMessageBox.critical(self, "保存失败", msg)
-                    return
-            else:
-                cfg.clear_proxy()
-        except OSError as e:
-            QMessageBox.critical(self, "保存失败", f"写入配置出错：\n{e}")
-            return
-
-        self._ask_restart("镜像加速配置已保存")
 
     def _clear_all(self) -> None:
         r = QMessageBox.question(
@@ -924,6 +1083,7 @@ class SettingsPage(QWidget):
         cfg.clear_registries()
         cfg.clear_proxy()
         self.load_config()
+        self._update_mirror_status(0)
         self.status_message.emit("配置已清除")
 
     # ── 存储操作 ──
@@ -1018,75 +1178,13 @@ class SettingsPage(QWidget):
             )
         QTimer.singleShot(500, self._refresh_service)
 
-    def _load_overview(self) -> None:
-        """异步加载概览数据（version/system_info 各约 900ms）"""
-        from core.async_task import run_async
-        from ui.utils import fmt_size
-
-        def work():
-            out = {}
-            try:
-                out["version"] = self.client.version()
-            except Exception as e:
-                out["version_error"] = str(e)
-            try:
-                out["info"] = self.client.system_info()
-            except Exception as e:
-                out["info_error"] = str(e)
-            try:
-                out["df"] = self.client.system_df()
-            except Exception as e:
-                out["df_error"] = str(e)
-            return out
-
-        def done(d):
-            v = d.get("version")
-            if v:
-                comps = v.get("Components", [])
-                eng = next((x for x in comps if x.get("Name") == "Podman Engine"), {})
-                self._ov_version.setText(eng.get("Version", "—"))
-                self._ov_api.setText(str(eng.get("Details", {}).get("APIVersion", "—")))
-                self._ov_platform.setText(v.get("Platform", {}).get("Name", "—"))
-            elif "version_error" in d:
-                self._ov_version.setText(f"失败: {d['version_error']}")
-
-            info = d.get("info")
-            if info:
-                store = info.get("store") or {}
-                host = info.get("host") or {}
-                sec = host.get("security") or {}
-                self._ov_driver.setText(store.get("graphDriverName", "—"))
-                self._ov_root.setText(store.get("graphRoot", "—"))
-                self._ov_runroot.setText(store.get("runRoot", "—"))
-                self._ov_socket.setText(self.client.socket_path or "—")
-                self._ov_rootless.setText("是" if sec.get("rootless") else "否")
-                self._ov_cgroup.setText(host.get("cgroupVersion", "—"))
-                self._ov_os.setText(str(host.get("os", "—"))[:48])
-                self._ov_kernel.setText(host.get("kernel", "—"))
-
-            df = d.get("df")
-            if df:
-                imgs = df.get("Images") or []
-                ctrs = df.get("Containers") or []
-                vols = df.get("Volumes") or []
-                self._ov_images.setText(
-                    f"{len(imgs)} 个 · {fmt_size(sum(x.get('Size',0) or 0 for x in imgs))}"
-                )
-                self._ov_containers.setText(
-                    f"{len(ctrs)} 个 · {fmt_size(sum(x.get('SizeRw',0) or 0 for x in ctrs))}"
-                )
-                self._ov_volumes.setText(
-                    f"{len(vols)} 个 · {fmt_size(sum((x.get('UsageData') or {}).get('Size',0) or 0 for x in vols))}"
-                )
-
-        def err(msg):
-            self._ov_version.setText(f"加载失败: {msg}")
-
-        run_async(work, on_done=done, on_error=err, parent=self)
-
     # ── 服务 ──
     def _build_service_tab(self) -> QWidget:
-        """Podman 服务与资源限制"""
+        """Podman 服务
+
+        设计原则：默认用户级（rootless），一屏看完全部信息，
+        不需要用户理解 systemd。系统级服务收进「高级」。
+        """
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1096,76 +1194,113 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
-        # ══════════ Podman 服务（用户级 + 系统级合并）══════════
-        layout.addWidget(self._build_services_group())
+        # ══════════ 状态卡片 ══════════
+        card = QFrame()
+        card.setObjectName("serviceCard")
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(16, 14, 16, 14)
+        cv.setSpacing(10)
 
-        # ══════════ 资源限制（放最后）══════════
-        layout.addWidget(self._build_memory_group())
-
-        layout.addStretch()
-
-        scroll.setWidget(w)
-        QTimer.singleShot(80, self._refresh_service)
-        return scroll
-
-    def _build_services_group(self) -> QWidget:
-        """服务管理：用户级 + 系统级 合并为一个区块"""
-        grp = QGroupBox("Podman 服务")
-        v = QVBoxLayout(grp)
-        v.setContentsMargins(12, 12, 12, 10)
-        v.setSpacing(10)
-
-        # ── 用户级（当前使用）──
-        row1 = QHBoxLayout()
-        row1.setSpacing(10)
-
-        self.chk_autostart = QCheckBox("开机自启（用户级）")
-        self.chk_autostart.setToolTip(
-            "登录系统时自动启动 podman.socket（rootless，无需提权）"
-        )
-        self.chk_autostart.toggled.connect(self._on_autostart_toggled)
-        row1.addWidget(self.chk_autostart)
+        head = QHBoxLayout()
+        head.setSpacing(10)
 
         self.lbl_user_state = QLabel("—")
-        self.lbl_user_state.setObjectName("serviceState")
-        row1.addWidget(self.lbl_user_state)
+        self.lbl_user_state.setObjectName("serviceStateBig")
+        head.addWidget(self.lbl_user_state)
 
-        row1.addStretch()
+        head.addStretch()
 
-        for text, slot in [
-            ("刷新", self._refresh_service),
-            ("启动", lambda: self._service_action("start")),
-            ("停止", lambda: self._service_action("stop")),
-            ("重启", lambda: self._service_action("restart")),
-        ]:
-            b = QPushButton(text)
-            b.clicked.connect(slot)
-            row1.addWidget(b)
+        self.lbl_service_version = QLabel("")
+        self.lbl_service_version.setObjectName("hintLabel")
+        head.addWidget(self.lbl_service_version)
 
-        v.addLayout(row1)
+        cv.addLayout(head)
 
-        # ── 分隔线 ──
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        v.addWidget(line)
+        # 操作按钮
+        row = QHBoxLayout()
+        row.setSpacing(8)
 
-        # ── 系统级（rootful，需提权）──
-        row2 = QHBoxLayout()
-        row2.setSpacing(10)
+        self.btn_svc_start = QPushButton("启动")
+        self.btn_svc_start.clicked.connect(lambda: self._service_action("start"))
+        row.addWidget(self.btn_svc_start)
 
-        self.chk_sys_autostart = QCheckBox("开机自启（系统级）")
+        self.btn_svc_stop = QPushButton("停止")
+        self.btn_svc_stop.clicked.connect(lambda: self._service_action("stop"))
+        row.addWidget(self.btn_svc_stop)
+
+        self.btn_svc_restart = QPushButton("重启")
+        self.btn_svc_restart.clicked.connect(
+            lambda: self._service_action("restart")
+        )
+        row.addWidget(self.btn_svc_restart)
+
+        row.addStretch()
+        cv.addLayout(row)
+
+        # 登录自启（默认开启，应用启动时也会自动确保）
+        self.chk_autostart = QCheckBox("登录时自动启动")
+        self.chk_autostart.setToolTip(
+            "登录系统时自动启动 podman.socket（用户级，无需提权）"
+        )
+        self.chk_autostart.toggled.connect(self._on_autostart_toggled)
+        cv.addWidget(self.chk_autostart)
+
+        self.lbl_service_hint = QLabel("")
+        self.lbl_service_hint.setObjectName("hintLabel")
+        self.lbl_service_hint.setWordWrap(True)
+        cv.addWidget(self.lbl_service_hint)
+
+        layout.addWidget(card)
+
+        # ══════════ 未安装引导（默认隐藏）══════════
+        self.box_not_installed = QGroupBox("未检测到 Podman")
+        nv = QVBoxLayout(self.box_not_installed)
+        nv.setContentsMargins(14, 12, 14, 12)
+        nv.setSpacing(10)
+
+        self.lbl_install_hint = QLabel(
+            "系统中没有找到 Podman，无法管理容器。"
+            "点下方按钮自动安装（会弹出系统授权框）。"
+        )
+        self.lbl_install_hint.setWordWrap(True)
+        nv.addWidget(self.lbl_install_hint)
+
+        inst_row = QHBoxLayout()
+        inst_row.setSpacing(8)
+        self.btn_install = QPushButton(icon("download"), "安装 Podman")
+        self.btn_install.clicked.connect(self._install_podman)
+        inst_row.addWidget(self.btn_install)
+
+        btn_recheck = QPushButton("重新检测")
+        btn_recheck.clicked.connect(self._refresh_service)
+        inst_row.addWidget(btn_recheck)
+        inst_row.addStretch()
+        nv.addLayout(inst_row)
+
+        self.box_not_installed.hide()
+        layout.addWidget(self.box_not_installed)
+
+        # ══════════ 高级：系统级服务 ══════════
+        self.box_advanced = QGroupBox("高级")
+        av = QVBoxLayout(self.box_advanced)
+        av.setContentsMargins(12, 10, 12, 10)
+        av.setSpacing(8)
+
+        adv_row = QHBoxLayout()
+        adv_row.setSpacing(10)
+
+        self.chk_sys_autostart = QCheckBox("开机自启（系统级 rootful）")
         self.chk_sys_autostart.setToolTip(
-            "开机时启动系统级 podman.socket（rootful，需要管理员授权）"
+            "开机时启动系统级 podman.socket，需要管理员授权"
         )
         self.chk_sys_autostart.toggled.connect(self._on_sys_autostart_toggled)
-        row2.addWidget(self.chk_sys_autostart)
+        adv_row.addWidget(self.chk_sys_autostart)
 
         self.lbl_sys_state = QLabel("—")
         self.lbl_sys_state.setObjectName("serviceState")
-        row2.addWidget(self.lbl_sys_state)
+        adv_row.addWidget(self.lbl_sys_state)
 
-        row2.addStretch()
+        adv_row.addStretch()
 
         for text, slot in [
             ("启动", lambda: self._sys_service_action("start")),
@@ -1175,147 +1310,235 @@ class SettingsPage(QWidget):
             b = QPushButton(text)
             b.setToolTip("需要管理员权限，会弹出授权框")
             b.clicked.connect(slot)
-            row2.addWidget(b)
+            adv_row.addWidget(b)
 
-        v.addLayout(row2)
+        av.addLayout(adv_row)
 
-        # ── 状态提示 ──
-        self.lbl_service_hint = QLabel("")
-        self.lbl_service_hint.setObjectName("hintLabel")
-        self.lbl_service_hint.setWordWrap(True)
-        v.addWidget(self.lbl_service_hint)
+        adv_hint = QLabel(
+            "系统级服务以 root 运行，容器与用户级互不可见。"
+            "绝大多数场景不需要开启。"
+        )
+        adv_hint.setObjectName("hintLabel")
+        adv_hint.setWordWrap(True)
+        av.addWidget(adv_hint)
 
-        return grp
+        self.btn_advanced = QPushButton("显示高级选项")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setFlat(True)
+        self.btn_advanced.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_advanced.toggled.connect(self._toggle_advanced)
+        adv_row = QHBoxLayout()
+        adv_row.setContentsMargins(0, 0, 0, 0)
+        adv_row.addWidget(self.btn_advanced)
+        adv_row.addStretch()
+        layout.addLayout(adv_row)
 
-    # ── 内存限制区块 ──
-    def _build_memory_group(self) -> QWidget:
-        """资源限制：实时图表 + 阈值设置（放最后）"""
+        self.box_advanced.hide()
+        layout.addWidget(self.box_advanced)
+
+        layout.addStretch()
+
+        scroll.setWidget(w)
+        QTimer.singleShot(80, self._refresh_service)
+        return scroll
+
+    def _toggle_advanced(self, on: bool) -> None:
+        self.box_advanced.setVisible(on)
+        self.btn_advanced.setText("隐藏高级选项" if on else "显示高级选项")
+
+    def _install_podman(self) -> None:
+        """引导安装 podman"""
+        from core.async_task import run_async
+
+        self.btn_install.setEnabled(False)
+        self.lbl_install_hint.setText("正在安装…（请在授权框中确认）")
+
+        def work():
+            return cfg.install_podman()
+
+        def done(res):
+            ok, msg = res
+            self.btn_install.setEnabled(True)
+            if ok:
+                self.lbl_install_hint.setText("安装完成，正在启动服务…")
+                cfg.ensure_user_service()
+                self.client.check_connection()
+                QTimer.singleShot(600, self._refresh_service)
+            else:
+                self.lbl_install_hint.setText(f"安装失败：{msg}")
+                QMessageBox.warning(
+                    self, "安装失败",
+                    f"{msg}\n\n可手动安装：\n"
+                    "Arch: sudo pacman -S podman\n"
+                    "Debian/Ubuntu: sudo apt install podman\n"
+                    "Fedora: sudo dnf install podman",
+                )
+
+        def error(msg):
+            self.btn_install.setEnabled(True)
+            self.lbl_install_hint.setText(f"安装失败：{msg}")
+
+        run_async(work, on_done=done, on_error=error, parent=self)
+
+    # ── 资源 ──
+    def _build_resources_tab(self) -> QWidget:
+        """资源：内存上限 + 实时占用
+
+        交互按大家熟悉的「滑块 + 快捷档位」来做
+        （Docker Desktop / OrbStack 都是这个模式）：
+        想粗略调就拖滑块，想快点就点档位按钮。
+        """
         from ui.charts import ContainerRows, MemorySummary
 
-        grp = QGroupBox("资源限制 · 内存")
-        v = QVBoxLayout(grp)
-        v.setContentsMargins(12, 12, 12, 10)
-        v.setSpacing(10)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        # ── 实时图表 ──
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        # ══════════ 实时占用 ══════════
+        g1 = QGroupBox("当前占用")
+        v1 = QVBoxLayout(g1)
+        v1.setContentsMargins(12, 12, 12, 10)
+        v1.setSpacing(10)
+
         self.mem_chart = MemorySummary()
-        v.addWidget(self.mem_chart)
+        v1.addWidget(self.mem_chart)
 
-        # ── 阈值设置（分段按钮，无滑块）──
-        limit_box = QFrame()
-        limit_box.setObjectName("limitBox")
-        lb = QVBoxLayout(limit_box)
-        lb.setContentsMargins(14, 10, 14, 10)
-        lb.setSpacing(10)
+        self.mem_bars = ContainerRows()
+        v1.addWidget(self.mem_bars)
 
-        # 标题行
-        head = QHBoxLayout()
-        head.setSpacing(8)
+        layout.addWidget(g1)
 
-        lbl_title = QLabel("启动阈值")
-        lbl_title.setStyleSheet("font-weight: 600;")
-        head.addWidget(lbl_title)
+        # ══════════ 内存上限 ══════════
+        g2 = QGroupBox("内存上限")
+        v2 = QVBoxLayout(g2)
+        v2.setContentsMargins(12, 12, 12, 10)
+        v2.setSpacing(10)
+
+        # 数值行：当前值 + 说明
+        val_row = QHBoxLayout()
+        val_row.setSpacing(8)
+
+        self.lbl_mem_value = QLabel("不限制")
+        self.lbl_mem_value.setObjectName("memValue")
+        val_row.addWidget(self.lbl_mem_value)
 
         self.lbl_mem_hint = QLabel("")
         self.lbl_mem_hint.setObjectName("hintLabel")
-        head.addWidget(self.lbl_mem_hint, 1)
+        self.lbl_mem_hint.setWordWrap(True)
+        val_row.addWidget(self.lbl_mem_hint, 1)
 
-        self.btn_apply_limit = QPushButton("应用")
-        self.btn_apply_limit.setFixedSize(64, 28)
-        self.btn_apply_limit.setEnabled(False)
-        self.btn_apply_limit.clicked.connect(self._apply_mem_limit)
-        head.addWidget(self.btn_apply_limit)
+        v2.addLayout(val_row)
 
-        lb.addLayout(head)
+        # 滑块
+        self.sld_mem = QSlider(Qt.Orientation.Horizontal)
+        self.sld_mem.setRange(0, 100)      # 0 = 不限制，其余按物理内存换算
+        self.sld_mem.setSingleStep(1)
+        self.sld_mem.setPageStep(5)
+        self.sld_mem.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.sld_mem.valueChanged.connect(self._on_mem_slider)
+        self.sld_mem.sliderReleased.connect(self._apply_mem_limit)
+        v2.addWidget(self.sld_mem)
 
-        # 分段按钮组
+        # 刻度说明
+        scale = QHBoxLayout()
+        scale.setSpacing(0)
+        self.lbl_scale_min = QLabel("不限制")
+        self.lbl_scale_min.setObjectName("hintLabel")
+        scale.addWidget(self.lbl_scale_min)
+        scale.addStretch()
+        self.lbl_scale_max = QLabel("")
+        self.lbl_scale_max.setObjectName("hintLabel")
+        scale.addWidget(self.lbl_scale_max)
+        v2.addLayout(scale)
+
+        # 快捷档位
         seg = QHBoxLayout()
-        seg.setSpacing(8)
-
+        seg.setSpacing(6)
         self._preset_buttons: list[QPushButton] = []
         self._preset_values: list[int] = []
-
-        # 先建空容器，实际按钮在 _rebuild_presets() 里按物理内存生成
         self._seg_layout = seg
-        lb.addLayout(seg)
+        v2.addLayout(seg)
 
-        # 内存总量获取后重建（延后到首次刷新）
+        # 说明
+        note = QLabel(
+            "上限只做启动前检查：新容器会让已分配内存超过上限时先提醒，"
+            "避免把系统内存吃满。已在运行的容器不受影响。"
+        )
+        note.setObjectName("hintLabel")
+        note.setWordWrap(True)
+        v2.addWidget(note)
+
+        layout.addWidget(g2)
+        layout.addStretch()
+
         self._presets_built = False
+        self._mem_host_gb = 0.0
+        self._mem_dirty = False
 
-        v.addWidget(limit_box)
+        scroll.setWidget(w)
+        QTimer.singleShot(80, self._refresh_memory)
+        return scroll
 
-        # ── 各容器实时占用 ──
-        self.mem_bars = ContainerRows()
-        v.addWidget(self.mem_bars)
+    def _on_mem_slider(self, value: int) -> None:
+        """拖动滑块：只更新显示，松手才落盘
 
-        return grp
+        滑块值直接就是 GB（0 = 不限制），不做换算 ——
+        用户拖到哪就是多少，不用猜。
+        """
+        self._mem_dirty = True
+        self.lbl_mem_value.setText("不限制" if value <= 0 else f"{value} GB")
+        self._sync_preset_highlight(value)
+
+    def _sync_preset_highlight(self, gb: int) -> None:
+        for b in self._preset_buttons:
+            b.setChecked(b.property("segGb") == gb)
+
 
     def _rebuild_presets(self, host_gb: float) -> None:
-        """按物理内存生成等距预设档位
+        """按物理内存生成档位与滑块范围
 
         规则：
-          · 只使用「整齐」的档位值（1/2/4/8/12/16/24/32/48/64/96/128 GB）
-          · 全部档位 ≤ 物理内存
-          · 至少 4 档，最多 7 档
-          · 相邻档位比例尽量均匀，避免 2→4→6→8→10→14 这种跳跃
-
-        示例：
-          8G  物理 → 不限制 / 1G / 2G / 4G / 6G / 8G
-          16G 物理 → 不限制 / 2G / 4G / 8G / 12G / 16G
-          32G 物理 → 不限制 / 4G / 8G / 16G / 24G / 32G
-          64G 物理 → 不限制 / 8G / 16G / 32G / 48G / 64G
+          · 只出现「整齐」的档位（1/2/4/8/12/16/24/32/48/64…GB）
+          · 全部 ≤ 物理内存
+          · 最多 6 档，避免一排按钮把界面撑爆
         """
         if self._presets_built or host_gb <= 0:
             return
 
-        host = int(host_gb)
-        if host < 2:
-            host = 2
+        host = max(2, int(host_gb))
+        self._mem_host_gb = float(host)
 
-        # 标准档位（等比 1-2-4 序列 + 3/4 位置）
         LADDER = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+        usable = [v for v in LADDER if v <= host] or [1]
+        picked = usable[-6:] if len(usable) > 6 else usable
 
-        # 所有 ≤ 物理内存的档位
-        usable = [v for v in LADDER if v <= host]
-        if not usable:
-            usable = [1]
+        # 滑块：0 = 不限制，其余直接是 GB
+        self.sld_mem.blockSignals(True)
+        self.sld_mem.setRange(0, host)
+        self.sld_mem.setPageStep(max(1, host // 20))
+        self.sld_mem.blockSignals(False)
+        self.lbl_scale_max.setText(f"{host} GB（全部）")
 
-        # 挑最多 6 档：优先保留最大档，再从大到小补齐
-        MAX_SLOTS = 6
-        if len(usable) <= MAX_SLOTS:
-            picked = usable
-        else:
-            picked = usable[-MAX_SLOTS:]
-
-        # 至少保证 4 档（物理内存很小时从 ladder 低端补）
-        while len(picked) < 4:
-            for v in LADDER:
-                if v <= host and v not in picked:
-                    picked.append(v)
-                    break
-            else:
-                break
-            picked.sort()
-
-        self._preset_values = [0] + picked
-
-        # 清空旧按钮
+        # 清空旧档位按钮
         while self._seg_layout.count():
             item = self._seg_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._preset_buttons.clear()
 
-        # 重建
-        for i, gb in enumerate(self._preset_values):
+        self._preset_values = [0] + picked
+        for gb in self._preset_values:
             text = "不限制" if gb == 0 else f"{gb}G"
             b = QPushButton(text)
             b.setCheckable(True)
             b.setFixedHeight(30)
-            b.setMinimumWidth(52)
+            b.setMinimumWidth(56)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setProperty("segFirst", i == 0)
-            b.setProperty("segLast", i == len(self._preset_values) - 1)
             b.setProperty("segGb", gb)
             b.clicked.connect(lambda _=False, g=gb: self._select_preset(g))
             self._seg_layout.addWidget(b)
@@ -1325,70 +1548,35 @@ class SettingsPage(QWidget):
         self._presets_built = True
 
     def _select_preset(self, gb: int) -> None:
-        """点击分段按钮"""
-        if not self._preset_buttons:
-            return
-        for b in self._preset_buttons:
-            b.setChecked(b.property("segGb") == gb)
-        current = cfg.get_memory_limit_gb()
-        self.btn_apply_limit.setEnabled(abs(gb - current) > 0.01)
+        """点档位按钮：同步滑块并立即应用"""
+        self.sld_mem.blockSignals(True)
+        self.sld_mem.setValue(gb)
+        self.sld_mem.blockSignals(False)
+        self.lbl_mem_value.setText("不限制" if gb <= 0 else f"{gb} GB")
+        self._sync_preset_highlight(gb)
+        self._apply_mem_limit()
 
     def _current_preset_gb(self) -> int:
-        """当前选中的阈值"""
-        for b in self._preset_buttons:
-            if b.isChecked():
-                return int(b.property("segGb"))
-        return int(round(cfg.get_memory_limit_gb()))
+        return int(self.sld_mem.value())
 
     def _apply_mem_limit(self) -> None:
-        """应用阈值设置"""
+        """把滑块当前值写入配置"""
         value = float(self._current_preset_gb())
-        cfg.set_memory_limit_gb(value)
-        self.btn_apply_limit.setEnabled(False)
-        self._refresh_memory()
-
-        if value <= 0:
-            self.status_message.emit("已取消内存限制")
-            QMessageBox.information(
-                self, "已保存",
-                "已取消内存限制，容器启动不再检查内存。",
-            )
+        current = float(cfg.get_memory_limit_gb())
+        if abs(value - current) < 0.01 and not self._mem_dirty:
             return
 
-        self.status_message.emit(f"内存阈值已设为 {value:.0f} GB")
+        cfg.set_memory_limit_gb(value)
+        self._mem_dirty = False
 
-        r = QMessageBox.question(
-            self, "阈值已保存",
-            f"启动阈值已设为 {value:.0f} GB。\n\n"
-            f"此设置仅影响本程序的启动前检查，"
-            f"不需要重启 Podman 服务即可生效。\n\n"
-            f"是否重启服务以应用所有配置？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if r == QMessageBox.StandardButton.Yes:
-            self._do_verified_restart()
-
-    def _do_verified_restart(self) -> None:
-        """重启服务并验证"""
-        self.status_message.emit("正在重启 Podman 服务…")
-        self.btn_apply_limit.setEnabled(False)
-
-        ok, msg = cfg.restart_and_verify(timeout=20)
-        if ok:
-            self.status_message.emit(msg)
-            from core.notify import notifier
-            notifier().info("Podman 服务已重启", "连接正常")
+        if value <= 0:
+            self.status_message.emit("已取消内存上限")
         else:
-            self.status_message.emit("服务启动失败")
-            QMessageBox.critical(
-                self, "服务启动失败",
-                msg + "\n\n可在下方手动重试，或检查配置备份（*.bak）。",
-            )
-        QTimer.singleShot(400, self._refresh_service)
+            self.status_message.emit(f"内存上限已设为 {value:.0f} GB")
+        self._refresh_memory()
 
     def _refresh_memory(self) -> None:
-        """刷新内存图表（每秒调用）"""
+        """刷新内存图表与上限显示"""
         from core import podman_config as pcfg
 
         try:
@@ -1406,43 +1594,67 @@ class SettingsPage(QWidget):
             vms=u.get("vms"),
         )
 
-        # 首次拿到物理内存后生成预设
         if not self._presets_built and u["host_gb"] > 0:
             self._rebuild_presets(u["host_gb"])
 
-        # 同步按钮（仅在未编辑时）
-        if not self.btn_apply_limit.isEnabled() and self._preset_buttons:
+        # 用户正在拖动时不要抢他的值
+        if not self._mem_dirty and self._presets_built:
             cur = int(round(u["limit_gb"]))
-            closest = min(self._preset_values, key=lambda x: abs(x - cur))
-            for b in self._preset_buttons:
-                b.setChecked(b.property("segGb") == closest)
+            self.sld_mem.blockSignals(True)
+            self.sld_mem.setValue(cur)
+            self.sld_mem.blockSignals(False)
+            self.lbl_mem_value.setText(
+                "不限制" if cur <= 0 else f"{cur} GB"
+            )
+            self._sync_preset_highlight(cur)
 
         # 提示
         if u["limit_gb"] <= 0:
-            self.lbl_mem_hint.setText("未设置阈值（不检查）")
+            self.lbl_mem_hint.setText(
+                f"未设置上限 · 已分配 {u['declared_gb']:.1f} GB"
+            )
             self.lbl_mem_hint.setStyleSheet("")
         elif u["declared_gb"] > u["limit_gb"]:
             self.lbl_mem_hint.setText(
-                f"⚠ 已超限 {u['declared_gb'] - u['limit_gb']:.2f} GB"
+                f"已超出 {u['declared_gb'] - u['limit_gb']:.1f} GB"
             )
             self.lbl_mem_hint.setStyleSheet("color: #e74c3c;")
         else:
             remain = u["limit_gb"] - u["declared_gb"]
             self.lbl_mem_hint.setText(
-                f"剩余 {remain:.2f} GB 可分配 · 已用 {u['declared_gb']:.2f} GB"
+                f"剩余 {remain:.1f} GB · 已分配 {u['declared_gb']:.1f} GB"
             )
             self.lbl_mem_hint.setStyleSheet("")
 
+    def _do_verified_restart(self) -> None:
+        """重启服务并验证"""
+        self.status_message.emit("正在重启 Podman 服务…")
+
+        ok, msg = cfg.restart_and_verify(timeout=20)
+        if ok:
+            self.status_message.emit(msg)
+            from core.notify import notifier
+            notifier().info("Podman 服务已重启", "连接正常")
+        else:
+            self.status_message.emit("服务启动失败")
+            QMessageBox.critical(
+                self, "服务启动失败",
+                msg + "\n\n可在下方手动重试，或检查配置备份（*.bak）。",
+            )
+        QTimer.singleShot(400, self._refresh_service)
+
+    # tab 索引：0 服务 / 1 资源 / 2 镜像加速 / 3 存储 / 4 关于
+    TAB_RESOURCES = 1
+
     def _on_tab_changed(self, idx: int) -> None:
-        if idx == 1:
+        if idx == self.TAB_RESOURCES:
             self._refresh_memory()
-            self._refresh_service()
 
     def _tick_memory(self) -> None:
-        """每秒刷新（仅服务页可见时）"""
+        """每秒刷新（仅资源页可见时）"""
         if not self.isVisible():
             return
-        if self.tabs.currentIndex() != 1:
+        if self.tabs.currentIndex() != self.TAB_RESOURCES:
             return
         self._refresh_memory()
 
@@ -1475,7 +1687,25 @@ class SettingsPage(QWidget):
         label.setTextFormat(Qt.TextFormat.RichText)
 
     def _refresh_service(self) -> None:
-        """刷新服务状态"""
+        """刷新服务状态（含「未安装」分支）"""
+        installed = cfg.podman_installed()
+
+        # 未安装：整块状态卡片换成安装引导
+        self.box_not_installed.setVisible(not installed)
+        if not installed:
+            for wdg in (self.lbl_user_state, self.lbl_service_version,
+                        self.btn_svc_start, self.btn_svc_stop,
+                        self.btn_svc_restart, self.chk_autostart,
+                        self.lbl_service_hint):
+                wdg.setVisible(False)
+            return
+
+        for wdg in (self.lbl_user_state, self.lbl_service_version,
+                    self.btn_svc_start, self.btn_svc_stop,
+                    self.btn_svc_restart, self.chk_autostart,
+                    self.lbl_service_hint):
+            wdg.setVisible(True)
+
         st = cfg.autostart_status()
 
         blocked = self.chk_autostart.blockSignals(True)
@@ -1485,6 +1715,15 @@ class SettingsPage(QWidget):
         text, color, ikey = self._active_text(st["active_raw"])
         self._set_state_label(self.lbl_user_state, text, color, ikey)
 
+        ver = cfg.podman_version()
+        self.lbl_service_version.setText(f"Podman {ver}" if ver else "")
+
+        # 按钮按状态启停，避免点了没反应
+        running = st["active_raw"] == "active"
+        self.btn_svc_start.setEnabled(not running)
+        self.btn_svc_stop.setEnabled(running)
+        self.btn_svc_restart.setEnabled(running)
+
         sst = cfg.system_service_status()
         blocked = self.chk_sys_autostart.blockSignals(True)
         self.chk_sys_autostart.setChecked(sst["enabled"])
@@ -1493,14 +1732,14 @@ class SettingsPage(QWidget):
         text2, color2, ikey2 = self._active_text(sst["active_raw"])
         self._set_state_label(self.lbl_sys_state, text2, color2, ikey2)
 
-        if st["active"]:
+        if running:
             self.lbl_service_hint.setText(
-                f"当前连接：{self.client.socket_path}"
+                f"已连接 · {self.client.socket_path}"
             )
         else:
             self.lbl_service_hint.setText(
-                "服务未运行。点击「启动」，或执行："
-                "systemctl --user start podman.socket"
+                "服务未运行，点「启动」即可。"
+                "（命令行等价于 systemctl --user start podman.socket）"
             )
 
         if hasattr(self, "mem_chart"):

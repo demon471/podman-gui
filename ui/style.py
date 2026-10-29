@@ -28,6 +28,7 @@ def _font_sizes() -> dict[str, str]:
 
     - base  : 系统默认（如 10pt）
     - small : base - 1pt（提示、统计等次要文字）
+    - large : base + 4pt（卡片主数值、关于页标题）
     - mono  : base    （日志/终端等宽文字，与正文同大）
     """
     app = QApplication.instance()
@@ -38,6 +39,7 @@ def _font_sizes() -> dict[str, str]:
     return {
         "base": f"{pt}pt",
         "small": f"{max(8, pt - 1)}pt",
+        "large": f"{pt + 4}pt",      # 卡片主数值 / 关于页标题
         "mono": f"{pt}pt",
     }
 
@@ -328,6 +330,42 @@ QComboBox QAbstractItemView {{
     selection-background-color: {highlight};
     selection-color: {highlight_text};
     outline: none;
+}}
+
+/* 设置 · 服务状态卡片 */
+QFrame#serviceCard {{
+    background-color: {base};
+    border: 1px solid {border};
+    border-radius: 6px;
+}}
+
+QLabel#serviceStateBig {{
+    font-size: {fs['large']};
+    font-weight: 600;
+}}
+
+QLabel#serviceState {{
+    font-size: {fs['small']};
+}}
+
+/* 设置 · 资源页上限数值 */
+QLabel#memValue {{
+    font-size: {fs['large']};
+    font-weight: 600;
+    min-width: 84px;
+}}
+
+/* 设置 · 镜像加速状态行 */
+QLabel#mirrorStatus {{
+    color: {button_text};
+    font-size: {fs['small']};
+    padding: 2px 0;
+}}
+
+/* 设置 · 关于页标题 */
+QLabel#aboutTitle {{
+    font-size: {fs['large']};
+    font-weight: 600;
 }}
 
 /* 忙碌遮罩（重启等耗时操作时覆盖整个对话框） */
