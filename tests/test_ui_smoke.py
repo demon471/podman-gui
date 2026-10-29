@@ -497,6 +497,97 @@ class TestTrayMenuStability:
         src = self._src()
         assert "lambda *_: self.quit_app.emit()" in src
 
+    def test_menu_built_when_no_containers(self, qapp):
+        """回归：空容器列表时菜单也必须建出来
+
+        曾经用 () 当 _menu_sig 初始值，而空列表的指纹正好也是 ()，
+        被判成「内容没变」直接跳过 —— 菜单一个项都没有，
+        右键看起来就是完全失效。
+        """
+        from PyQt6.QtCore import QObject, pyqtSignal
+        from PyQt6.QtWidgets import QMenu
+
+        from ui.tray import TrayIcon
+
+        class Stub(QObject):
+            show_window = pyqtSignal()
+            quit_app = pyqtSignal()
+            _menu_signature = TrayIcon._menu_signature
+            _rebuild_menu = TrayIcon._rebuild_menu
+
+        st = Stub()
+        st.menu = QMenu()
+        st._containers = []
+        st._menu_sig = None          # 哨兵：还没构建过
+        st._menu_dirty = False
+
+        st._rebuild_menu()
+
+        texts = [a.text() for a in st.menu.actions()]
+        assert any("退出" in t for t in texts), (
+            f"空容器时菜单缺「退出」，实际 {texts}"
+        )
+        assert any("显示主窗口" in t for t in texts), texts
+
+    def test_signature_sentinel_is_none(self):
+        """初始指纹必须是 None，不能是空元组"""
+        src = self._src()
+        assert "_menu_sig: tuple | None = None" in src
+
+    def test_no_rebuild_when_signature_unchanged(self, qapp):
+        from PyQt6.QtCore import QObject, pyqtSignal
+        from PyQt6.QtWidgets import QMenu
+
+        from ui.tray import TrayIcon
+
+        class Stub(QObject):
+            show_window = pyqtSignal()
+            quit_app = pyqtSignal()
+            _menu_signature = TrayIcon._menu_signature
+            _rebuild_menu = TrayIcon._rebuild_menu
+
+        st = Stub()
+        st.menu = QMenu()
+        st._containers = []
+        st._menu_sig = None
+        st._menu_dirty = False
+        st._rebuild_menu()
+
+        before = [a.text() for a in st.menu.actions()]
+        st._rebuild_menu()
+        assert [a.text() for a in st.menu.actions()] == before
+
+    def test_skip_rebuild_while_visible(self, qapp):
+        """菜单开着时改动数据：不能重建，只标脏"""
+        from PyQt6.QtCore import QObject, pyqtSignal
+        from PyQt6.QtWidgets import QMenu
+
+        from ui.tray import TrayIcon
+
+        class Stub(QObject):
+            show_window = pyqtSignal()
+            quit_app = pyqtSignal()
+            _menu_signature = TrayIcon._menu_signature
+            _rebuild_menu = TrayIcon._rebuild_menu
+
+        st = Stub()
+        st.menu = QMenu()
+        st._containers = []
+        st._menu_sig = None
+        st._menu_dirty = False
+        st._rebuild_menu()
+
+        before = [a.text() for a in st.menu.actions()]
+        st.menu.show()
+        st._menu_sig = ("changed",)      # 伪造数据变化
+        st._rebuild_menu()
+
+        assert st._menu_dirty is True
+        assert [a.text() for a in st.menu.actions()] == before, (
+            "菜单可见时不应被清空重建"
+        )
+        st.menu.hide()
+
 
 class TestToolbarDangerColor:
     """工具栏删除按钮不再用红色

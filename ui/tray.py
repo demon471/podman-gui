@@ -77,7 +77,11 @@ class TrayIcon(QObject):
         # 不要在 aboutToShow 里 menu.clear() 重建 ——
         # 菜单正在弹出时销毁 QAction，KDE/Wayland 下点击会落空，
         # 用户看到的就是「点退出没反应」。改成数据刷新后重建。
-        self._menu_sig: tuple = ()
+        # None 表示「还没构建过」。
+        # 不能用 () 当初始值 —— 空容器列表的指纹正好也是 ()，
+        # 会被判成「内容没变」而直接跳过，导致菜单一个项都没有，
+        # 右键看起来就是完全失效。
+        self._menu_sig: tuple | None = None
         self._menu_dirty = False
         self._rebuild_menu()
         # 菜单关掉后，如果期间有更新就补建一次
@@ -182,7 +186,7 @@ class TrayIcon(QObject):
             return
 
         sig = self._menu_signature()
-        if sig == self._menu_sig:
+        if self._menu_sig is not None and sig == self._menu_sig:
             return
         self._menu_sig = sig
         self._menu_dirty = False
