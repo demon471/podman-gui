@@ -157,6 +157,7 @@ def _sync_ssh_config() -> None:
         pass
 
 
+
 def used_host_ports() -> set[int]:
     """所有 VM 已占用的宿主机端口
 
@@ -231,20 +232,42 @@ class VM:
 
     @property
     def ssh_port(self) -> int:
-        """SSH 转发端口"""
+        """SSH 端口（网桥模式固定 22，SLIRP 模式是宿主转发端口）"""
+        from core.vm import bridge
+
+        if bridge.ready():
+            return 22
         for f in self.spec.forwards:
             if f.guest_port == 22:
                 return f.host_port
         return 0
 
+    @property
+    def ssh_host(self) -> str:
+        """SSH 目标主机
+
+        共享网桥模式下直接用 guest 自己的 IP（宿主机可达）；
+        否则只能走 127.0.0.1 的端口转发。
+        """
+        from core.vm import bridge
+
+        if bridge.ready():
+            ip = bridge.lease_ip(self.spec.name)
+            if ip:
+                return ip
+        return "127.0.0.1"
+
     def ssh_command(self) -> str:
+        host = self.ssh_host
         port = self.ssh_port
         if not port:
             return ""
+        # 网桥模式下端口就是 22，不必再写 -p
+        port_arg = "" if port == 22 else f"-p {port} "
         return (
-            f"ssh -i {self.ssh_key} -p {port} "
+            f"ssh -i {self.ssh_key} {port_arg}"
             f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"{self.spec.username}@127.0.0.1"
+            f"{self.spec.username}@{host}"
         )
 
     def http_forwards(self) -> list[qemu.PortForward]:
@@ -622,7 +645,9 @@ def start_vm(vm: VM, *, vnc: int | None = None, check_memory: bool = True) -> tu
         try:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             s.settimeout(1.5)
-            s.connect(("127.0.0.1", vm.ssh_port))
+            # 网桥模式下 guest 有自己的 IP，端口也是 22，
+            # 连 127.0.0.1:22 只会打到宿主机自己
+            s.connect((vm.ssh_host, vm.ssh_port))
             banner = s.recv(64)
             s.close()
             if b"SSH-" in banner:
@@ -792,6 +817,40 @@ def resume_vm(vm: VM) -> tuple[bool, str]:
         qemu.drop_snapshot(vm.dir)
 
     return start_vm(vm)
+
+
+def resume_paused_vms() -> list[str]:
+    """把停在 paused 状态的 VM 拉回运行
+
+    **快照恢复的兜底**：用 -incoming 恢复的 QEMU 迁移完成后会停在
+    `paused (postmigrate)`，必须发 cont 才会执行 guest。漏掉的话
+    进程在、端口在监听、TCP 能连，但 guest 冻结 ——
+    SSH 永远等不到 banner（表现为「虚拟机连不上」）。
+
+    snapshot_restore 里已经发过 cont，这里是周期性兜底：
+    覆盖守护进程用的是旧二进制、手动 kill、异常退出等各种情况。
+    """
+    fixed: list[str] = []
+    try:
+        vms = load_all()
+    except Exception:
+        return fixed
+
+    for vm in vms:
+        if not vm.running:
+            continue
+        try:
+            st = qemu.vm_status(vm.dir)
+        except Exception:
+            continue
+        if not st.startswith("paused"):
+            continue
+        try:
+            if qemu.resume_if_paused(vm.dir):
+                fixed.append(vm.spec.name)
+        except Exception:
+            continue
+    return fixed
 
 
 def get_password(name: str) -> str:

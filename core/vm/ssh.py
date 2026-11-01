@@ -32,6 +32,19 @@ SCP_OPTS = [
 ]
 
 
+def _ssh_target(vm) -> str:
+    """SSH 连到哪台机器
+
+    共享网桥模式下 guest 有自己的 IP（10.99.x.x），宿主机能直接
+    访问；这种模式下必须连那个 IP —— 网桥没有 hostfwd，
+    连 127.0.0.1 会打到宿主机自己的 22 端口上
+    （Connection refused），SSH、文件页、共享挂载全会失效。
+    SLIRP 模式下才走 127.0.0.1 的转发端口。
+    """
+    host = getattr(vm, "ssh_host", "")
+    return host or "127.0.0.1"
+
+
 def ssh_available() -> bool:
     return bool(shutil.which("ssh"))
 
@@ -69,7 +82,7 @@ def run_command(
         "-i", str(vm.ssh_key),
         "-p", str(port),
         *SSH_OPTS,
-        f"{vm.spec.username}@127.0.0.1",
+        f"{vm.spec.username}@{_ssh_target(vm)}",
         command,
     ]
 
@@ -124,7 +137,7 @@ def upload_file(
         "-P", str(port),
         *SCP_OPTS,
         str(local),
-        f"{vm.spec.username}@127.0.0.1:{remote_path}",
+        f"{vm.spec.username}@{_ssh_target(vm)}:{remote_path}",
     ]
 
     try:
@@ -161,7 +174,7 @@ def download_file(
         "-i", str(vm.ssh_key),
         "-P", str(port),
         *SCP_OPTS,
-        f"{vm.spec.username}@127.0.0.1:{remote_path}",
+        f"{vm.spec.username}@{_ssh_target(vm)}:{remote_path}",
         str(local),
     ]
 
@@ -360,6 +373,43 @@ def unmount_all_shares(vm) -> list[tuple[str, bool, str]]:
         except Exception as e:
             results.append((tag, False, str(e)))
     return results
+
+
+def guest_ip(vm, timeout: int = 12) -> str:
+    """guest 内部的 IPv4 地址（取不到返回空串）
+
+    用于在界面上显示「内部 IP」——很多人会拿这个地址去填第三方
+    工具，或者去 guest 内 ssh 另一台机器。
+    """
+    ok, out = run_command(
+        vm,
+        "ip -4 -o addr show scope global 2>/dev/null | "
+        "awk '{print $4}' | head -1",
+        timeout=timeout,
+    )
+    if not ok or not out:
+        return ""
+    for line in (out or "").splitlines():
+        addr = line.strip().split("/")[0]
+        # 排除回环/链路本地
+        if addr and not addr.startswith(("127.", "169.254.")):
+            return addr
+    return ""
+
+
+def guest_ssh_port(vm) -> int:
+    """guest 内部 sshd 的端口（通常 22）
+
+    QEMU 的 hostfwd 是 宿主端口 → guest 端口，guest 里 sshd
+    一直监听 22；这里按 hostfwd 配置反推，取不到就默认 22。
+    """
+    for fwd in getattr(vm.spec, "forwards", []) or []:
+        try:
+            if int(getattr(fwd, "guest_port", 0)) == 22:
+                return 22
+        except (TypeError, ValueError):
+            continue
+    return 22
 
 
 def mounted_tags(vm) -> set[str]:

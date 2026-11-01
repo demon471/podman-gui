@@ -22,6 +22,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -456,6 +457,79 @@ def apply_aligned_delegate(view) -> None:
     view.setItemDelegate(AlignedItemDelegate(view))
 
 
+def apply_dialog_geometry(dialog, *, width_ratio: float = 0.44,
+                          height_ratio: float = 0.50,
+                          min_w: int = 680, min_h: int = 460) -> None:
+    """按屏幕百分比给对话框定初始尺寸并居中
+
+    主窗口用 50%×56%；对话框是「子视图」，应当比主窗口更小更窄，
+    所以默认取 44%×50%。固定像素在小屏上会超出、大屏上又太小。
+    """
+    from PyQt6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.screenAt(
+        dialog.pos()
+    ) or QGuiApplication.primaryScreen()
+    if screen is None:
+        dialog.resize(min_w, min_h)
+        return
+
+    avail = screen.availableGeometry()
+    w = max(min_w, int(avail.width() * width_ratio))
+    h = max(min_h, int(avail.height() * height_ratio))
+    # 别超出可用区域
+    w = min(w, avail.width() - 40)
+    h = min(h, avail.height() - 80)
+
+    dialog.resize(w, h)
+
+    # 优先相对父窗口居中，没有父窗口就居中屏幕
+    parent = dialog.parentWidget()
+    if parent is not None and parent.isVisible():
+        g = parent.frameGeometry()
+        dialog.move(
+            g.x() + (g.width() - w) // 2,
+            g.y() + (g.height() - h) // 2,
+        )
+    else:
+        dialog.move(
+            avail.x() + (avail.width() - w) // 2,
+            avail.y() + (avail.height() - h) // 2,
+        )
+
+
+class ListCard(QFrame):
+    """把表格/列表包进圆角白底卡片
+
+    为什么不能只给 QTableView 加 border-radius：
+      · QAbstractScrollArea 的 viewport 是方形子控件，会用自己的
+        底色把圆角盖掉
+      · 表头（QHeaderView）同样会画满整个矩形，连左上角也不放过
+    所以只能外面套一层卡片，内部的表格、表头、角落按钮全部改成
+    透明；表头首尾两节自己带圆角，否则上边的圆角会被表头盖成方的。
+    """
+
+    def __init__(self, content: QWidget, padding: int = 0,
+                 parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("listCard")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(padding, padding, padding, padding)
+        v.setSpacing(0)
+        v.addWidget(content)
+        self.content = content
+
+
+def make_list_card(content, padding: int = 0) -> ListCard:
+    """content 可以是控件，也可以是布局（如 QStackedLayout）"""
+    if isinstance(content, QWidget):
+        host = content
+    else:
+        host = QWidget()
+        host.setLayout(content)
+    return ListCard(host, padding)
+
+
 class EmptyState(QWidget):
     """列表空状态
 
@@ -479,6 +553,9 @@ class EmptyState(QWidget):
     ):
         super().__init__(parent)
         self.setObjectName("emptyState")
+        # 普通 QWidget 默认不绘制 QSS 背景，必须打开这个属性，
+        # 否则圆角白底卡片完全不显示
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(24, 24, 24, 24)

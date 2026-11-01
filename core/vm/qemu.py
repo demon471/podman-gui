@@ -184,6 +184,38 @@ def has_kvm() -> bool:
     return p.exists() and os.access(p, os.R_OK | os.W_OK)
 
 
+def vm_mac(name: str) -> str:
+    """给每台 VM 生成稳定且唯一的 MAC 地址
+
+    **这一步是 VM 之间互通的前提**：QEMU 对第一块网卡默认用
+    52:54:00:12:34:56，多台 VM 会拿到完全相同的 MAC。
+    挂在同一个网桥上时交换机（bridge）无法区分它们 ——
+    fdb 表里只有一个表项，来回抖动，结果是 VM 之间 ping 不通。
+    """
+    import zlib
+
+    h = zlib.crc32((name or "").encode("utf-8"))
+    # 52:54:00 是 QEMU/KVM 的本地管理地址前缀
+    return "52:54:00:{:02x}:{:02x}:{:02x}".format(
+        (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF
+    )
+
+
+def slirp_subnet(name: str) -> str:
+    """给每台 VM 分配独立的用户网络网段（10.0.X.0/24）
+
+    QEMU 默认所有 VM 都用 10.0.2.0/24，内部 IP 全是 10.0.2.15。
+    这里按名字算一个稳定偏移（同一台 VM 每次启动都一样），
+    让各 VM 的内部 IP 互不相同，便于识别和记忆。
+    """
+    import zlib
+
+    base = 100          # 从 10.0.100.0/24 起，避开 QEMU 默认段
+    span = 100          # 10.0.100 ~ 10.0.199
+    idx = zlib.crc32((name or "").encode("utf-8")) % span
+    return f"10.0.{base + idx}.0/24"
+
+
 def build_command(
     spec: VMSpec,
     vm_dir: Path,
@@ -292,13 +324,27 @@ def build_command(
     ]
 
     # ── 网络 ──
-    netdev_parts = ["user", "id=net0"]
-    for fwd in spec.forwards:
-        netdev_parts.append(fwd.to_qemu())
-    cmd += [
-        "-netdev", ",".join(netdev_parts),
-        "-device", "virtio-net-pci,netdev=net0",
-    ]
+    # 优先用共享网桥：VM 之间能互 ping，宿主机也能直接用内部 IP 访问。
+    # 网桥没初始化（或用不了）时退回 QEMU 用户网络（SLIRP），
+    # 那样 VM 之间不可见、宿主只能靠 hostfwd 端口转发，但至少能用。
+    from core.vm import bridge as _bridge
+
+    mac = vm_mac(spec.name)
+
+    if _bridge.ready():
+        cmd += _bridge.qemu_args(mac=mac)
+    else:
+        # SLIRP 兜底。默认所有 VM 都用 10.0.2.0/24，内部 IP 全一样，
+        # 按名字算稳定偏移让它们各不相同（便于识别）。
+        netdev_parts = [
+            "user", "id=net0", f"net={slirp_subnet(spec.name)}"
+        ]
+        for fwd in spec.forwards:
+            netdev_parts.append(fwd.to_qemu())
+        cmd += [
+            "-netdev", ",".join(netdev_parts),
+            "-device", f"virtio-net-pci,netdev=net0,mac={mac}",
+        ]
 
     # ── 共享目录（virtiofs）──
     #
@@ -670,6 +716,41 @@ def _monitor_cmd(vm_dir: Path, cmd: str, *, wait: float = 0.05) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text).strip()
 
 
+def vm_status(vm_dir: Path) -> str:
+    """QEMU 运行状态：running / paused (postmigrate) / ..."""
+    out = _monitor_cmd(vm_dir, "info status", wait=0.05)
+    for line in out.splitlines():
+        if "VM status:" in line:
+            return line.split(":", 1)[1].strip().lower()
+    return ""
+
+
+def resume_if_paused(vm_dir: Path, timeout: float = 3.0) -> bool:
+    """从暂停态恢复运行
+
+    **这是快照恢复的关键一步**：用 -incoming 启动的 QEMU，迁移流
+    灌完后会停在 `paused (postmigrate)`，必须显式发 `cont` 才会
+    继续执行 guest。不发的话：
+      · QEMU 进程在跑、hostfwd 端口在监听（TCP 能连上）
+      · 但 guest 完全冻结，SSH 永远等不到 banner
+    表现就是「SSH 连不上」，而且软件内外都一样。
+    """
+    st = vm_status(vm_dir)
+    if st.startswith("running"):
+        return True
+    if not (st.startswith("paused") or st.startswith("prelaunch")):
+        return False
+
+    _monitor_cmd(vm_dir, "cont", wait=0.05)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if vm_status(vm_dir).startswith("running"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def _migrate_status(vm_dir: Path) -> str:
     out = _monitor_cmd(vm_dir, "info migrate", wait=0.05)
     for line in out.splitlines():
@@ -805,20 +886,31 @@ def snapshot_restore(vm_dir: Path) -> tuple[bool, str]:
 
     # 等迁移真正完成
     deadline = time.time() + 120
+    done = False
     while time.time() < deadline:
         st = _migrate_status(vm_dir)
         if st == "completed":
-            drop_snapshot(vm_dir)
-            return True, ""
+            done = True
+            break
         if st in ("failed", "cancelled"):
             return False, f"恢复失败（{st}）"
         if st == "" and is_running(vm_dir):
             # 有的 QEMU 版本不上报 completed，进程在跑即可
-            drop_snapshot(vm_dir)
-            return True, ""
+            done = True
+            break
         time.sleep(0.05)
 
-    return False, "恢复超时"
+    if not done:
+        return False, "恢复超时"
+
+    # 迁移完成后 QEMU 停在 paused (postmigrate)，必须 cont 才会跑 guest。
+    # 漏了这一步的话：进程在、端口在监听、TCP 能连，但 guest 是冻结的，
+    # SSH 永远等不到 banner —— 表现为「虚拟机连不上」。
+    if not resume_if_paused(vm_dir):
+        return False, "恢复后虚拟机未进入运行状态（cont 失败）"
+
+    drop_snapshot(vm_dir)
+    return True, ""
 
 
 def _cleanup_share_daemons(vm_dir: Path) -> None:

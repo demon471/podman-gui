@@ -31,7 +31,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QTabWidget,
     QToolBar,
     QVBoxLayout,
@@ -43,6 +42,7 @@ from core import podman_config as cfg
 from core.podman_client import PodmanClient, PodmanError
 from core.vm import manager
 from resources.icons import ICON_SIZE_TOOLBAR, icon
+from ui.style import semantic_colors
 
 
 # ─────────────────────────────────────────
@@ -52,8 +52,8 @@ from resources.icons import ICON_SIZE_TOOLBAR, icon
 # 而不是给每块内容套一个带边框的 GroupBox ——
 # 满屏方框会显得很重，而且边框和 Breeze 的细线质感冲突。
 # ─────────────────────────────────────────
-PAGE_MARGIN = 18        # 页面四周留白
-SECTION_GAP = 18        # 小节之间的间距
+PAGE_MARGIN = 8         # 页面四周留白（贴近 tab 与窗口边）
+SECTION_GAP = 10        # 卡片之间的间距
 ROW_GAP = 8             # 行间距
 
 
@@ -65,26 +65,49 @@ def _page() -> tuple[QScrollArea, QVBoxLayout]:
 
     w = QWidget()
     v = QVBoxLayout(w)
-    v.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN - 4, PAGE_MARGIN, PAGE_MARGIN)
+    v.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
     v.setSpacing(SECTION_GAP)
 
     scroll.setWidget(w)
     return scroll, v
 
 
-def _section(title: str) -> tuple[QWidget, QVBoxLayout]:
-    """一个小节：加粗标题 + 内容区（无边框）"""
-    box = QWidget()
-    v = QVBoxLayout(box)
-    v.setContentsMargins(0, 0, 0, 0)
-    v.setSpacing(ROW_GAP)
+def _section(title: str = "") -> tuple[QFrame, QVBoxLayout]:
+    """一个卡片分组：浅底 + 细边框 + 圆角，标题在卡片内
+
+    参考 KDE 系统设置的分组样式。刻意不加阴影 ——
+    平铺的设置页里加阴影只会显得脏。
+    """
+    card = QFrame()
+    card.setObjectName("card")
+    v = QVBoxLayout(card)
+    v.setContentsMargins(14, 12, 14, 12)
+    v.setSpacing(8)
 
     if title:
+        head = QHBoxLayout()
+        head.setSpacing(6)
         lbl = QLabel(title)
-        lbl.setObjectName("sectionTitle")
-        v.addWidget(lbl)
+        lbl.setObjectName("cardTitle")
+        head.addWidget(lbl)
+        head.addStretch()
+        v.addLayout(head)
+        card._head = head          # 允许调用方往标题行右侧加东西
 
-    return box, v
+    return card, v
+
+
+def _info_box(text: str) -> QFrame:
+    """浅底提示框（用于较长说明）"""
+    box = QFrame()
+    box.setObjectName("infoBox")
+    v = QVBoxLayout(box)
+    v.setContentsMargins(12, 8, 12, 8)
+    lbl = QLabel(text)
+    lbl.setObjectName("infoText")
+    lbl.setWordWrap(True)
+    v.addWidget(lbl)
+    return box
 
 
 def _form() -> QFormLayout:
@@ -106,15 +129,6 @@ def _help(text: str) -> QLabel:
     lbl.setObjectName("hintLabel")
     lbl.setWordWrap(True)
     return lbl
-
-
-def _rule() -> QFrame:
-    """细分隔线（比 HLine 更淡，贴近 Breeze）"""
-    line = QFrame()
-    line.setObjectName("sectionRule")
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setFixedHeight(1)
-    return line
 
 
 def _kv(label: str, mono: bool = False) -> tuple[QWidget, QLabel]:
@@ -164,9 +178,8 @@ class SettingsPage(QWidget):
     # ─────────────────────────────────────────
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        # 留出与窗口边缘的间距 —— Breeze 的 tab 上方需要一点呼吸空间，
-        # 贴边会显得局促（系统设置、Dolphin 都有这个内边距）
-        layout.setContentsMargins(8, 8, 8, 8)
+        # 尽量少的边距：设置页内容要贴近 tab 栏和窗口左边缘
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(0)
 
         self.tabs = QTabWidget()
@@ -198,7 +211,6 @@ class SettingsPage(QWidget):
 
         # ══ 加速地址 ══
         sec, sv = _section("加速地址")
-        sv.addWidget(_rule())
 
         body = QHBoxLayout()
         body.setSpacing(6)
@@ -277,7 +289,6 @@ class SettingsPage(QWidget):
         v.addLayout(adv_bar)
 
         self.box_proxy, pv = _section("HTTP 代理")
-        pv.addWidget(_rule())
 
         self.chk_proxy = QCheckBox("启用代理")
         self.chk_proxy.toggled.connect(self._on_proxy_toggled)
@@ -311,7 +322,6 @@ class SettingsPage(QWidget):
         v.addWidget(self.box_proxy)
 
         # ══ 清除 ══
-        v.addWidget(_rule())
         bar = QHBoxLayout()
         bar.setSpacing(6)
         bar.addStretch()
@@ -389,7 +399,6 @@ class SettingsPage(QWidget):
 
         # ══ 当前位置 ══
         sec, sv = _section("位置")
-        sv.addWidget(_rule())
 
         row_root, self.st_root = _kv("数据目录", mono=True)
         sv.addWidget(row_root)
@@ -400,7 +409,6 @@ class SettingsPage(QWidget):
         row_used, self.st_used = _kv("已用")
         sv.addWidget(row_used)
 
-        sv.addWidget(_rule())
 
         f = _form()
         dir_row = QHBoxLayout()
@@ -431,7 +439,6 @@ class SettingsPage(QWidget):
         act.addWidget(btn_migrate)
 
         btn_save = QPushButton("应用")
-        btn_save.setDefault(True)
         btn_save.clicked.connect(self._save_storage_config)
         act.addWidget(btn_save)
 
@@ -440,7 +447,6 @@ class SettingsPage(QWidget):
 
         # ══ 虚拟机目录 ══
         sec3, s3 = _section("虚拟机目录")
-        s3.addWidget(_rule())
 
         row_vm, self.st_vm_root = _kv("目录", mono=True)
         s3.addWidget(row_vm)
@@ -451,7 +457,6 @@ class SettingsPage(QWidget):
         row_vm_used, self.lbl_vm_used = _kv("占用")
         s3.addWidget(row_vm_used)
 
-        s3.addWidget(_rule())
 
         f2 = _form()
         vm_row = QHBoxLayout()
@@ -489,7 +494,6 @@ class SettingsPage(QWidget):
 
         # ══ 危险区 ══
         sec2, sv2 = _section("重置")
-        sv2.addWidget(_rule())
 
         sv2.addWidget(_help(
             "恢复到首次安装状态：删除全部容器、镜像、卷、网络，"
@@ -798,7 +802,6 @@ class SettingsPage(QWidget):
 
         # ══ 运行环境 ══
         sec1, s1 = _section("运行环境")
-        s1.addWidget(_rule())
         r, self._ov_version = _kv("版本")
         s1.addWidget(r)
         r, self._ov_api = _kv("API 版本")
@@ -815,7 +818,6 @@ class SettingsPage(QWidget):
 
         # ══ 存储 ══
         sec2, s2 = _section("存储")
-        s2.addWidget(_rule())
         r, self._ov_driver = _kv("驱动")
         s2.addWidget(r)
         r, self._ov_root = _kv("数据目录", mono=True)
@@ -826,7 +828,6 @@ class SettingsPage(QWidget):
 
         # ══ 占用 ══
         sec3, s3 = _section("占用统计")
-        s3.addWidget(_rule())
         r, self._ov_images = _kv("镜像")
         s3.addWidget(r)
         r, self._ov_containers = _kv("容器")
@@ -837,7 +838,6 @@ class SettingsPage(QWidget):
 
         # ══ 配置文件 ══
         sec4, s4 = _section("配置文件")
-        s4.addWidget(_rule())
         for fname in ("registries.conf", "containers.conf", "storage.conf"):
             r, val = _kv(fname, mono=True)
             val.setText(str(cfg.CONFIG_DIR / fname))
@@ -845,7 +845,6 @@ class SettingsPage(QWidget):
         v.addWidget(sec4)
 
         # ══ 底部动作 ══
-        v.addWidget(_rule())
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
@@ -1282,7 +1281,6 @@ class SettingsPage(QWidget):
 
         # ══ 状态 ══
         sec, sv = _section("Podman 服务")
-        sv.addWidget(_rule())
 
         head = QHBoxLayout()
         head.setSpacing(10)
@@ -1324,7 +1322,6 @@ class SettingsPage(QWidget):
         sv.addLayout(btn_row)
 
         # ══ 开机自启 ══
-        sv.addWidget(_rule())
 
         self.chk_autostart = QCheckBox("登录系统时自动启动")
         self.chk_autostart.setToolTip(
@@ -1374,7 +1371,6 @@ class SettingsPage(QWidget):
         v.addLayout(adv_bar)
 
         self.box_advanced, av = _section("系统级服务（rootful）")
-        av.addWidget(_rule())
 
         sys_row = QHBoxLayout()
         sys_row.setSpacing(10)
@@ -1407,9 +1403,104 @@ class SettingsPage(QWidget):
         self.box_advanced.hide()
         v.addWidget(self.box_advanced)
 
+        # ══ 虚拟机网络 ══
+        sec_net, nv2 = _section("虚拟机网络")
+
+        self.lbl_net_mode = QLabel("")
+        self.lbl_net_mode.setWordWrap(True)
+        nv2.addWidget(self.lbl_net_mode)
+
+        net_row = QHBoxLayout()
+        net_row.setSpacing(6)
+        net_row.addStretch()
+        self.btn_net_setup = QPushButton("启用共享网络…")
+        self.btn_net_setup.setToolTip(
+            "创建共享网桥（需要一次系统授权）。启用后虚拟机之间可以"
+            "互相访问，宿主机也能直接用内部 IP 连接。"
+        )
+        self.btn_net_setup.clicked.connect(self._setup_bridge)
+        net_row.addWidget(self.btn_net_setup)
+        nv2.addLayout(net_row)
+
+        nv2.addWidget(_info_box(
+            "默认使用 QEMU 用户网络：虚拟机之间互不可见，宿主机只能"
+            "靠端口转发访问。启用共享网络后，虚拟机会挂在同一个二层"
+            "网络上，能互相 ping，宿主机也能直接 ssh 内部 IP。"
+            "切换后需要重启虚拟机生效。"
+        ))
+
+        v.addWidget(sec_net)
+
         v.addStretch()
         QTimer.singleShot(80, self._refresh_service)
         return scroll
+
+    def _refresh_net_mode(self) -> None:
+        from core.vm import bridge
+
+        if bridge.ready():
+            self.lbl_net_mode.setText(
+                f"共享网络已启用 · 网桥 {bridge.BRIDGE} · "
+                f"宿主机地址 {bridge.HOST_IP}"
+            )
+            self.btn_net_setup.setText("重新初始化…")
+        elif not bridge.helper_available():
+            self.lbl_net_mode.setText(
+                "当前：用户网络（独立 NAT）。系统缺少 qemu-bridge-helper，"
+                "无法启用共享网络。"
+            )
+            self.btn_net_setup.setEnabled(False)
+        else:
+            self.lbl_net_mode.setText(
+                "当前：用户网络（独立 NAT）· 虚拟机之间不可见"
+            )
+            self.btn_net_setup.setText("启用共享网络…")
+
+    def _setup_bridge(self) -> None:
+        from core.async_task import run_async
+        from core.vm import bridge
+
+        ret = QMessageBox.question(
+            self, "启用共享网络",
+            "将创建网桥并配置 DHCP/NAT，需要一次系统授权。\n\n"
+            "启用后：\n"
+            "· 虚拟机之间可以互相访问\n"
+            "· 宿主机可以直接用内部 IP 连接\n"
+            "· 需要重启虚拟机才生效\n\n继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        self.btn_net_setup.setEnabled(False)
+        self.lbl_net_mode.setText("正在初始化…（请在授权框中确认）")
+
+        def work():
+            return bridge.setup()
+
+        def done(res):
+            ok, msg = res
+            self.btn_net_setup.setEnabled(True)
+            self._refresh_net_mode()
+            if ok:
+                self.status_message.emit("共享网络已启用，重启虚拟机后生效")
+                QMessageBox.information(
+                    self, "已启用",
+                    "共享网络已启用。\n\n"
+                    "请重启虚拟机（列表里点「重启」），"
+                    "之后就可以直接用内部 IP 访问，"
+                    "虚拟机之间也能互通。",
+                )
+            else:
+                QMessageBox.warning(self, "初始化失败", msg)
+
+        def error(msg):
+            self.btn_net_setup.setEnabled(True)
+            self._refresh_net_mode()
+            QMessageBox.critical(self, "初始化失败", str(msg))
+
+        run_async(work, on_done=done, on_error=error, parent=self)
 
     def _toggle_advanced(self, on: bool) -> None:
         self.box_advanced.setVisible(on)
@@ -1451,37 +1542,39 @@ class SettingsPage(QWidget):
 
     # ── 资源 ──
     def _build_resources_tab(self) -> QWidget:
-        """资源：内存上限（滑块 + 档位）+ 实时占用"""
+        """资源：内存上限 + 当前占用"""
         from ui.charts import ContainerRows, MemorySummary
 
         scroll, v = _page()
 
         # ══ 内存上限 ══
         sec, sv = _section("内存上限")
-        sv.addWidget(_rule())
 
-        head = QHBoxLayout()
-        head.setSpacing(12)
+        # 大号数值 + 说明同行
+        val_row = QHBoxLayout()
+        val_row.setSpacing(12)
 
         self.lbl_mem_value = QLabel("不限制")
-        self.lbl_mem_value.setObjectName("memValue")
-        head.addWidget(self.lbl_mem_value)
+        self.lbl_mem_value.setObjectName("bigValue")
+        val_row.addWidget(self.lbl_mem_value)
 
         self.lbl_mem_hint = QLabel("")
         self.lbl_mem_hint.setObjectName("hintLabel")
         self.lbl_mem_hint.setWordWrap(True)
-        head.addWidget(self.lbl_mem_hint, 1)
+        val_row.addWidget(self.lbl_mem_hint, 1)
 
-        sv.addLayout(head)
+        sv.addLayout(val_row)
 
+        # 滑块（松手才落盘）
         self.sld_mem = QSlider(Qt.Orientation.Horizontal)
         self.sld_mem.setRange(0, 100)
         self.sld_mem.setSingleStep(1)
         self.sld_mem.setPageStep(5)
         self.sld_mem.valueChanged.connect(self._on_mem_slider)
-        self.sld_mem.sliderReleased.connect(self._apply_mem_limit)
+        self.sld_mem.sliderReleased.connect(self._schedule_mem_apply)
         sv.addWidget(self.sld_mem)
 
+        # 两端刻度
         scale = QHBoxLayout()
         scale.setSpacing(0)
         self.lbl_scale_min = QLabel("不限制")
@@ -1493,6 +1586,7 @@ class SettingsPage(QWidget):
         scale.addWidget(self.lbl_scale_max)
         sv.addLayout(scale)
 
+        # 快捷档位
         seg = QHBoxLayout()
         seg.setSpacing(6)
         self._preset_buttons: list[QPushButton] = []
@@ -1500,7 +1594,7 @@ class SettingsPage(QWidget):
         self._seg_layout = seg
         sv.addLayout(seg)
 
-        sv.addWidget(_help(
+        sv.addWidget(_info_box(
             "上限只做启动前检查：新容器会让已分配内存超过上限时先提醒，"
             "避免把系统内存吃满。已在运行的容器不受影响。"
         ))
@@ -1508,8 +1602,26 @@ class SettingsPage(QWidget):
         v.addWidget(sec)
 
         # ══ 当前占用 ══
-        sec2, sv2 = _section("当前占用")
-        sv2.addWidget(_rule())
+        sec2, sv2 = _section()
+
+        head2 = QHBoxLayout()
+        head2.setSpacing(10)
+
+        t2 = QLabel("当前占用")
+        t2.setObjectName("cardTitle")
+        head2.addWidget(t2)
+
+        self.lbl_usage_total = QLabel("—")
+        self.lbl_usage_total.setObjectName("cardTitle")
+        head2.addWidget(self.lbl_usage_total)
+
+        head2.addStretch()
+
+        self.lbl_usage_badge = QLabel("")
+        self.lbl_usage_badge.setObjectName("badgeOk")
+        head2.addWidget(self.lbl_usage_badge)
+
+        sv2.addLayout(head2)
 
         self.mem_chart = MemorySummary()
         sv2.addWidget(self.mem_chart)
@@ -1528,14 +1640,19 @@ class SettingsPage(QWidget):
         return scroll
 
     def _on_mem_slider(self, value: int) -> None:
-        """拖动滑块：只更新显示，松手才落盘
-
-        滑块值直接就是 GB（0 = 不限制），不做换算 ——
-        用户拖到哪就是多少，不用猜。
-        """
+        """拖动滑块：同步大号数字（松手才落盘）"""
         self._mem_dirty = True
         self.lbl_mem_value.setText("不限制" if value <= 0 else f"{value} GB")
         self._sync_preset_highlight(value)
+
+    def _schedule_mem_apply(self) -> None:
+        """防抖：连续微调时只写一次配置"""
+        if not hasattr(self, "_mem_timer"):
+            self._mem_timer = QTimer(self)
+            self._mem_timer.setSingleShot(True)
+            self._mem_timer.setInterval(350)
+            self._mem_timer.timeout.connect(self._apply_mem_limit)
+        self._mem_timer.start()
 
     def _sync_preset_highlight(self, gb: int) -> None:
         for b in self._preset_buttons:
@@ -1560,11 +1677,11 @@ class SettingsPage(QWidget):
         usable = [v for v in LADDER if v <= host] or [1]
         picked = usable[-6:] if len(usable) > 6 else usable
 
-        # 滑块：0 = 不限制，其余直接是 GB
+        # 滑块 / 数值框：0 = 不限制，其余直接是 GB
         self.sld_mem.blockSignals(True)
         self.sld_mem.setRange(0, host)
-        self.sld_mem.setPageStep(max(1, host // 20))
         self.sld_mem.blockSignals(False)
+        self.sld_mem.setPageStep(max(1, host // 20))
         self.lbl_scale_max.setText(f"{host} GB（全部）")
 
         # 清空旧档位按钮
@@ -1579,8 +1696,8 @@ class SettingsPage(QWidget):
             text = "不限制" if gb == 0 else f"{gb}G"
             b = QPushButton(text)
             b.setCheckable(True)
-            b.setFixedHeight(30)
-            b.setMinimumWidth(56)
+            b.setFixedHeight(26)
+            b.setMinimumWidth(48)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setProperty("segGb", gb)
             b.clicked.connect(lambda _=False, g=gb: self._select_preset(g))
@@ -1591,12 +1708,13 @@ class SettingsPage(QWidget):
         self._presets_built = True
 
     def _select_preset(self, gb: int) -> None:
-        """点档位按钮：同步滑块并立即应用"""
+        """点档位按钮：同步两个控件并立即应用"""
         self.sld_mem.blockSignals(True)
         self.sld_mem.setValue(gb)
         self.sld_mem.blockSignals(False)
         self.lbl_mem_value.setText("不限制" if gb <= 0 else f"{gb} GB")
         self._sync_preset_highlight(gb)
+        self._mem_dirty = True
         self._apply_mem_limit()
 
     def _current_preset_gb(self) -> int:
@@ -1646,22 +1764,50 @@ class SettingsPage(QWidget):
             self.sld_mem.blockSignals(True)
             self.sld_mem.setValue(cur)
             self.sld_mem.blockSignals(False)
-            self.lbl_mem_value.setText(
-                "不限制" if cur <= 0 else f"{cur} GB"
-            )
             self._sync_preset_highlight(cur)
+
+        # 卡片标题行：大号数值 + 当前占用 + 状态徽标
+        cur = int(round(u["limit_gb"]))
+        self.lbl_mem_value.setText(
+            "不限制" if cur <= 0 else f"{cur} GB"
+        )
+        if cur > 0:
+            self.lbl_usage_total.setText(
+                f"{u['actual_gb']:.2f} GB / {cur:.2f} GB"
+            )
+        else:
+            self.lbl_usage_total.setText(
+                f"{u['actual_gb']:.2f} GB / 整机 {u['host_gb']:.1f} GB"
+            )
+
+        if cur <= 0:
+            badge, kind = "未限制", "badgeOk"
+        elif u["declared_gb"] > cur:
+            badge, kind = "已超限", "badgeWarn"
+        elif u["declared_gb"] > cur * 0.8:
+            badge, kind = "接近上限", "badgeWarn"
+        else:
+            badge, kind = "正常", "badgeOk"
+
+        self.lbl_usage_badge.setText(badge)
+        if self.lbl_usage_badge.objectName() != kind:
+            self.lbl_usage_badge.setObjectName(kind)
+            self.lbl_usage_badge.style().unpolish(self.lbl_usage_badge)
+            self.lbl_usage_badge.style().polish(self.lbl_usage_badge)
 
         # 提示
         if u["limit_gb"] <= 0:
             self.lbl_mem_hint.setText(
-                f"未设置上限 · 已分配 {u['declared_gb']:.1f} GB"
+                f"已分配 {u['declared_gb']:.1f} GB"
             )
             self.lbl_mem_hint.setStyleSheet("")
         elif u["declared_gb"] > u["limit_gb"]:
             self.lbl_mem_hint.setText(
                 f"已超出 {u['declared_gb'] - u['limit_gb']:.1f} GB"
             )
-            self.lbl_mem_hint.setStyleSheet("color: #e74c3c;")
+            self.lbl_mem_hint.setStyleSheet(
+                f"color: {semantic_colors()['danger']};"
+            )
         else:
             remain = u["limit_gb"] - u["declared_gb"]
             self.lbl_mem_hint.setText(
@@ -1784,6 +1930,9 @@ class SettingsPage(QWidget):
                 "服务未运行，点「启动」即可。"
                 "（命令行等价于 systemctl --user start podman.socket）"
             )
+
+        if hasattr(self, "lbl_net_mode"):
+            self._refresh_net_mode()
 
         if hasattr(self, "mem_chart"):
             self._refresh_memory()

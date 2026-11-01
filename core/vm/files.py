@@ -16,6 +16,9 @@ import stat as stat_mod
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# 复用 ssh 模块的连目标解析（它才知道网桥/SLIRP 的区别）
+from core.vm.ssh import _ssh_target
+
 # paramiko 可选：装了走 SFTP，没装退回命令行
 try:
     import paramiko
@@ -114,7 +117,7 @@ class SftpSession:
         for attempt in range(4):
             try:
                 client.connect(
-                    hostname="127.0.0.1",
+                    hostname=_ssh_target(self.vm),
                     port=int(port),
                     username=self.vm.spec.username,
                     key_filename=str(key),

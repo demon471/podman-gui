@@ -59,7 +59,7 @@ from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
 from resources.icons import ICON_SIZE_TOOLBAR, STATE_COLORS, icon
 from ui.utils import fmt_size
-from ui.widgets import apply_aligned_delegate, EmptyState
+from ui.widgets import make_list_card, apply_aligned_delegate, EmptyState
 
 ROW_HEIGHT = 28
 
@@ -197,6 +197,8 @@ class VMPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.table.setCornerButtonEnabled(False)
         self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         self.table.setShowGrid(False)
         self.table.setFrameShape(QTableView.Shape.NoFrame)
@@ -255,7 +257,8 @@ class VMPage(QWidget):
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
-        layout.addLayout(self._table_stack)
+        # 包一层圆角白底卡片（表格 + 空状态共用）
+        layout.addWidget(make_list_card(self._table_stack))
 
         # ── 底部统计 ──
         self.lbl_stats = QLabel("")

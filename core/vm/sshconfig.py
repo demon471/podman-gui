@@ -64,8 +64,10 @@ def _managed_block(vms: list) -> str:
 
         lines += [
             f"Host {domain}",
-            f"    HostName {ssh_fwd.host_addr or '127.0.0.1'}",
-            f"    Port {ssh_fwd.host_port}",
+            # 网桥模式下直接指向 guest 的 IP（宿主机可达），
+            # 否则走 127.0.0.1 的转发端口
+            f"    HostName {vm.ssh_host}",
+            f"    Port {vm.ssh_port}",
             f"    User {vm.spec.username}",
         ]
         if key.exists():

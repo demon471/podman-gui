@@ -182,6 +182,34 @@ def access_urls(vm) -> list[tuple[str, str, str]]:
     out = []
     domain = vm_domain(vm.name)
 
+    # 网桥模式：guest 有自己的 IP，宿主机直接用 IP 访问即可，
+    # 端口也还是 guest 原来的端口（不再经过 hostfwd 映射）
+    try:
+        from core.vm import bridge
+
+        bridged = bridge.ready() and bool(bridge.lease_ip(vm.spec.name))
+    except Exception:
+        bridged = False
+
+    if bridged:
+        host = vm.ssh_host
+        for fwd in vm.spec.forwards:
+            if fwd.guest_port == 22:
+                out.append((
+                    "SSH",
+                    f"ssh -i {vm.ssh_key} {vm.spec.username}@{host}",
+                    "命令行连接",
+                ))
+                continue
+            if fwd.guest_port in (80, 443, 3000, 8080, 8000, 5000, 9000):
+                scheme = "https" if fwd.guest_port == 443 else "http"
+                out.append((
+                    f"Web (VM:{fwd.guest_port})",
+                    f"{scheme}://{host}:{fwd.guest_port}",
+                    "浏览器打开",
+                ))
+        return out
+
     for fwd in vm.spec.forwards:
         # SSH 单独处理
         if fwd.guest_port == 22:

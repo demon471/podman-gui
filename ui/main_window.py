@@ -66,8 +66,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
         self.setWindowTitle(APP_NAME)
-        self.resize(1200, 760)
         self.setWindowIcon(_window_icon())
+        self._apply_default_geometry()
 
         self._build_ui()
         self._setup_theme_watcher()
@@ -81,6 +81,38 @@ class MainWindow(QMainWindow):
     # ─────────────────────────────────────────
     # UI
     # ─────────────────────────────────────────
+    def _apply_default_geometry(self) -> None:
+        """默认尺寸与位置：按屏幕大小算，居中显示
+
+        固定像素在小屏上会超出、大屏上又显得局促，
+        所以按屏幕可用区域的百分比算（见下方常量）。
+        """
+        from PyQt6.QtGui import QGuiApplication
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 760)
+            return
+
+        avail = screen.availableGeometry()
+        # 纯百分比：50%×56%。1920×1080 上约 960×604 ——
+        # 列表和工具栏刚好够用，四周留出足够桌面空间。
+        # 只兜一个最小值（再小就挤不下了），不设上限：
+        # 设了上限大屏上就变回固定尺寸了。
+        w = int(avail.width() * 0.50)
+        h = int(avail.height() * 0.56)
+        w = max(820, w)
+        h = max(520, h)
+        # 屏幕本身就很小的话，别超出可用区域
+        w = min(w, avail.width() - 40)
+        h = min(h, avail.height() - 60)
+
+        self.resize(w, h)
+        # 居中
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self.move(max(avail.x(), x), max(avail.y(), y))
+
     def _build_ui(self) -> None:
         # 不显示菜单栏（本应用所有操作都在侧边栏/工具栏）
         self.menuBar().setVisible(False)
@@ -203,8 +235,15 @@ class MainWindow(QMainWindow):
         休眠后由 systemd 托管的守护进程接管端口，
         `ssh xxx.vm.local` 依然可用（会自动唤醒）。
         """
-        if self.tray is not None:
-            self.tray.hide()
+        # 立即隐藏窗口和托盘图标：休眠虚拟机要几秒，
+        # 期间窗口还杵在那儿，用户会以为「点了没反应」。
+        try:
+            if self.tray is not None:
+                self.tray.hide()
+        except Exception:
+            pass
+        self.hide()
+
         self._suspend_vms_then_quit()
 
     def _suspend_vms_then_quit(self) -> None:
@@ -243,6 +282,8 @@ class MainWindow(QMainWindow):
             self._final_quit()
             return
 
+        QTimer.singleShot(self.EXIT_TIMEOUT_MS, self._force_quit)
+
         # 后台串行休眠，完成后退出
         from core.async_task import run_async
 
@@ -250,7 +291,9 @@ class MainWindow(QMainWindow):
             results = []
             for vm in targets:
                 try:
-                    ok, msg = vm_manager.soft_stop(vm)
+                    # 退出场景不需要等满默认 30 秒：
+                    # 快照失败会退化成 ACPI 关机，等太久用户以为卡死
+                    ok, msg = vm_manager.soft_stop(vm, timeout=8)
                     results.append((vm.spec.name, ok, msg))
                 except Exception as e:
                     results.append((vm.spec.name, False, str(e)))
@@ -267,6 +310,28 @@ class MainWindow(QMainWindow):
 
         self._set_status("正在保存虚拟机状态…")
         run_async(work, on_done=done, on_error=error, parent=self)
+
+    # 退出流程的总时限：超过就强制结束进程
+    # 休眠 1GB 约 6 秒，留一倍余量
+    EXIT_TIMEOUT_MS = 10_000
+
+    def _force_quit(self) -> None:
+        """兜底强制退出
+
+        正常路径是休眠完成 → _final_quit → app.quit()。
+        但休眠可能卡住（快照失败后退化成 ACPI 关机，qemu 不一定
+        按时退出），那种情况下 app.quit() 永远等不到，
+        用户看到的就是「点退出没反应」。这里直接结束进程。
+        """
+        print("[main] 退出超时，强制结束", flush=True)
+        try:
+            self._final_quit()
+        except Exception:
+            pass
+        # app.quit() 依赖事件循环回到 exec()，线程卡住时不一定生效
+        import os
+
+        os._exit(0)
 
     def _final_quit(self) -> None:
         """完成退出

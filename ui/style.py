@@ -44,6 +44,15 @@ def _font_sizes() -> dict[str, str]:
     }
 
 
+def _rgba_of(hex_color: str, alpha: float) -> str:
+    """把 #rrggbb 转成 rgba() 字符串"""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {int(alpha * 255)})"
+
+
 def semantic_colors() -> dict[str, str]:
     """成功 / 失败语义色
 
@@ -88,6 +97,10 @@ def build_stylesheet() -> str:
     sem = semantic_colors()
     success = sem["success"]
     danger = sem["danger"]
+    # 徽标底色：语义色压到很低透明度，浅色主题下也不会刺眼
+    success_bg = _rgba_of(success, 0.14)
+    danger_bg = _rgba_of(danger, 0.14)
+    info_bg = _rgba_of(highlight, 0.16)
 
     return f"""
 /* ═══════════ 全局 ═══════════ */
@@ -149,7 +162,6 @@ QListWidget#sidebarList::item:disabled {{
 QToolBar {{
     background-color: {window};
     border: none;
-    border-bottom: 1px solid {border};
     padding: 4px 6px;
     spacing: 2px;
 }}
@@ -191,7 +203,7 @@ QToolBar QToolButton:disabled {{
 }}
 
 /* ═══════════ 表格（Dolphin 视图风格）═══════════ */
-QTableView, QTableWidget, QTreeView, QListView {{
+QTableView, QTableWidget, QTreeView, QListView, QTreeWidget, QListWidget {{
     background-color: {base};
     alternate-background-color: {alternate};
     color: {text};
@@ -200,6 +212,70 @@ QTableView, QTableWidget, QTreeView, QListView {{
     selection-background-color: {highlight};
     selection-color: {highlight_text};
     outline: none;
+}}
+
+/* ═══════════ 列表卡片 ═══════════
+   右侧所有列表区统一成「圆角白底卡片」。
+   圆角必须由外层卡片画：表格的 viewport 和表头都是方形子控件，
+   直接给表格加 border-radius 会被它们盖掉。 */
+QFrame#listCard {{
+    background-color: {base};
+    border: 1px solid {border};
+    border-radius: 8px;
+}}
+
+/* 卡片内部的表格 / 表头 / 角落按钮全部透明，让卡片底色透出来 */
+QFrame#listCard QTableView,
+QFrame#listCard QTableWidget,
+QFrame#listCard QTreeView,
+QFrame#listCard QListView,
+QFrame#listCard QTreeWidget,
+QFrame#listCard QListWidget {{
+    background-color: transparent;
+    border: none;
+}}
+
+QFrame#listCard QHeaderView {{
+    background-color: transparent;
+}}
+
+QFrame#listCard QHeaderView::section {{
+    background-color: transparent;
+    /* 列之间的竖分隔线要保留，否则一排表头糊成一片 */
+    border-right: 1px solid {border};
+    border-bottom: 1px solid {border};
+}}
+
+QFrame#listCard QHeaderView::section:last {{
+    border-right: none;
+}}
+
+/* 表头首尾两节自己带圆角：卡片内边距为 0，上边两个角由它们
+   负责，否则方形表头会把卡片的圆角盖成直角 */
+QFrame#listCard QHeaderView::section:first {{
+    border-top-left-radius: 8px;
+}}
+
+QFrame#listCard QHeaderView::section:last {{
+    border-top-right-radius: 8px;
+}}
+
+QFrame#listCard QTableCornerButton::section {{
+    background-color: transparent;
+    border: none;
+}}
+
+/* 卡片内的滚动条用卡片底色打底：透明底在部分渲染路径下
+   会渲染成黑条，很扎眼 */
+QFrame#listCard QScrollBar:vertical,
+QFrame#listCard QScrollBar:horizontal {{
+    background-color: {base};
+}}
+
+/* 树的行高由行内文字决定；加 padding 会让分支连线错位，
+   所以树单独不给内边距 */
+QTreeView, QTreeWidget {{
+    show-decoration-selected: 0;
 }}
 
 QTableView::item, QTableWidget::item, QTreeView::item, QListView::item {{
@@ -219,12 +295,15 @@ QListView::item:hover:!selected {{
     background-color: {alternate};
 }}
 
+/* 表头与表格同底色，只留一条细分隔线 ——
+   圆角卡片里再加竖分隔线会很碎 */
 QHeaderView {{
-    background-color: {window};
+    background-color: {base};
+    border: none;
 }}
 
 QHeaderView::section {{
-    background-color: {window};
+    background-color: {base};
     color: {window_text};
     padding: 5px 8px;
     border: none;
@@ -233,16 +312,16 @@ QHeaderView::section {{
     font-weight: 600;
 }}
 
-QHeaderView::section:hover {{
-    background-color: {alternate};
-}}
-
 QHeaderView::section:last {{
     border-right: none;
 }}
 
+QHeaderView::section:hover {{
+    background-color: {alternate};
+}}
+
 QTableCornerButton::section {{
-    background-color: {window};
+    background-color: {base};
     border: none;
     border-bottom: 1px solid {border};
 }}
@@ -332,19 +411,109 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
-/* ═══════════ 设置页（KDE HIG 风格）═══════════
-   小节靠「加粗标题 + 留白 + 细线」分隔，不用边框盒子。
-   满屏方框会显得很重，也和 Breeze 的细线质感冲突。 */
+/* ═══════════ 设置页 · 卡片 ═══════════
+   参考 KDE 系统设置的卡片式分组：浅色底 + 细边框 + 圆角，
+   不加阴影（阴影在平铺的设置页里只会显得脏）。 */
+QFrame#card {{
+    background-color: {base};
+    border: 1px solid {border};
+    border-radius: 8px;
+}}
+
+/* 卡片式分组：白底 + 细边框 + 圆角（用于 QGroupBox） */
+QGroupBox#cardGroup {{
+    background-color: {base};
+    border: 1px solid {border};
+    border-radius: 8px;
+    margin-top: 14px;
+    padding-top: 6px;
+}}
+
+QGroupBox#cardGroup::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 4px;
+    font-weight: 600;
+}}
+
+/* 小节标题：放在卡片外，与 KDE 设置页一致 */
 QLabel#sectionTitle {{
     font-weight: 600;
     font-size: {fs['base']};
-    padding-top: 2px;
+    padding: 2px 2px 0 2px;
 }}
 
-QFrame#sectionRule {{
-    border: none;
-    border-top: 1px solid {border};
-    max-height: 1px;
+QLabel#cardTitle {{
+    font-weight: 600;
+    font-size: {fs['base']};
+}}
+
+/* 主数值：内存上限的「4 GB」 */
+QLabel#bigValue {{
+    font-size: {fs['large']};
+    font-weight: 600;
+    color: {highlight};
+}}
+
+/* 说明条：浅色底的提示框 */
+QFrame#infoBox {{
+    background-color: {alternate};
+    border: 1px solid {border};
+    border-radius: 6px;
+}}
+
+QLabel#infoText {{
+    color: {button_text};
+    font-size: {fs['small']};
+}}
+
+/* 状态徽标 */
+QLabel#badgeOk {{
+    color: {success};
+    background-color: {success_bg};
+    border-radius: 9px;
+    padding: 1px 10px;
+    font-size: {fs['small']};
+}}
+
+/* 次要徽标：VM 内的地址用（比宿主那组弱一档） */
+QLabel#badgeMuted {{
+    color: {button_text};
+    background-color: {alternate};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 0px 7px;
+    font-size: {fs['small']};
+}}
+
+/* 中性徽标：给「内部」这类标注用，比灰字醒目但不喧宾夺主 */
+QLabel#badgeInfo {{
+    color: {highlight};
+    background-color: {info_bg};
+    border-radius: 8px;
+    padding: 0px 7px;
+    font-size: {fs['small']};
+    font-weight: 600;
+}}
+
+QLabel#badgeWarn {{
+    color: {danger};
+    background-color: {danger_bg};
+    border-radius: 9px;
+    padding: 1px 10px;
+    font-size: {fs['small']};
+}}
+
+/* 档位按钮：选中态用高亮色（与 KDE 的 segmented control 一致） */
+QPushButton[segGb]:checked {{
+    background-color: {highlight};
+    color: {highlight_text};
+    border: 1px solid {highlight};
+}}
+
+QPushButton[segGb]:checked:hover {{
+    background-color: {highlight};
 }}
 
 QLabel#monoValue {{
@@ -564,7 +733,7 @@ QGroupBox::title {{
 
 /* ═══════════ 分割线 ═══════════ */
 QSplitter::handle {{
-    background-color: {border};
+    background-color: transparent;
 }}
 
 QSplitter::handle:horizontal {{
@@ -902,9 +1071,11 @@ QPushButton#dangerButton:disabled {{
     color: {disabled_text};
 }}
 
-/* ═══════════ 空状态 ═══════════ */
+/* ═══════════ 空状态 ═══════════
+   与表格共用同一块区域，外观也要是圆角白底卡片 */
 QWidget#emptyState {{
-    background-color: {base};
+    background-color: transparent;
+    border: none;
 }}
 
 QLabel#emptyTitle {{

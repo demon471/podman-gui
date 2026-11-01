@@ -33,7 +33,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ui.widgets import apply_aligned_delegate
+from ui.widgets import (
+    apply_aligned_delegate,
+    apply_dialog_geometry,
+    make_list_card,
+)
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import files as vm_files
@@ -127,6 +131,8 @@ class FilePanel(QWidget):
         nav.addWidget(self.btn_home)
 
         self.ed_path = QLineEdit()
+        # 路径可能很长，但不该让输入框的最小宽度跟着涨
+        self.ed_path.setMinimumWidth(80)
         self.ed_path.setPlaceholderText("/")
         self.ed_path.returnPressed.connect(self._go_typed)
         nav.addWidget(self.ed_path, 1)
@@ -148,6 +154,8 @@ class FilePanel(QWidget):
             ["名称", "大小", "权限", "修改时间"]
         )
         self.table.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.table.setCornerButtonEnabled(False)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -170,7 +178,10 @@ class FilePanel(QWidget):
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        v.addWidget(self.table, 1)
+        # ResizeToContents 会把列的最小宽度顶到内容宽度，
+        # 长文件名能把整个对话框的最小宽度撑到 1000+ —— 限制一下
+        hdr.setMinimumSectionSize(44)
+        v.addWidget(make_list_card(self.table), 1)
 
         # ── 操作栏 ──
         row = QHBoxLayout()
@@ -389,7 +400,6 @@ class FilePanel(QWidget):
         def done(content):
             dlg = QDialog(self)
             dlg.setWindowTitle(entry.name)
-            dlg.resize(760, 560)
             lay = QVBoxLayout(dlg)
 
             te = QPlainTextEdit()
@@ -403,6 +413,9 @@ class FilePanel(QWidget):
             bb.rejected.connect(dlg.reject)
             lay.addWidget(bb)
 
+            apply_dialog_geometry(
+                dlg, width_ratio=0.40, height_ratio=0.46
+            )
             dlg.exec()
 
         self._spawn(work, done, lambda m: self.status.emit(f"读取失败: {m}"))

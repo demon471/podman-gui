@@ -54,11 +54,12 @@ echo "  ✓ 安装完成"
 
 # ── 4. 冒烟测试：打包版能否启动 ──
 echo "▶ 冒烟测试（打包版冷启动 15 秒）"
-BEFORE=$(coredumpctl list --no-pager 2>/dev/null | wc -l)
 
 pkill -x podman-gui 2>/dev/null || true
 sleep 1
 
+# 不用 coredumpctl 计数判断：coredump 会被轮转/清理，
+# 行数变少就会误报失败。直接看进程是否存活 + 日志有无崩溃痕迹。
 QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME="" \
     timeout 20 "$HOME/.local/bin/podman-gui" > /tmp/podman-gui-smoke.log 2>&1 &
 SMOKE_PID=$!
@@ -69,17 +70,21 @@ if kill -0 "$SMOKE_PID" 2>/dev/null; then
     ALIVE=1
 fi
 
-AFTER=$(coredumpctl list --no-pager 2>/dev/null | wc -l)
+CRASH=0
+if grep -qE "Fatal Python error|Traceback \(most recent|Aborted|core dumped" \
+        /tmp/podman-gui-smoke.log 2>/dev/null; then
+    CRASH=1
+fi
 
-if [ "$ALIVE" = "1" ] && [ "$BEFORE" = "$AFTER" ]; then
+if [ "$ALIVE" = "1" ] && [ "$CRASH" = "0" ]; then
     echo "  ✓ 启动正常，无崩溃"
     kill "$SMOKE_PID" 2>/dev/null || true
     wait "$SMOKE_PID" 2>/dev/null || true
 else
     echo "  ✗ 冒烟测试失败" >&2
-    echo "    存活=$ALIVE  coredump: $BEFORE → $AFTER" >&2
+    echo "    存活=$ALIVE  崩溃迹象=$CRASH" >&2
     echo "    日志：" >&2
-    head -20 /tmp/podman-gui-smoke.log >&2
+    head -30 /tmp/podman-gui-smoke.log >&2
     exit 1
 fi
 

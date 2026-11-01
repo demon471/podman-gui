@@ -141,6 +141,16 @@ class Daemon:
     # 巡检
     # ─────────────────────────────────────────
     def _tick(self) -> None:
+        # 兜底：把卡在 paused (postmigrate) 的 VM 拉回运行。
+        # 快照恢复漏发 cont 时，guest 是冻结的 —— 端口在监听但
+        # SSH 永远等不到 banner，用户看到的就是「连不上」。
+        try:
+            fixed = manager.resume_paused_vms()
+            for name in fixed:
+                log.info("%s 停在 paused 状态，已恢复运行", name)
+        except Exception:
+            pass
+
         vms = manager.load_all()
         if not vms:
             self._pool.stop_all()

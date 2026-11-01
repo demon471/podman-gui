@@ -18,13 +18,20 @@ pytestmark = pytest.mark.needs_qt
 
 @pytest.fixture
 def file_panel(qapp):
-    """真实 FilePanel（连 dev 或 rocky）"""
+    """真实 FilePanel（连 dev 或 rocky）
+
+    必须先看 VM 是不是真的在跑：只判断「配置里有这台机器」不够 ——
+    机器没启动时 SFTP 会重试 4 次并递增退避，一个用例空转约 30 秒，
+    10 个用例就把整套测试拖到 50 秒以上。
+    """
     from core.vm import manager
     from ui.vm_files import FilePanel
 
     vm = manager.load("dev") or manager.load("rocky")
     if vm is None:
         pytest.skip("没有可用虚拟机")
+    if not vm.running:
+        pytest.skip("虚拟机未运行")
 
     panel = FilePanel(vm)
     panel.show()

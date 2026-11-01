@@ -848,6 +848,7 @@ def compute_usage(client) -> dict:
                 "limit_gb": limit_gb,
                 "actual_gb": actual_gb,
                 "unlimited": False,
+                "project": "",
             })
     except Exception:
         pass
@@ -882,12 +883,17 @@ def compute_usage(client) -> dict:
                 except (OSError, ValueError):
                     continue
 
+        # compose 项目归属（docker-compose / podman-compose 都会打这个标签）
+        labels = (info.get("Config") or {}).get("Labels") or {}
+        project = labels.get("com.docker.compose.project") or ""
+
         out["containers"].append({
             "name": name,
             "state": state,
             "limit_gb": limit_gb,
             "actual_gb": actual_gb,
             "unlimited": limit == 0,
+            "project": project,
         })
 
         if state == "running":

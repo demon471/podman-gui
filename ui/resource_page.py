@@ -30,7 +30,7 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
 from resources.icons import ICON_SIZE_TOOLBAR, icon
-from ui.widgets import apply_aligned_delegate
+from ui.widgets import make_list_card, apply_aligned_delegate
 
 
 class ResourcePage(QWidget):
@@ -161,6 +161,8 @@ class ResourcePage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.table.setCornerButtonEnabled(False)
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setShowGrid(False)
         self.table.setFrameShape(QTableView.Shape.NoFrame)
@@ -200,7 +202,8 @@ class ResourcePage(QWidget):
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
 
-        layout.addLayout(self._table_stack)
+        # 包一层圆角白底卡片（表格 + 空状态共用）
+        layout.addWidget(make_list_card(self._table_stack))
 
         self.lbl_stats = QLabel("")
         self.lbl_stats.setObjectName("hintLabel")

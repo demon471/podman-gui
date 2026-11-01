@@ -390,3 +390,77 @@ class TestDetailHeader:
         clip = QGuiApplication.clipboard().text()
         assert "ssh" in clip
         assert vm.spec.name in clip or "127.0.0.1" in clip
+
+
+class TestDetailDialogWidth:
+    """详情对话框不该被内容撑宽"""
+
+    def test_minimum_width_reasonable(self, qapp):
+        from core.vm import manager
+        from ui.vm_detail import VMDetailDialog
+
+        vms = manager.load_all()
+        if not vms:
+            pytest.skip("没有虚拟机")
+        dlg = VMDetailDialog(vms[0])
+        # 之前账户页那条 150 字符的 ssh 命令把最小宽度顶到 1059px
+        assert dlg.minimumSizeHint().width() <= 700, (
+            f"详情对话框最小宽度 {dlg.minimumSizeHint().width()}px 过大"
+        )
+        dlg.deleteLater()
+
+    def test_ssh_shown_short(self):
+        """账户页不再塞长命令，头部用域名形式"""
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "vm_detail.py").read_text(
+            encoding="utf-8"
+        )
+        # 头部只显示 ssh <域名>，不是整条带 -p 的长命令
+        assert 'self.lbl_ssh.setText(f"ssh {vm_domain(spec.name)}")' in src
+
+
+class TestDialogGeometry:
+    """详情类对话框要按屏幕百分比，且比主窗口更小"""
+
+    def test_helper_exists(self):
+        from ui.widgets import apply_dialog_geometry
+
+        assert callable(apply_dialog_geometry)
+
+    def test_vm_detail_uses_ratio(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "vm_detail.py").read_text(
+            encoding="utf-8"
+        )
+        assert "apply_dialog_geometry(" in src
+        assert "self.resize(820, 620)" not in src, "不该再写死尺寸"
+
+    def test_detail_smaller_than_main(self):
+        """对话框比例必须小于主窗口（50%×56%）"""
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent
+        dlg = (root / "ui" / "vm_detail.py").read_text(encoding="utf-8")
+        assert "width_ratio=0.38" in dlg
+        assert "height_ratio=0.48" in dlg
+
+    def test_container_files_uses_ratio(self):
+        from pathlib import Path
+
+        src = (root := Path(__file__).parent.parent) / "ui" / "container_files.py"
+        text = src.read_text(encoding="utf-8")
+        assert "apply_dialog_geometry(" in text
+        assert "self.resize(760, 560)" not in text
+
+    def test_centered_on_parent(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parent.parent / "ui" / "widgets.py").read_text(
+            encoding="utf-8"
+        )
+        start = src.find("def apply_dialog_geometry")
+        body = src[start:start + 1800]
+        assert "parentWidget" in body, "应相对父窗口居中"
+        assert "frameGeometry" in body

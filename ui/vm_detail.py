@@ -17,13 +17,14 @@ from pathlib import Path
 
 import subprocess
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -34,6 +35,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -42,7 +44,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ui.widgets import apply_aligned_delegate
+from ui.widgets import (
+    apply_aligned_delegate,
+    apply_dialog_geometry,
+    make_list_card,
+)
 from core.async_task import run_async
 from core.notify import notifier
 from core.vm import manager as vm_manager
@@ -107,7 +113,6 @@ class VMDetailDialog(QDialog):
         self._shares_dirty = False
 
         self.setWindowTitle(f"虚拟机 - {vm.spec.name}")
-        self.resize(820, 620)
 
         self._build_ui()
 
@@ -119,6 +124,10 @@ class VMDetailDialog(QDialog):
         # 从「重启并挂载」流程回来时直接落在共享目录页
         if initial_tab is not None and 0 <= initial_tab < self.tabs.count():
             self.tabs.setCurrentIndex(initial_tab)
+
+        # 尺寸：比主窗口更窄更小（主窗口 50%×56%，这里 44%×50%）
+        apply_dialog_geometry(self, width_ratio=0.38, height_ratio=0.48,
+                              min_w=620, min_h=440)
 
         self.refresh()
 
@@ -170,12 +179,17 @@ class VMDetailDialog(QDialog):
         )
         ssh_row.addWidget(self.lbl_ssh)
 
+        # 复制按钮：固定尺寸 —— 复制后的反馈只换图标不换文字，
+        # 否则文字一变长会把整行撑开、详情页跟着抖一下
         self.btn_copy_ssh = QToolButton()
         self.btn_copy_ssh.setIcon(icon("copy", 16))
-        self.btn_copy_ssh.setToolTip("复制 SSH 命令")
+        self.btn_copy_ssh.setIconSize(QSize(16, 16))
+        self.btn_copy_ssh.setFixedSize(24, 24)
         self.btn_copy_ssh.setAutoRaise(True)
+        self.btn_copy_ssh.setToolTip("复制 SSH 命令")
         self.btn_copy_ssh.clicked.connect(self._copy_ssh)
         ssh_row.addWidget(self.btn_copy_ssh)
+
         ssh_row.addStretch()
 
         col.addLayout(ssh_row)
@@ -274,6 +288,8 @@ class VMDetailDialog(QDialog):
             ["宿主机目录", "VM 内路径", "状态"]
         )
         self.tbl_shares.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.tbl_shares.setCornerButtonEnabled(False)
         self.tbl_shares.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -288,7 +304,7 @@ class VMDetailDialog(QDialog):
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        v.addWidget(self.tbl_shares, 1)
+        v.addWidget(make_list_card(self.tbl_shares), 1)
 
         # 状态提示（需要重启时出现）
         self.lbl_share_hint = QLabel("")
@@ -357,35 +373,126 @@ class VMDetailDialog(QDialog):
         # 防抖：改密码进行中 / 成功提示期间，忽略重复触发
         self._pwd_busy = False
 
-        # ── 账户信息 ──
-        g1 = QGroupBox("账户")
-        f1 = QFormLayout(g1)
-        f1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        f1.setSpacing(8)
+        # ── 连接信息 ──
+        # 只留第三方 SSH 客户端真正要填的四项，一行两列。
+        # ssh 命令已在窗口顶部，这里不重复；私钥路径太长且一般不用手填，
+        # 也去掉（本应用已自动写进 ~/.ssh/config）。
+        g1 = QGroupBox("连接信息")
+        gv = QVBoxLayout(g1)
+        gv.setContentsMargins(14, 12, 14, 14)
+        gv.setSpacing(8)
 
-        self.lbl_account = QLabel(self.vm.spec.username)
-        self.lbl_account.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        port = self.vm.ssh_port
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+
+        def cell(label: str, value: str) -> QWidget:
+            box = QWidget()
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            k = QLabel(label)
+            k.setObjectName("formLabel")
+            k.setFixedWidth(52)
+            k.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            h.addWidget(k)
+
+            val = QLabel(value)
+            val.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            val.setObjectName("monoLabel")
+            val.setToolTip(value)
+            val.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            )
+            h.addWidget(val, 1)
+            return box
+
+        # 主机 / 端口显示的是 **guest 内部** 的地址与端口，
+        # 并标注「内部」——宿主侧的 127.0.0.1:port 只是转发端口，
+        # 用户去第三方工具里填写时经常搞混。
+        self.lbl_guest_host = QLabel("—")
+        self.lbl_guest_port = QLabel(str(vm_ssh.guest_ssh_port(self.vm)))
+
+        def cell_widget(label: str, value_widget: QWidget,
+                        suffix: str = "") -> QWidget:
+            box = QWidget()
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            k = QLabel(label)
+            k.setObjectName("formLabel")
+            k.setFixedWidth(52)
+            k.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            h.addWidget(k)
+
+            value_widget.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            value_widget.setObjectName("monoLabel")
+            h.addWidget(value_widget)
+
+            if suffix:
+                # 用彩色徽标而不是灰色小字：这是个容易搞混的点，
+                # 得让人一眼看到「这是内部地址，不是宿主转发端口」
+                tag = QLabel(suffix)
+                tag.setObjectName(
+                    "badgeInfo" if suffix == "宿主" else "badgeMuted"
+                )
+                tag.setToolTip({
+                    "宿主": "从宿主机（第三方 SSH 工具）连接时用这组",
+                    "VM 内": (
+                        "虚拟机内部的地址。QEMU 用户网络给每台 VM 都分配"
+                        " 10.0.2.0/24，所以多台 VM 的内部 IP 相同 —— "
+                        "它们各自独立、互不冲突，但不能拿来区分虚拟机。"
+                    ),
+                }.get(suffix, ""))
+                h.addWidget(tag)
+
+            h.addStretch(1)
+            return box
+
+        # 两套地址都要显示，否则容易误解：
+        #   · 宿主侧 127.0.0.1:<转发端口> —— 每台 VM 唯一，第三方工具填这个
+        #   · VM 内部 10.0.2.15:22 —— QEMU 用户网络（SLIRP）对每台 VM
+        #     都分配同一个网段，所以多台 VM 看到的内部 IP 必然相同。
+        #     它们在各自的虚拟网络里互不冲突，但不能用来区分虚拟机。
+        grid.addWidget(
+            cell_widget("主机", QLabel("127.0.0.1"), "宿主"), 0, 0
         )
-        f1.addRow("用户名", self.lbl_account)
-
-        # SSH 地址放这里：改完密码最关心的就是「怎么连、用哪个密码」
-        row_ssh = QHBoxLayout()
-        row_ssh.setSpacing(6)
-        self.lbl_ssh = QLabel(self.vm.ssh_command())
-        self.lbl_ssh.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        grid.addWidget(
+            cell_widget("端口", QLabel(str(port)), "宿主"), 0, 2
         )
-        self.lbl_ssh.setObjectName("monoLabel")
-        row_ssh.addWidget(self.lbl_ssh)
-        btn_copy = QToolButton()
-        btn_copy.setIcon(icon("copy", ICON_SIZE_BUTTON.width()))
-        btn_copy.setToolTip("复制 SSH 命令")
-        btn_copy.clicked.connect(self._copy_ssh)
-        row_ssh.addWidget(btn_copy)
-        row_ssh.addStretch(1)
-        f1.addRow("SSH", row_ssh)
+        grid.addWidget(
+            cell_widget("内部", self.lbl_guest_host, "VM 内"), 1, 0
+        )
+        grid.addWidget(
+            cell_widget("内部", self.lbl_guest_port, "VM 内"), 1, 2
+        )
+        grid.addWidget(
+            cell_widget("用户", QLabel(self.vm.spec.username)), 2, 0
+        )
+        grid.addWidget(
+            cell_widget(
+                "密码",
+                QLabel(vm_manager.get_password(self.vm.spec.name)),
+            ), 2, 2
+        )
 
+        gv.addLayout(grid)
+        QTimer.singleShot(80, self._load_guest_ip)
         v.addWidget(g1)
 
         # ── 修改密码 ──
@@ -466,6 +573,70 @@ class VMDetailDialog(QDialog):
         v.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
         return w
+
+    def _load_guest_ip(self) -> None:
+        """后台取 guest 内部 IP（SSH 往返，不能阻塞界面）"""
+        def work():
+            return vm_ssh.guest_ip(self.vm)
+
+        def done(ip):
+            text = ip or "未获取"
+            self.lbl_guest_host.setText(text)
+            if ip:
+                self.lbl_guest_host.setToolTip(
+                    f"guest 内部地址；宿主侧用 "
+                    f"{self.vm.ssh_host}:{self.vm.ssh_port}"
+                )
+
+        def error(_msg):
+            self.lbl_guest_host.setText("未获取")
+
+        self._spawn(work, done, error)
+
+    def _copyable_value(self, label: str, value: str,
+                        mono: bool = True) -> QWidget:
+        """只读值 + 一键复制按钮（给第三方客户端填参数用）"""
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+
+        lbl = QLabel(value)
+        lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        if mono:
+            lbl.setObjectName("monoLabel")
+        lbl.setToolTip(value)
+        lbl.setMinimumWidth(120)
+        lbl.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        h.addWidget(lbl, 1)
+
+        btn = QToolButton()
+        btn.setIcon(icon("copy", ICON_SIZE_BUTTON.width()))
+        btn.setAutoRaise(True)
+        btn.setFixedSize(22, 22)
+        btn.setToolTip(f"复制{label}")
+        btn.clicked.connect(
+            lambda: self._copy_value(label, value, btn)
+        )
+        h.addWidget(btn)
+        return box
+
+    def _copy_value(self, label: str, value: str, btn) -> None:
+        QGuiApplication.clipboard().setText(value)
+        try:
+            btn.setIcon(icon(
+                "check", ICON_SIZE_BUTTON.width(),
+                color=semantic_colors()["success"],
+            ))
+            QTimer.singleShot(1200, lambda: btn.setIcon(
+                icon("copy", ICON_SIZE_BUTTON.width())
+            ))
+        except Exception:
+            pass
 
     def _add_pwd_field(self, form: QFormLayout, label: str,
                        placeholder: str) -> QLineEdit:
@@ -947,9 +1118,30 @@ class VMDetailDialog(QDialog):
             self.lbl_status.setText(text)
 
     def _copy_ssh(self) -> None:
+        """复制 SSH 命令
+
+        反馈只落在按钮图标上（短暂变成绿勾）：
+        往状态栏写完整命令会让那一行变长，整个详情页跟着抖一下。
+        """
         cmd = self.vm.ssh_command()
         QGuiApplication.clipboard().setText(cmd)
-        self.lbl_status.setText(f"已复制到剪贴板：{cmd}")
+
+        try:
+            ok_icon = icon(
+                "check", 16, color=semantic_colors()["success"]
+            )
+            self.btn_copy_ssh.setIcon(ok_icon)
+            self.btn_copy_ssh.setToolTip("已复制")
+            QTimer.singleShot(1400, self._restore_copy_icon)
+        except Exception:
+            pass
+
+    def _restore_copy_icon(self) -> None:
+        try:
+            self.btn_copy_ssh.setIcon(icon("copy", 16))
+            self.btn_copy_ssh.setToolTip("复制 SSH 命令")
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _derive_share_tag(path: str) -> tuple[str, bool]:

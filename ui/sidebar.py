@@ -61,7 +61,6 @@ class Sidebar(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setFixedWidth(184)
         self.setObjectName("sidebar")
 
         layout = QVBoxLayout(self)
@@ -90,6 +89,59 @@ class Sidebar(QWidget):
 
         layout.addWidget(self.list)
         self.list.currentItemChanged.connect(self._on_change)
+
+        self._fit_width()
+
+    # 图标 + 图标与文字间距 + QSS 的 padding(10×2) / margin(4×2) + 余量
+    _CHROME = 56
+
+    def _fit_width(self) -> None:
+        """按最长导航项定宽（DPI / 字体变化时重算）
+
+        宽度 = 图标 + 最长文字 + 固定开销。
+        固定开销包含 QSS 里 item 的 padding/margin 和图标间距 ——
+        这些不体现在 fontMetrics 里，漏掉就会把「Compose」截成「Comp...」。
+        """
+        if not hasattr(self, "list"):
+            return
+        if getattr(self, "_fitting", False):
+            return
+        self._fitting = True
+        try:
+            fm = self.list.fontMetrics()
+            labels = [label for _k, label, _i in NAV_ITEMS]
+            labels += [t for t, _items in NAV_GROUPS if t]
+            text_w = max((fm.horizontalAdvance(x) for x in labels), default=60)
+
+            width = ICON_SIZE_SIDEBAR.width() + text_w + self._CHROME
+            width = max(120, min(width, 220))
+            # 值没变就不要 setFixedWidth —— 它会再触发 StyleChange，
+            # 和 changeEvent 里的重算凑成无限循环，最终把事件队列打爆
+            if width != getattr(self, "_last_width", -1):
+                self._last_width = width
+                self.setFixedWidth(width)
+        finally:
+            self._fitting = False
+
+    def changeEvent(self, e) -> None:
+        """字体 / 样式 / 屏幕缩放变化后重新定宽
+
+        不做这件事的话，把系统缩放从 100% 调到 150%，
+        字体变大了但宽度还是按旧字号算的 —— 「Compose」直接被截断。
+        """
+        from PyQt6.QtCore import QEvent, QTimer
+
+        # 注意：QEvent.Type.ScreenChangeInternal 是 Qt 私有枚举，
+        # PyQt6 里不存在，写上去会 AttributeError → 异常抛进事件处理
+        # → Qt fatal → 进程 abort。屏幕变化用主窗口的 screenChanged 信号处理。
+        if e.type() in (
+            QEvent.Type.FontChange,
+            QEvent.Type.StyleChange,
+            QEvent.Type.ApplicationFontChange,
+        ) and hasattr(self, "list"):
+            # 延后到事件处理之外再算：changeEvent 里同步改自身几何会重入
+            QTimer.singleShot(0, self._fit_width)
+        super().changeEvent(e)
 
     def _add_section(self, title: str) -> None:
         """分组标题（不可选中）"""

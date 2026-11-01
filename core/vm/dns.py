@@ -76,14 +76,16 @@ DNSMASQ_MARKER = "podman-gui-vm"
 RESOLVED_MARKER = "podman-gui-vm"
 
 DNSMASQ_CONF_TEMPLATE = """\
-# 由 podman-gui 生成：虚拟机域名通配解析
-# 所有 *.{suffix} 一律返回 127.0.0.1，配合端口转发即可访问 VM 内服务。
-# 新增 / 删除虚拟机无需修改此文件。
+# 由 podman-gui 生成：虚拟机域名解析
+#  · 有具体地址的虚拟机会写成独立的 A 记录（共享网桥模式下是
+#    guest 自己的 IP，宿主机可以直接访问）
+#  · 其余 *.{suffix} 仍然通配到 127.0.0.1，配合端口转发访问
 listen-address={addr}
 port={port}
 no-resolv
 no-hosts
 bind-interfaces
+{records}
 address=/{suffix}/127.0.0.1
 """
 
@@ -370,12 +372,69 @@ def status() -> DNSStatus:
 # ─────────────────────────────────────────
 # 配置内容
 # ─────────────────────────────────────────
+# 每台 VM 的具体地址：{vm 名字: IP}
+_ADDRESSES: dict[str, str] = {}
+
+
+def set_vm_addresses(mapping: dict[str, str] | None) -> None:
+    """登记每台 VM 的直连地址（共享网桥模式用）"""
+    global _ADDRESSES
+    _ADDRESSES = dict(mapping or {})
+
+
+def _records() -> str:
+    lines = []
+    for name, ip in sorted(_ADDRESSES.items()):
+        if not ip:
+            continue
+        domain = vm_domain(name)
+        lines.append(f"address=/{domain}/{ip}")
+    return "\n".join(lines)
+
+
 def dnsmasq_conf_content() -> str:
     return DNSMASQ_CONF_TEMPLATE.format(
         addr=DNSMASQ_ADDR,
         port=DNSMASQ_PORT,
         suffix=DOMAIN_SUFFIX,
+        records=_records(),
     )
+
+
+def refresh_addresses(vms=None) -> tuple[bool, str]:
+    """按当前网桥租约刷新 A 记录并重载 dnsmasq
+
+    网桥模式下 guest 有自己的 IP，域名必须解析到那个 IP；
+    否则 {suffix} 还指向 127.0.0.1，而网桥模式没有端口转发，
+    用域名访问会连不上。
+    """
+    from core.vm import bridge
+
+    if not bridge.ready():
+        if _ADDRESSES:
+            set_vm_addresses({})
+            return _restart_dnsmasq()
+        return True, ""
+
+    if vms is None:
+        try:
+            from core.vm import manager
+
+            vms = manager.load_all()
+        except Exception:
+            vms = []
+
+    mapping = {}
+    for vm in vms:
+        ip = bridge.lease_ip(vm.spec.name)
+        if ip:
+            mapping[vm.spec.name] = ip
+
+    if mapping == _ADDRESSES:
+        return True, ""
+
+    set_vm_addresses(mapping)
+    return _restart_dnsmasq()
 
 
 def resolved_conf_content() -> str:
