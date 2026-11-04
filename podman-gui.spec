@@ -77,7 +77,7 @@ a = Analysis(
                 "platforms/libqxcb.so",
                 "platforms/libqwayland-generic.so",
                 "platforms/libqwayland-egl.so",
-                "platformthemes/libqgtk3.so",
+
                 "imageformats/libqsvg.so",
                 "imageformats/libqico.so",
                 "imageformats/libqjpeg.so",
@@ -91,6 +91,31 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# ── 二进制瘦身 ──
+# excludes 只能挡 Python import，挡不住 ldd 依赖链和 Qt 插件
+# 拖进来的原生库。以下都是 GUI 应用用不到的：
+#   · 视频编解码（x265/aom/SVT-AV1/x264/dav1d/rav1e/heif/jxl）
+#     —— Qt 图像插件链拖进来的，我们只需要 jpeg/png/svg/ico
+#   · GTK 链（gtk-3/glycin/cairo/gio…）—— libqgtk3 平台主题
+#     的依赖，KDE 下走 xcb/wayland + kde 主题，不用 GTK
+#   · KF6BreezeIcons / KF6WidgetsAddons —— KDE 图标包
+#   · QtQuick/Qml/Pdf —— excludes 排了 Python 端，但 .so 仍被
+#     依赖扫描拖进来
+import re as _re
+
+_BIN_EXCLUDE = _re.compile(
+    r"lib(x265|aom|SvtAv1Enc|x264|dav1d|rav1e|heif|jxl|gtk-3|glycin"
+    r"|cairo|gio-2|glib-2|gobject-2|gmodule-2|gthread-2|pango"
+    r"|harfbuzz|KF6BreezeIcons|KF6WidgetsAddons"
+    r"|Qt6Quick|Qt6Qml|Qt6Pdf|Qt6Designer|Qt6Help|Qt6Test"
+    r"|Qt6WebEngine|Qt6Multimedia|Qt6Bluetooth|Qt6Nfc|Qt6SerialPort"
+    r"|Qt6Sensors|Qt6Positioning|Qt6Location|Qt6WebChannel)"
+)
+
+a.binaries = [
+    b for b in a.binaries if not _BIN_EXCLUDE.search(b[0])
+]
 
 pyz = PYZ(a.pure)
 

@@ -613,3 +613,15 @@ class TestSystemFixups:
         assert "setfacl" in script
         # pkexec 环境里拿发起用户
         assert "PKEXEC_UID" in script
+
+    def test_list_images_includes_rootfs(self):
+        """rootfs 条目没有静态 url，不能被 list_images 过滤掉
+
+        否则向导里没有可下载的镜像（用户实测踩坑）。
+        """
+        from core.vm import images
+
+        keys = [sp.key for sp in images.list_images()]
+        assert "alpine-3.22-lxc" in keys
+        assert "rocky-10-lxc" in keys
+        assert "debian-13-lxc" in keys

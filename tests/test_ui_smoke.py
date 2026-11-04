@@ -159,8 +159,7 @@ class TestVMPageInteractions:
         for _ in range(5):
             qapp.processEvents()
         if not page._vms:
-            self.skipTest("没有容器")
-            return
+            pytest.skip("没有容器")
         name = page._vms[0].spec.name
         vm = page._selected_vm()
         assert page._is_available(vm) in (True, False)

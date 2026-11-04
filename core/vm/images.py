@@ -83,7 +83,7 @@ class ImageSpec:
 CATALOG: dict[str, ImageSpec] = {
     "alpine-3.22-lxc": ImageSpec(
         key="alpine-3.22-lxc",
-        name="Alpine 3.22（轻）",
+        name="Alpine 3.22",
         family="alpine",
         default_user="dev",
         format="rootfs",
@@ -92,7 +92,7 @@ CATALOG: dict[str, ImageSpec] = {
     ),
     "rocky-10-lxc": ImageSpec(
         key="rocky-10-lxc",
-        name="Rocky Linux 10（轻）",
+        name="Rocky Linux 10",
         family="rocky",
         default_user="dev",
         format="rootfs",
@@ -101,7 +101,7 @@ CATALOG: dict[str, ImageSpec] = {
     ),
     "debian-13-lxc": ImageSpec(
         key="debian-13-lxc",
-        name="Debian 13（轻）",
+        name="Debian 13",
         family="debian",
         default_user="dev",
         format="rootfs",
@@ -112,10 +112,17 @@ CATALOG: dict[str, ImageSpec] = {
 
 
 def list_images(arch: str = "amd64") -> list[ImageSpec]:
-    """列出当前架构可用的镜像"""
+    """列出当前架构可用的镜像
+
+    rootfs 条目（容器档）不能按静态 url 过滤：它的下载地址
+    是从 meta 索引**动态解析**的（resolve_rootfs_url），
+    ImageSpec 里没有 url_amd64 字段，按 qcow2 时代的
+    spec.url() 判断会把三个 rootfs 条目全部过滤掉 ——
+    向导里就没有可下载的镜像了。
+    """
     out = []
     for spec in CATALOG.values():
-        if spec.url(arch):
+        if spec.format == "rootfs" or spec.url(arch):
             out.append(spec)
     return out
 
