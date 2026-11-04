@@ -512,3 +512,104 @@ class TestImageCatalog:
         spec = images.get_spec("alpine-3.22-lxc")
         p = images.rootfs_path(spec)
         assert p.name == "alpine-3.22-lxc-amd64.tar.xz"
+
+
+class TestSystemFixups:
+    """非特权容器的系统前置检查（ACL / lxc-usernet）
+
+    这两项缺失时容器必挂且报错难懂（"Could not access /home" /
+    "Failed to open lxc-usernet"），已并入「启用共享网络」的
+    一次性初始化脚本。这里守检查函数本身。
+    """
+
+    def test_acl_ok_getfacl_missing(self, monkeypatch):
+        """getfacl 不可用时放行（无法判断别挡路）"""
+        import subprocess
+
+        import core.vm.container as c
+
+        monkeypatch.setattr(c, "subuid_range", lambda: (100000, 65536))
+
+        def raise_os(*a, **kw):
+            raise FileNotFoundError("getfacl")
+
+        monkeypatch.setattr(subprocess, "run", raise_os)
+        assert c.acl_ok() is True
+
+    def test_acl_ok_detects_missing(self, monkeypatch):
+        import subprocess
+
+        import core.vm.container as c
+
+        monkeypatch.setattr(c, "subuid_range", lambda: (100000, 65536))
+
+        class R:
+            returncode = 0
+            stdout = "user::rwx\nuser:john:rwx\n"
+
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: R()
+        )
+        assert c.acl_ok() is False
+
+    def test_acl_ok_detects_present(self, monkeypatch):
+        import subprocess
+
+        import core.vm.container as c
+
+        monkeypatch.setattr(c, "subuid_range", lambda: (100000, 65536))
+
+        class R:
+            returncode = 0
+            stdout = "user::rwx\nuser:100000:--x\n"
+
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: R()
+        )
+        assert c.acl_ok() is True
+
+    def test_usernet_ok_missing_file(self, tmp_path):
+        """配额文件不存在 → False（FileNotFoundError 分支）"""
+        from core.vm.container import _usernet_check
+
+        assert _usernet_check(tmp_path / "nope", user="john") is False
+
+    def test_usernet_check_found(self, tmp_path):
+        from core.vm.container import _usernet_check
+
+        f = tmp_path / "lxc-usernet"
+        f.write_text("john veth pgbr0 10\n", encoding="utf-8")
+        assert _usernet_check(f, user="john") is True
+        assert _usernet_check(f, user="alice") is False
+
+    def test_pending_fixups_lists_both(self, monkeypatch):
+        import core.vm.container as c
+
+        monkeypatch.setattr(c, "acl_ok", lambda: False)
+        monkeypatch.setattr(c, "usernet_ok", lambda: False)
+        items = c.pending_fixups()
+        assert len(items) == 2
+        assert any("ACL" in i for i in items)
+        assert any("usernet" in i for i in items)
+
+    def test_prerequisites_reports_fixups(self, monkeypatch):
+        import core.vm.container as c
+
+        monkeypatch.setattr(c, "lxc_version", lambda: "7.0.0")
+        monkeypatch.setattr(c, "subuid_range", lambda: (100000, 65536))
+        monkeypatch.setattr(c, "pending_fixups",
+                            lambda: ["家目录 ACL"])
+        ok, err = c.prerequisites()
+        assert not ok
+        assert "ACL" in err
+        assert "启用共享网络" in err
+
+    def test_setup_script_contains_fixups(self):
+        """初始化脚本必须包含 ACL 和 lxc-usernet 配置"""
+        from core.vm import bridge
+
+        script = bridge._setup_script()
+        assert "lxc-usernet" in script
+        assert "setfacl" in script
+        # pkexec 环境里拿发起用户
+        assert "PKEXEC_UID" in script

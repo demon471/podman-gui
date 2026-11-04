@@ -393,7 +393,9 @@ class VMWizard(QDialog):
             return
 
         for spec in self._specs:
-            downloaded = images.is_downloaded(spec)
+            # 容器档用 rootfs tarball 缓存判断（qcow2 时代的
+            # is_downloaded 已不适用）
+            downloaded = images.rootfs_downloaded(spec)
             mark = "已下载" if downloaded else "未下载"
             it = QListWidgetItem(f"{spec.name}    [{mark}]")
             it.setData(Qt.ItemDataRole.UserRole, spec.key)

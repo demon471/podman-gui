@@ -65,13 +65,84 @@ def subuid_range() -> tuple[int, int] | None:
     return None
 
 
+def acl_ok() -> bool:
+    """家目录是否已给容器 root（subuid 段）开放穿越权限
+
+    /home/<user> 通常是 0700，subuid 用户无法到达放在下面的
+    rootfs（报 "Could not access /home/<user>"）。用 getfacl
+    检查 ACL 里的 subuid x 位；getfacl 不存在时放行
+    （无法判断就别挡路，真缺了启动会报错并带提示）。
+    """
+    got = subuid_range()
+    if not got:
+        return True
+    try:
+        r = subprocess.run(
+            ["getfacl", "-p", str(Path.home())],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if r.returncode != 0:
+        return True
+    return f"user:{got[0]}" in r.stdout
+
+
+def usernet_ok() -> bool:
+    """/etc/lxc/lxc-usernet 是否有当前用户的 veth 配额
+
+    缺失时 lxc-user-nic 直接失败（"Failed to open
+    lxc-usernet"）。
+    """
+    got = subuid_range()
+    if not got:
+        return True
+    user = os.environ.get("USER") or Path.home().name
+    return _usernet_check(Path("/etc/lxc/lxc-usernet"), user=user)
+
+
+def _usernet_check(path: Path, user: str) -> bool:
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] == user and parts[1] == "veth":
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def pending_fixups() -> list[str]:
+    """还缺哪些系统前置（用于生成一次性初始化提示）"""
+    missing = []
+    if not acl_ok():
+        missing.append("家目录 ACL（容器 root 无法穿越 /home）")
+    if not usernet_ok():
+        missing.append("lxc-usernet 配额（非特权容器无法创建网络）")
+    return missing
+
+
 def prerequisites() -> tuple[bool, str]:
-    """创建/启动前的依赖检查，返回 (是否通过, 错误说明)"""
+    """创建/启动前的依赖检查，返回 (是否通过, 错误说明)
+
+    三项系统前置（lxc、subuid、ACL/usernet）里，ACL 与
+    usernet 由「启用共享网络」的一次性初始化顺带配置
+    （见 bridge._setup_script 第 5 段），所以缺失时提示
+    去那里修复而不是让用户手敲命令。
+    """
     ver = lxc_version()
     if not ver:
         return False, "LXC 未安装（需要 lxc 包），请在设置页安装"
     if not subuid_range():
         return False, "当前用户没有 subuid/subgid 条目，无法使用非特权容器"
+
+    missing = pending_fixups()
+    if missing:
+        return False, (
+            "还差一次性系统配置："
+            + "；".join(missing)
+            + "。请到 设置 → 服务 → 虚拟机网络 执行「启用共享网络」。"
+        )
     return True, ""
 
 

@@ -173,6 +173,29 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
 
+# 5. 非特权容器前置（lxc 直管 veth，不走 qemu-bridge-helper）
+#
+#    a) /etc/lxc/lxc-usernet：给发起用户分配 veth 配额，
+#       不存在时 lxc-user-nic 直接失败（"Failed to open
+#       lxc-usernet"，实测容器起不来）
+#    b) 家目录 ACL：/home/<user> 通常是 0700，容器 root
+#       （subuid 段）无法穿越到放在下面的 rootfs，
+#       报 "Could not access /home/<user>"。给 subuid 段加 x。
+#
+#    pkexec 环境里用 PKEXEC_UID 拿发起用户（root 的 whoami 不对）。
+HOME_USER=$(getent passwd "${{PASSWORD_xzrychpv}}" | cut -d: -f1)
+[ -n "$HOME_USER" ] || HOME_USER=$(getent passwd 1000 | cut -d: -f1)
+SUBUID=$(getent subuid "$HOME_USER" 2>/dev/null | head -1 | cut -d: -f2)
+
+mkdir -p /etc/lxc
+if ! grep -qE "^$HOME_USER[[:space:]]" /etc/lxc/lxc-usernet 2>/dev/null; then
+    echo "$HOME_USER veth {BRIDGE} 10" >> /etc/lxc/lxc-usernet
+fi
+
+if [ -n "$SUBUID" ] && [ -d "/home/$HOME_USER" ]; then
+    setfacl -m "u:$SUBUID:x" "/home/$HOME_USER" 2>/dev/null || true
+fi
+
 systemctl daemon-reload
 systemctl enable --now {UNIT_NAME} || true
 systemctl restart {UNIT_NAME} || true
@@ -183,11 +206,9 @@ def setup(timeout: int = 180) -> tuple[bool, str]:
     """初始化共享网桥（会弹系统授权框）"""
     if not has_pkexec():
         return False, "系统缺少 pkexec（polkit），无法提权创建网桥"
-    if not helper_available():
-        return False, (
-            "未找到 qemu-bridge-helper（通常由 qemu 包提供），"
-            "无法免 root 挂网桥"
-        )
+    # qemu-bridge-helper 是 VM 档的挂桥方式；容器档走
+    # lxc-user-nic（见脚本第 5 段的 lxc-usernet 配置）。
+    # helper 缺失只影响老的 QEMU 客户端，不再阻止初始化。
 
     try:
         r = subprocess.run(
