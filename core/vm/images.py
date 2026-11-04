@@ -740,10 +740,18 @@ def verify_qcow2(path: Path) -> tuple[bool, str]:
 # 来源 images.linuxcontainers.org（清华 tuna 有同步）。
 # ═══════════════════════════════════════════════════════
 
-LXC_META_PATHS = [
+# 镜像站：(索引 URL, 资源基址)
+#
+# 索引里的 path 字段是**站点相对路径**（如
+# /images/alpine/3.22/amd64/default/<日期>/），必须拼基址，
+# 否则 ValueError: unknown url type。清华的镜像路径带
+# /lxc-images 前缀，官方站不带 —— 两者的基址不同，要成对配。
+LXC_MIRRORS = [
     # 国内优先（实测快 3-10 倍）
-    "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/meta/1.0/index-system",
-    "https://images.linuxcontainers.org/meta/1.0/index-system",
+    ("https://mirrors.tuna.tsinghua.edu.cn/lxc-images/meta/1.0/index-system",
+     "https://mirrors.tuna.tsinghua.edu.cn/lxc-images"),
+    ("https://images.linuxcontainers.org/meta/1.0/index-system",
+     "https://images.linuxcontainers.org"),
 ]
 
 # distro 在 index 里的目录名（含别名尝试顺序）
@@ -753,19 +761,32 @@ _LXC_DISTRO_ALIASES = {
     "debian": ("debian",),
 }
 
+# 版本号 → 索引里的真实版本串
+#
+# Debian 在索引里用代号（trixie），不是数字（13）。
+# 用户记数字更自然，所以在这一层做映射。
+_LXC_VERSION_ALIASES = {
+    ("debian", "13"): "trixie",
+    ("debian", "12"): "bookworm",
+    ("debian", "14"): "forky",
+}
+
 # index 行字段位置：distro;version;arch;variant;date;path;...
 _IDX_DISTRO, _IDX_VER, _IDX_ARCH, _IDX_VARIANT, _IDX_DATE, _IDX_PATH = (
     0, 1, 2, 3, 4, 5
 )
 
 
-def _fetch_index() -> list[list[str]]:
-    """拉取发行版索引（多源降级），返回按日期倒序的行"""
+def _fetch_index() -> tuple[list[list[str]], str]:
+    """拉取发行版索引（多源降级）
+
+    返回 (行列表, 资源基址)。行按日期倒序，取第一个即最新。
+    """
     import urllib.request
 
-    for meta in LXC_META_PATHS:
+    for meta, base in LXC_MIRRORS:
         try:
-            with urllib.request.urlopen(meta, timeout=10) as r:
+            with urllib.request.urlopen(meta, timeout=15) as r:
                 text = r.read().decode("utf-8", "replace")
             rows = [
                 l.split(";")
@@ -775,10 +796,10 @@ def _fetch_index() -> list[list[str]]:
             rows = [r for r in rows if len(r) > _IDX_PATH]
             rows.sort(key=lambda r: r[_IDX_DATE], reverse=True)
             if rows:
-                return rows
+                return rows, base
         except (OSError, ValueError):
             continue
-    return []
+    return [], ""
 
 
 def resolve_rootfs_url(distro: str, version: str, arch: str = "amd64",
@@ -789,7 +810,9 @@ def resolve_rootfs_url(distro: str, version: str, arch: str = "amd64",
     挑日期最新的一个。找不到返回空串。
     """
     aliases = _LXC_DISTRO_ALIASES.get(distro, (distro,))
-    for row in _fetch_index():
+    version = _LXC_VERSION_ALIASES.get((distro, version), version)
+    rows, base = _fetch_index()
+    for row in rows:
         if row[_IDX_ARCH] != arch or row[_IDX_VARIANT] != variant:
             continue
         if row[_IDX_DISTRO] not in aliases:
@@ -797,7 +820,9 @@ def resolve_rootfs_url(distro: str, version: str, arch: str = "amd64",
         # 版本前缀匹配（3.22 匹配 3.22；10 匹配 10）
         if not row[_IDX_VER].startswith(version):
             continue
-        return row[_IDX_PATH].rstrip("/") + "/rootfs.tar.xz"
+        # path 是站点相对路径，必须拼基址
+        rel = row[_IDX_PATH].rstrip("/")
+        return base + rel + "/rootfs.tar.xz"
     return ""
 
 
@@ -874,9 +899,12 @@ def extract_rootfs(
     import subprocess as _sp
 
     try:
+        # 不用 --skip-old-files：残留的旧文件（属主可能是上一次
+        # 运行遗留的 subuid，普通用户写不动）会让后续播种 EACCES。
+        # 重解包覆盖即可，create_vm 已保证目录是新建的。
         r = _sp.run(
             ["tar", "-xJf", str(tarball), "-C", str(target_dir),
-             "--numeric-owner", "--skip-old-files"],
+             "--numeric-owner", "--overwrite"],
             capture_output=True, text=True, timeout=600,
         )
     except (OSError, _sp.TimeoutExpired) as e:
@@ -888,33 +916,6 @@ def extract_rootfs(
     for sub in ("dev", "proc", "sys"):
         (target_dir / sub).mkdir(exist_ok=True)
     return True, ""
-
-
-def chown_rootfs(target_dir: Path, subuid_start: int | None = None) -> None:
-    """把 rootfs 整树属主改成 subuid 起始值
-
-    非特权容器里 root(0) 映射到宿主 subuid 段；rootfs 文件必须
-    归属这个段，否则容器内 root 对 /etc /var 没有写权限，起不来。
-    """
-    import os as _os
-
-    if subuid_start is None:
-        from core.vm.container import subuid_range
-
-        got = subuid_range()
-        if not got:
-            return
-        subuid_start = got[0]
-
-    def _chown(p: Path) -> None:
-        try:
-            _os.chown(p, subuid_start, subuid_start)
-        except OSError:
-            pass
-
-    _chown(target_dir)
-    for p in target_dir.rglob("*"):
-        _chown(p)
 
 
 def rootfs_cache_size() -> int:

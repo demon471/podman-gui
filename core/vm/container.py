@@ -84,20 +84,36 @@ def conf_text(
     bridge_name: str,
     subuid_start: int,
     subuid_count: int,
+    host_uid: int | None = None,
 ) -> str:
     """生成 lxc 配置文件内容
 
     spec 只用到 name/hostname/shares/autostart（鸭子类型，
     传 VMSpec 或测试桩都行）。
+
+    **idmap 首段必须映射到宿主用户自己**（host_uid）。
+    原因：rootfs 由普通用户解包，文件属主就是宿主用户，
+    而普通用户无权 chown 到 subuid 段（内核不允许在初始
+    user namespace 里改属主到子 userns 的映射段，实测
+    "Operation not permitted"，且很容易被静默吞掉）。
+    把容器 root(0) 映射到宿主 uid 后，rootfs 属主天然正确，
+    容器内就是 root 且能写 /etc，无需任何 chown。
+    其余 id 走 subuid 段。
     """
+    if host_uid is None:
+        host_uid = os.getuid()
+
     lines = [
         "# 由 PodBox 生成，重建机器时会覆盖",
         "lxc.include = /usr/share/lxc/config/common.conf",
         f"lxc.uts.name = {spec.hostname or spec.name}",
         f"lxc.arch = {spec.arch}",
-        # 非特权容器：容器内 id 0..65535 → 宿主 subuid 段
-        f"lxc.idmap = u 0 {subuid_start} {subuid_count}",
-        f"lxc.idmap = g 0 {subuid_start} {subuid_count}",
+        # 容器 root → 宿主用户自己（rootfs 属主无需改动）
+        f"lxc.idmap = u 0 {host_uid} 1",
+        f"lxc.idmap = g 0 {host_uid} 1",
+        # 其余 id → subuid 段
+        f"lxc.idmap = u 1 {subuid_start} {max(subuid_count - 1, 1)}",
+        f"lxc.idmap = g 1 {subuid_start} {max(subuid_count - 1, 1)}",
         # rootfs
         f"lxc.rootfs.path = dir:{rootfs}",
         # 网络：挂在共享网桥上，DHCP 由 pgbr0 的 dnsmasq 发放
@@ -108,13 +124,21 @@ def conf_text(
         "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx",  # 占位，start 时由 lxc 生成
     ]
 
-    # 共享目录：bind mount，启动即挂（无需 VM 档的 virtiofs）
-    # idmap=container 把宿主文件 id 映射进容器用户命名空间
+    # 共享目录：bind mount，启动即挂（无需 VM 档的 virtiofs）。
+    #
+    # **不能加 idmap=container**：lxc 对 bind mount 做 idmap 需要
+    # 在子 userns 里有 CAP_SYS_ADMIN，而我们的 idmap 把容器 root
+    # 映射到宿主 uid（rootfs 属主方案，见上），实测报
+    # "Operation not permitted - Failed to idmap detached mount"，
+    # 容器直接起不来。
+    #
+    # 不加 idmap 也没问题：宿主文件的 uid 1000 在容器内显示为
+    # root（0 → 宿主 1000 的映射），容器内 root 可读写。
     for host_path, mp in spec.shares:
         mp_norm = mp.strip("/")
         lines.append(
             f"lxc.mount.entry = {host_path} {mp_norm} "
-            f"none bind,rw,create=dir,idmap=container 0 0"
+            f"none bind,rw,create=dir 0 0"
         )
 
     if spec.autostart:
@@ -133,7 +157,8 @@ def write_conf(vm_dir: Path, spec) -> None:
 
     start, count = ok
     text = conf_text(
-        spec, vm_dir / ROOTFS_DIR_NAME, bridge.BRIDGE, start, count
+        spec, vm_dir / ROOTFS_DIR_NAME, bridge.BRIDGE, start, count,
+        host_uid=os.getuid(),
     )
     (vm_dir / LXC_CONF_NAME).write_text(text, encoding="utf-8")
 
@@ -171,11 +196,19 @@ def seed_rootfs(
             )
 
         # 2. ssh 公钥（root + 用户）
+        #
+        # 属主必须精确设置：sshd 的 StrictModes 会检查家目录和
+        # .ssh 的所有者，属主不对就静默拒绝公钥（表现为
+        # "Permission denied (publickey)"，日志里看不出原因）。
+        # 而且 .ssh 目录权限必须是 700，authorized_keys 600。
         for owner, home, name_uid in (
             ("root", "root", 0),
             (username, f"home/{username}", uid),
         ):
-            ssh_dir = rootfs / home / ".ssh"
+            home_dir = rootfs / home
+            home_dir.mkdir(parents=True, exist_ok=True)
+
+            ssh_dir = home_dir / ".ssh"
             ssh_dir.mkdir(parents=True, exist_ok=True)
             ak = ssh_dir / "authorized_keys"
             existing = ak.read_text(encoding="utf-8") if ak.exists() else ""
@@ -184,14 +217,19 @@ def seed_rootfs(
                     existing.rstrip("\n") + "\n" + ssh_pubkey.strip() + "\n",
                     encoding="utf-8",
                 )
+            # chown 必须在**所有写操作之后**：普通用户一旦把文件
+            # 交给 uid 1000，自己就再也写不进去了（EACCES）。
+            _chown_tree(ssh_dir, name_uid)
             if ak.exists():
                 ak.chmod(0o600)
-            _chown_tree(ssh_dir, name_uid)
+            ssh_dir.chmod(0o700)
+            _chown_tree(home_dir, name_uid)
 
         # 3. 默认用户写 passwd/shadow
         _ensure_user(rootfs, username, uid, password_hash)
 
-        # 4. home 目录存在（骨架由发行版 rootfs 提供，没有就建）
+        # 4. home 目录属主（sshd StrictModes 要求；放最后因为
+        #    chown 之后普通用户就不能再改了）
         home = rootfs / "home" / username
         home.mkdir(parents=True, exist_ok=True)
         _chown_tree(home, uid)
@@ -255,15 +293,95 @@ def set_root_password_hash(rootfs: Path, username: str,
         return False, str(e)
 
 
-def _chown_tree(path: Path, uid: int) -> None:
-    """把树的所有者改成容器内 uid（宿主侧 chmod/chown 尽力而为）"""
+def userns_map_args(subuid_start: int | None = None,
+                    subuid_count: int | None = None) -> list[str]:
+    """构造 lxc-usernsexec 的 idmap 参数
+
+    与容器配置里的 idmap 保持一致：
+      容器 uid 0    → 宿主用户自己（host_uid）
+      容器 uid 1..  → subuid 段
+
+    这样在命名空间里 chown 到容器内 uid N，落到宿主就是
+    正确的那一个 uid；宿主用户在初始命名空间里做不到这件事
+    （内核禁止改属主到子 userns 的映射段）。
+    """
+    if subuid_start is None or subuid_count is None:
+        got = subuid_range()
+        if not got:
+            return []
+        subuid_start, subuid_count = got
+
+    me = os.getuid()
+    rest = max(subuid_count - 1, 1)
+    return [
+        "-m", "u:0:{}:1".format(me),
+        "-m", "u:1:{}:{}".format(subuid_start, rest),
+        "-m", "g:0:{}:1".format(me),
+        "-m", "g:1:{}:{}".format(subuid_start, rest),
+    ]
+
+
+def userns_run(args: list[str], timeout: int = 120) -> tuple[bool, str]:
+    """在映射了 subuid 段的用户命名空间里执行命令
+
+    用于宿主用户本身做不到的两件事：
+      · 把文件 chown 到容器内的某个 uid（落到 subuid 段）
+      · 删除已经属于 subuid 段的文件（否则 EACCES，删不掉）
+    """
+    m = userns_map_args()
+    if not m:
+        return False, "缺少 subuid/subgid，无法进入用户命名空间"
+
     try:
-        os.chown(path, uid, uid)
+        r = subprocess.run(
+            ["lxc-usernsexec", *m, "--", *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "usernsexec 超时"
+    except OSError as e:
+        return False, str(e)
+
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:300]
+    return True, r.stdout.strip()
+
+
+def chown_to_container_uid(path: Path, cont_uid: int,
+                           cont_gid: int | None = None,
+                           timeout: int = 180) -> tuple[bool, str]:
+    """把 host 路径的属主设成「容器内 uid cont_uid」"""
+    gid = cont_uid if cont_gid is None else cont_gid
+    return userns_run(
+        ["chown", "-R", "{}:{}".format(cont_uid, gid), str(path)],
+        timeout=timeout,
+    )
+
+
+def rm_in_userns(path: Path, timeout: int = 180) -> tuple[bool, str]:
+    """在用户命名空间里递归删除（能删掉 subuid 属主的文件）"""
+    return userns_run(["rm", "-rf", str(path)], timeout=timeout)
+
+
+def _chown_tree(path: Path, _uid: int = 0) -> None:
+    """把树的所有者设为**宿主用户自己**
+
+    普通用户无权 chown 到 subuid 段（内核不允许在初始 user
+    namespace 里改属主到子 userns 的映射段）。而 idmap 把容器
+    root(0) 映射到宿主用户自己，所以只要文件归宿主用户，
+    容器内看到的就是 root 属主 —— sshd StrictModes 恰好接受
+    「属主 == 用户自己或 root」，公钥认证因此可用。
+
+    参数 _uid 仅为兼容旧调用点保留，不参与计算。
+    """
+    me = os.getuid()
+    try:
+        os.chown(path, me, me)
     except OSError:
         pass
     for p in path.rglob("*"):
         try:
-            os.chown(p, uid, uid)
+            os.chown(p, me, me)
         except OSError:
             pass
 
@@ -283,7 +401,14 @@ def _lxc(machines_dir: Path, name: str, *args: str,
     except OSError as e:
         return False, str(e)
     if r.returncode != 0:
-        return False, (r.stderr or r.stdout).strip()[:300]
+        # lxc_drop_groups 的警告在宿主用户属组较多时必然出现，
+        # 且不影响命令执行（退出码仍是 0）；真出错时它会和
+        # 真实错误一起出现，这里只滤掉这一行噪音。
+        err = "\n".join(
+            l for l in (r.stderr or r.stdout).splitlines()
+            if "lxc_drop_groups" not in l
+        ).strip()
+        return False, (err or r.stdout.strip())[:300]
     return True, r.stdout.strip()
 
 
@@ -311,9 +436,24 @@ def uptime_seconds(machines_dir: Path, name: str) -> int:
 
 
 def start(machines_dir: Path, name: str) -> tuple[bool, str]:
+    """启动容器（带一次重试）
+
+    stop 之后立刻 start 会碰到 veth 还没被内核清干净的竞态
+    （lxc-start 报 ABORTING）。间隔 1.5s 重试一次，实测足够
+    覆盖；两次都失败才是真失败。
+    """
     if is_running(machines_dir, name):
         return True, ""
-    return _lxc(machines_dir, name, "start", "-d", timeout=60)
+
+    ok, err = _lxc(machines_dir, name, "start", "-d", timeout=60)
+    if ok:
+        return True, ""
+
+    time.sleep(1.5)
+    ok2, err2 = _lxc(machines_dir, name, "start", "-d", timeout=60)
+    if ok2:
+        return True, ""
+    return False, err2 or err
 
 
 def stop(machines_dir: Path, name: str, timeout: int = 30) -> tuple[bool, str]:
@@ -344,29 +484,86 @@ def kill(machines_dir: Path, name: str) -> tuple[bool, str]:
 
 def attach(machines_dir: Path, name: str, command: str,
            timeout: int = 120) -> tuple[bool, str]:
-    """在容器内执行命令（首次配置装 sshd 等用）"""
+    """在容器内执行命令（首次配置装 sshd 等用）
+
+    必须显式设 PATH：lxc-attach 会继承宿主的 PATH，宿主的
+    /usr/bin 等路径在发行版 rootfs 里可能不存在，导致
+    "apk: not found" 这类假失败。
+    """
+    wrapped = (
+        "export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:"
+        "/usr/local/bin; " + command
+    )
     return _lxc(machines_dir, name, "attach", "--", "/bin/sh", "-c",
-                command, timeout=timeout)
+                wrapped, timeout=timeout)
+
+
+def fix_home_ownership(
+    rootfs: Path, username: str, uid: int = 1000,
+) -> tuple[bool, str]:
+    """把用户家目录的属主改成容器内 uid
+
+    **必须在用户命名空间里 chown**（lxc-usernsexec）：宿主侧
+    普通用户无权把文件改到 subuid 段 —— 内核不允许在初始
+    user namespace 里改属主到子 userns 的映射段。
+
+    sshd 的 StrictModes 要求家目录属于该用户，否则静默拒绝
+    公钥 —— 表现为 "Permission denied (publickey)"，日志里只有
+    "penalty: failed authentication"，极难定位。
+    """
+    home = rootfs / "home" / username
+    if not home.exists():
+        return False, "家目录不存在"
+
+    # chown 和 chmod 都要在用户命名空间里做：文件一旦归属
+    # subuid 段，宿主用户在自己的命名空间里连 chmod 也会
+    # EPERM（"Operation not permitted"）。
+    home_s = str(home)
+    cmd = (
+        "chown -R " + str(uid) + ":" + str(uid) + " " + home_s + " && "
+        "chmod 755 " + home_s + " && "
+        "chmod 700 " + home_s + "/.ssh && "
+        "chmod 600 " + home_s + "/.ssh/authorized_keys"
+    )
+    ok, err = userns_run(["sh", "-c", cmd])
+    if not ok:
+        return False, err
+    return True, ""
 
 
 def ensure_sshd(
     machines_dir: Path, name: str, rootfs: Path, family: str,
+    username: str = "",
     on_log=None,
 ) -> tuple[bool, str]:
     """确保容器内有 sshd 并已启用
 
     发行版 rootfs 不一定预装 openssh。检查 rootfs 里的 sshd
     二进制，缺就 lxc-attach 用对应包管理器装并启用。
+    最后修正家目录属主（sshd StrictModes 的硬要求）。
     """
     log = on_log or (lambda _m: None)
 
     sbin = rootfs / "usr" / "sbin" / "sshd"
     if sbin.exists():
+        if username:
+            fix_home_ownership(rootfs, username)
         return True, ""
 
     log("容器内安装 sshd…")
     if family == "alpine":
-        cmd = "apk add openssh && rc-update add sshd default"
+        # Alpine 默认源在境外，实测经常超时（"temporary error"）。
+        # 换国内镜像再装，否则首次启动会卡住甚至失败。
+        # sshd 装在 /usr/sbin；Alpine 用 openrc 管理服务。
+        cmd = (
+            "M=https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.22; "
+            'echo "$M/main" > /etc/apk/repositories; '
+            'echo "$M/community" >> /etc/apk/repositories; '
+            "apk add --no-cache openssh && "
+            "ssh-keygen -A && "
+            "rc-update add sshd default 2>/dev/null; "
+            "rc-service sshd start 2>/dev/null || /usr/sbin/sshd"
+        )
     elif family in ("debian",):
         cmd = ("DEBIAN_FRONTEND=noninteractive apt-get update "
                "&& apt-get install -y openssh-server "
@@ -378,7 +575,22 @@ def ensure_sshd(
     else:
         cmd = "dnf install -y openssh-server && systemctl enable sshd"
 
-    ok, err = attach(machines_dir, name, cmd, timeout=300)
-    if not ok:
-        return False, f"容器内安装 sshd 失败: {err}"
+    # 镜像源瞬时失败很常见（"temporary error (try again later)"），
+    # 重试 3 次、间隔递增，比让用户手动重启机器体验好得多。
+    last_err = ""
+    for attempt in range(3):
+        ok, err = attach(machines_dir, name, cmd, timeout=300)
+        if ok:
+            break
+        last_err = err
+        log(f"安装 sshd 失败（第 {attempt + 1}/3 次）：{err[:120]}")
+        time.sleep(2 + attempt * 3)
+    else:
+        return False, f"容器内安装 sshd 失败: {last_err}"
+
+    # 装完再修家目录属主（rootfs 解包出来的都是 root 属主）
+    if username:
+        ok2, err2 = fix_home_ownership(rootfs, username)
+        if not ok2:
+            return False, f"修正家目录属主失败: {err2}"
     return True, ""

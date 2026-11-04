@@ -159,10 +159,13 @@ ExecStartPre=-/usr/bin/iptables -t nat -A POSTROUTING -s {SUBNET} ! -o {BRIDGE} 
 ExecStartPre=-/usr/bin/iptables -C FORWARD -i {BRIDGE} -j ACCEPT
 ExecStartPre=-/usr/bin/iptables -A FORWARD -i {BRIDGE} -j ACCEPT
 ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null \
-    --interface={BRIDGE} --bind-interfaces \
+    --interface={BRIDGE} --except-interface=lo --bind-dynamic \
     --dhcp-range={DHCP_START},{DHCP_END},255.255.0.0,12h \
     --dhcp-leasefile={LEASES} \
-    --port=0
+    --dhcp-option=option:dns-server,{HOST_IP} \
+    --dhcp-option=option:router,{HOST_IP} \
+    --listen-address={HOST_IP} --port=53 \
+    --resolv-file=/run/systemd/resolve/resolv.conf
 Restart=always
 RestartSec=2
 

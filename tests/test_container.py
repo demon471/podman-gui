@@ -59,13 +59,31 @@ class TestLxcConfig:
         assert "lxc.net.0.link = pgbr0" in text
         assert "lxc.net.0.name = eth0" in text
 
-    def test_idmap_unprivileged(self):
-        """非特权容器必须有 idmap，否则容器内 root 没有写权限"""
+    def test_idmap_maps_host_uid_first(self):
+        """idmap 首段必须映射宿主用户自己
+
+        rootfs 由普通用户解包（属主 = 宿主 uid），而普通用户无权
+        chown 到 subuid 段（内核禁止）。所以容器 root(0) 映射到
+        宿主 uid，rootfs 属主天然正确；其余 id 走 subuid 段。
+        """
+        import os
+
         from core.vm.container import conf_text
 
+        me = os.getuid()
         text = conf_text(FakeSpec(), "/tmp/rfs", "pgbr0", 123456, 65536)
-        assert "lxc.idmap = u 0 123456 65536" in text
-        assert "lxc.idmap = g 0 123456 65536" in text
+        assert f"lxc.idmap = u 0 {me} 1" in text
+        assert f"lxc.idmap = g 0 {me} 1" in text
+        # 其余 id 段：容器 1.. → subuid 123456..
+        assert "lxc.idmap = u 1 123456 65535" in text
+        assert "lxc.idmap = g 1 123456 65535" in text
+
+    def test_idmap_explicit_host_uid(self):
+        from core.vm.container import conf_text
+
+        text = conf_text(FakeSpec(), "/tmp/rfs", "pgbr0", 123456, 65536,
+                         host_uid=1001)
+        assert "lxc.idmap = u 0 1001 1" in text
 
     def test_shares_bind_mount(self):
         """共享目录 = lxc bind mount（替代 VM 档的 virtiofs）"""
@@ -75,7 +93,7 @@ class TestLxcConfig:
         text = conf_text(spec, "/tmp/rfs", "pgbr0", 100000, 65536)
         assert (
             "lxc.mount.entry = /home/john/下载 downloads "
-            "none bind,rw,create=dir,idmap=container 0 0" in text
+            "none bind,rw,create=dir 0 0" in text
         )
 
     def test_share_nested_mount_point(self):
@@ -84,8 +102,22 @@ class TestLxcConfig:
 
         spec = FakeSpec(shares=[("/data", "mnt/share")])
         text = conf_text(spec, "/tmp/rfs", "pgbr0", 100000, 65536)
-        assert "none bind,rw,create=dir,idmap=container 0 0" in text
+        assert "none bind,rw,create=dir 0 0" in text
         assert " mnt/share none" in text
+
+    def test_mount_entry_has_no_idmap(self):
+        """bind mount 不能带 idmap=container
+
+        lxc 对 bind mount 做 idmap 需要子 userns 的 CAP_SYS_ADMIN，
+        我们的 idmap 把容器 root 映射到宿主 uid，实测
+        "Failed to idmap detached mount" 直接起不来。
+        宿主文件在容器内本来就显示为 root（映射方案），可读写。
+        """
+        from core.vm.container import conf_text
+
+        spec = FakeSpec(shares=[("/data", "data")])
+        text = conf_text(spec, "/tmp/rfs", "pgbr0", 100000, 65536)
+        assert "idmap=container" not in text
 
     def test_autostart(self):
         from core.vm.container import conf_text

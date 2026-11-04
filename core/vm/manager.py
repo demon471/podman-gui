@@ -230,13 +230,21 @@ class VM:
             pass
 
     def delete_files(self) -> tuple[bool, str]:
-        """删除整个机器目录（含 SQLite 记录）"""
+        """删除整个机器目录（含 SQLite 记录）
+
+        rootfs 里有属于 subuid 段的文件（家目录被 chown 成
+        容器内 uid），宿主用户直接 rmtree 会 EACCES。先试普通
+        删除，失败就到用户命名空间里删（那里这些文件是「自己的」）。
+        """
         if self.running:
             return False, "请先停止机器"
+
         try:
             shutil.rmtree(self.dir)
-        except OSError as e:
-            return False, str(e)
+        except OSError:
+            ok, err = container.rm_in_userns(self.dir)
+            if not ok:
+                return False, err
 
         try:
             from core import state
@@ -388,9 +396,14 @@ def create_vm(
 
     arch = "amd64"      # TODO: 支持 arm64 宿主机
     vm_dir = machines_dir() / name
-    # 空壳目录（上次创建失败残留）复用前清底
+    # 空壳目录（上次创建失败残留）复用前清底。
+    # 里面可能残留 subuid 属主的文件（上一轮把家目录 chown 给了
+    # 容器内 uid），普通 rmtree 删不掉，必须走用户命名空间 ——
+    # 否则「创建失败 → 重试」会一直卡在 Permission denied。
     if vm_dir.exists():
         shutil.rmtree(vm_dir, ignore_errors=True)
+        if vm_dir.exists():
+            container.rm_in_userns(vm_dir)
     vm_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. 下载 / 解包 rootfs ──
@@ -411,11 +424,6 @@ def create_vm(
     if not ok:
         shutil.rmtree(vm_dir, ignore_errors=True)
         return None, f"rootfs 解包失败: {err}"
-
-    # 非特权容器：rootfs 文件属主必须映射进 subuid 段，
-    # 否则容器内 root 对 /etc /var 没有写权限，启动起不来
-    log("调整属主…")
-    images.chown_rootfs(vm_dir / container.ROOTFS_DIR_NAME)
 
     # ── 2. SSH 密钥 ──
     log("生成 SSH 密钥…")
@@ -537,7 +545,8 @@ def start_vm(vm: VM, *, vnc: int | None = None,
         spec_img = images.get_spec(vm.spec.image_key)
         family = spec_img.family if spec_img else "debian"
         ok2, err2 = container.ensure_sshd(
-            machines_dir(), vm.spec.name, vm.rootfs, family
+            machines_dir(), vm.spec.name, vm.rootfs, family,
+            username=vm.spec.username,
         )
         if ok2:
             flag.write_text("1", encoding="utf-8")
@@ -585,11 +594,21 @@ def restart_vm(vm: VM, timeout: int = 30) -> tuple[bool, str]:
 
 
 def delete_vm(vm: VM, *, remove_disk: bool = True) -> tuple[bool, str]:
-    """删除机器"""
-    if vm.running:
-        ok, err = container.kill(machines_dir(), vm.spec.name)
-        if not ok:
-            return False, f"无法停止: {err}"
+    """删除机器
+
+    删除前必须确认容器真的停了：lxc 的运行时状态在 /run/lxc，
+    只看目录会误判「没在跑」——目录删了进程还在，机器名仍被
+    占用，再次创建会得到「已在运行」这种莫名其妙的错误。
+    """
+    ok, err = container.kill(machines_dir(), vm.spec.name)
+    if not ok:
+        return False, f"无法停止: {err}"
+
+    # 等进程真正退出（lxc-stop -k 之后内核回收需要一点时间）
+    for _ in range(10):
+        if not container.is_running(machines_dir(), vm.spec.name):
+            break
+        time.sleep(0.3)
 
     if remove_disk:
         ok, err = vm.delete_files()
