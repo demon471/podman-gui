@@ -1,191 +1,130 @@
-# 轻机器：系统容器档（方案）
+# 轻机器：纯系统容器架构（方案 v2）
 
-> 目标：把 OrbStack 的「轻快」带到 Linux —— 日常开发机默认用系统容器，
-> **1-2 秒启动、~几 MB 内存开销**；需要独立内核时才用现有 QEMU VM 档。
-> 本文只做设计，不动代码。
+> **产品决定：只有轻机器（LXC 系统容器），不再有 QEMU 虚拟机档。**
+> 向导直接创建容器，不提供类型选择。QEMU 相关代码彻底删除。
+>
+> **硬约束：UI 与功能逐一对齐原 VM 版**——向导、列表、详情页
+> （文件 / 共享目录 / 账户）、悬停卡片、托盘、设置页的布局与交互
+> 全部保持不变，只把底层从 QEMU 换成 LXC。
+>
+> 分支策略：基于 `feature/system-containers`（继承全部 UI 精修），
+> 功能完成后反向合并 master。
 
-## 1. 为什么现在的 VM 重
+## 1. 为什么容器够用
 
-| 开销 | 来源 | 系统容器 |
+| | QEMU VM（删除） | 系统容器（唯一形态） |
 |---|---|---|
-| 启动 10-30s | OVMF 固件 + GRUB + 内核 + systemd + cloud-init | 1-2s（直接起 init） |
-| 内存 ≥100-200MB | 每台独立内核 + QEMU 进程 | ~1-5MB（共享宿主内核） |
-| 磁盘 | qcow2 增量层（1TB 稀疏） | overlayfs 目录 |
-| 端口透传 | 需要 hostfwd（SLIRP）或网桥直连 | 网桥直连（天然） |
+| 启动 | 10-30s | 1-2s |
+| 内存 | 100-200MB | ~1-5MB（共享宿主内核） |
+| 磁盘 | qcow2 层 | overlayfs/rootfs 目录 |
+| 端口透传 | hostfwd / 网桥直连 | 网桥直连（天然） |
+| 真休眠 | migrate-to-file | stop 即保留状态，start 毫秒级恢复 |
 
-系统容器**不是 Docker 容器**：它跑完整 init（systemd），有自己的 rootfs
-（alpine/rocky/debian 随便换）、自己的网络栈视图、真实的 SSH 服务端。
-区别只有一条：**内核与宿主共享**（不能换内核版本、不能加载宿主没有的
-内核模块）——日常开发环境用不到这两样。
+系统容器跑完整 init（systemd/openrc）、有独立 rootfs（发行版随便换）、
+真实 sshd。唯一限制：内核与宿主共享（不能换内核版本、不能加载宿主
+没有的内核模块）——开发环境用不到。
 
-## 2. 后端选型
+## 2. 后端
 
-| 候选 | 结论 |
-|---|---|
-| **LXC 直接管理**（推荐） | 仓库有 lxc 7.0.0；`john` 已有 subuid 条目，非特权容器开箱可用。我们自己写管理层（复用现有 spec/SSH/网桥体系），不引入 lxd/incus 的守护与 API |
-| Incus（user 模式） | 自带 REST API 与镜像源很省事，但要装 incus 全家桶 + 它自己的 user daemon；与现有 daemon/保活体系两套并存，违反极简原则 |
-| systemd-nspawn | 轻但网络/共享目录灵活性差，发行版 rootfs 生态不如 LXC |
+**LXC 二进制直管**（`lxc-start`/`lxc-stop`/`lxc-info`/`lxc-attach`），
+不装 incus/lxd。创建、配置、状态、网络沿用本应用既有体系。
+前提已核实：CachyOS 仓库有 lxc 7.0.0；宿主用户已有 subuid 条目
+（非特权容器开箱可用）。
 
-决定：**LXC 二进制只做运行时**（`lxc-start`/`lxc-stop`/`lxc-attach`），
-创建、配置、状态、网络全部沿用本应用的既有体系。这样 GUI 现有的
-账户页、文件页、共享目录、SSH 域名逻辑几乎原样复用。
+## 3. 镜像与首次配置
 
-## 3. 机器模型
+- rootfs tarball：`images.linuxcontainers.org`（清华 tuna 有同步），
+  解包到 `machines/<name>/rootfs/`
+- 首批：alpine-3.22-lxc / rocky-10-lxc / debian-13-lxc
+- 启动前播种（纯文件操作，无 chroot）：
+  1. `/etc/hostname`、`/etc/hosts`
+  2. sshd 公钥注入 root 与默认用户
+  3. 默认用户（名字 = 宿主用户名）写 passwd/shadow（`openssl passwd -6`）
+  4. sshd_config：密钥 + 密码登录
+- 家族差异沿用 FAMILY_SHELL / 包管理器认知（apk/apt/dnf）
 
-`VMSpec` 增加一个字段（json/sqlite 双写自动带上）：
-
-```
-kind: "vm" | "container"      # 默认 "vm"，老机器不受影响
-```
-
-所有现有代码按「机器」抽象继续工作，只有底层实现分派：
-
-| 能力 | VM 档（现状不动） | 容器档（新增） |
-|---|---|---|
-| 启动 | qemu.py `build_command` | `lxc-start -n <name>` |
-| 状态 | qemu pidfile | `lxc-info -n <name>`（RUNNING/STOPPED） |
-| 停止 | ACPI 关机 / soft_stop | `lxc-stop -k`（相当于拔电源）或优雅 stop |
-| 真休眠 | migrate-to-file | **不需要**：stop 即保留状态，start 即恢复 |
-| 删除 | 删 qcow2 层 | 删 rootfs 目录 |
-| SSH | guest 内 sshd（22） | 容器内 sshd（22），同样密钥登录 |
-| 文件页 | SFTP（paramiko） | **同一个 SFTP**，零改动 |
-| 共享目录 | virtiofs | lxc 配置 `lxc.mount.entry`（bind mount，启动即挂） |
-| 内存回收 | virtio-balloon | 不需要：没有独立内核可回收 |
-| 保活/唤醒代理 | daemon + wakeproxy | 简化：start 是毫秒级，无需代理端口 |
-
-## 4. 网络：完全复用 pgbr0
-
-现成的 `core/vm/bridge.py`（网桥 + dnsmasq DHCP + lease_ip）原样复用：
-
-```
-容器 veth ──> pgbr0 ──> dnsmasq DHCP（10.99.x.x）
-                │
-宿主机 ─────────┘ 直接访问容器 IP（无任何转发）
-```
-
-- 容器网段仍走 `bridge.lease_ip(name)` 查租约，**每台唯一 IP 自动成立**
-- 现有 `ssh.py::_ssh_target()` / `sshconfig.py` / `dns.py` **一行不改**
-- SLIRP 的每台子网、端口转发逻辑容器档完全不需要
-- VM↔容器、容器↔容器互通天然成立（同一二层）
-
-lxc 网络配置：`lxc.net.0.type = veth` + `lxc.net.0.link = pgbr0` +
-`lxc.net.0.name = eth0`，DHCP 由现有 dnsmasq 发放。
-
-## 5. 镜像与首次配置
-
-### rootfs 来源
-
-不用 `lxc-create -t download`（模板脚本交互式、依赖外部脚本）。
-直接从发行版 rootfs tarball 拉：
-
-- 上游：`https://images.linuxcontainers.org/images/<distro>/<ver>/amd64/default/`
-- 国内镜像：清华 tuna 同步了同一目录结构
-- 格式选 `rootfs.tar.xz`，解包到 `machines/<name>/rootfs/`
-
-首批目录（对齐现有 ImageSpec 家族）：
-
-| key | 家族 | 说明 |
-|---|---|---|
-| alpine-3.22-lxc | alpine | 最轻，~60MB 解包 |
-| rocky-10-lxc | fedora/rhel 系 | 与现有 rocky VM 对应 |
-| debian-13-lxc | debian | |
-
-### 首次配置（替代 cloud-init）
-
-解包 rootfs 后、启动前做一次性「播种」（普通文件操作，不需要 chroot
-跑包管理器）：
-
-1. 写 `/etc/hostname`、`/etc/hosts`
-2. 注入 sshd 公钥到 `/root/.ssh/authorized_keys` 与用户目录
-3. 写默认用户（名字 = 宿主用户名，与 VM 档规则一致）：
-   直接写 `/etc/passwd`、`/etc/shadow`（密码哈希用 `openssl passwd -6`）
-4. 预置 sshd_config（允许密钥 + 密码）
-5. 家族差异沿用 `FAMILY_SHELL` / 服务名（apk/apt/dnf 留给用户进容器后自己用）
-
-lxc 配置文件 `machines/<name>/lxc.conf`（关键行）：
+`lxc.conf` 关键行：
 
 ```
 lxc.include = /usr/share/lxc/config/common.conf
-lxc.idmap = u 0 100000 65536        # 非特权映射（subuid 已存在）
+lxc.idmap = u 0 100000 65536
 lxc.rootfs.path = dir:<rootfs>
 lxc.net.0.type = veth
 lxc.net.0.link = pgbr0
-lxc.mount.entry = /home/john/项目 mnt/projects none bind,rw,create=dir 0 0
-lxc.start.autostart = 0
+lxc.mount.entry = <宿主目录> <挂载点> none bind,rw,create=dir 0 0
 ```
 
-## 6. 账户 / SSH / 域名：零新概念
+## 4. 网络（复用，不改）
 
-- `manager.get_password/set_password`：原样（写的是 spec，不关心 kind）
-- `ssh.py`：原样（容器里也是 sshd:22，`_ssh_target` 返回容器 IP）
-- `sshconfig.py`：原样（`<name>.vm.local` 照写）
-- `dns.py`：原样
-- 悬停卡片 / 账户页：原样
+pgbr0 + dnsmasq DHCP + lease_ip 原样：
+每台唯一 IP（10.99.x.x）、`ssh <name>.vm.local`、宿主机直连内部 IP、
+容器互通——全部由现有 bridge/dns/ssh/sshconfig/network 模块承担，
+**一行不改**。
 
-## 7. UI 变更
+## 5. UI 对齐表（硬约束的落地）
 
-| 位置 | 变更 |
-|---|---|
-| 向导 | 第一步加「机器类型」：**轻机器（推荐）** / 完整虚拟机；镜像列表随类型过滤（`-lxc` 后缀） |
-| 列表 | 名称旁加类型徽标（容器「轻」/ VM「VM」）；状态点同现有 |
-| 详情-共享目录 | 文案不变；VM 档「应用并重启」走重启，容器档直接 `lxc-stop`+`lxc-start`（秒级，无 loading 长等待） |
-| 详情-账户 | 不变 |
-| 右键菜单 | 容器档无「休眠」「保存快照」（stop 已等价）；其余同 |
-| 设置页-服务 | 增加一项依赖检查：lxc 是否安装（与 podman 未安装同一套引导 UI） |
+| 界面 | VM 版行为 | 容器版行为（必须一致） |
+|---|---|---|
+| 向导 | 选发行版 → 内存/磁盘 → 创建 | 选发行版（-lxc 列表）→ 创建；**无类型选择、无内存/磁盘页**（容器不可调） |
+| 列表 | 名称/状态点/悬停卡片 | 同；悬停卡片显示镜像/用户/密码/IP/SSH 命令 |
+| 详情 | 文件 / 共享目录 / 账户 三 tab | 同三 tab；文件页走 SFTP（同一份代码） |
+| 共享目录 | 选目录→virtiofs→应用并重启 | 选目录→bind mount→应用并重启（秒级完成） |
+| 账户 | 改密码/看连接信息两列 | 同 |
+| 右键菜单 | 重启/休眠/快照/删除 | 重启/删除；无休眠与快照（stop 已等价休眠） |
+| 托盘 | 列出机器/显示主窗口/退出 | 同（机器=容器） |
+| 设置页 | 服务/资源/镜像/存储/关于 | 服务页加 lxc 依赖检测；资源页删除（容器无可调资源） |
 
-**不要**给容器档做内存/磁盘页——共享内核没有可调的，保持极简。
+## 6. 删除清单（QEMU 链路全删）
 
-## 8. 守护进程（daemon）变更
+**整文件删除**：
+core/vm/{qemu,cloudinit,virtiofs,shared_disk,wakeproxy,keepalive,
+memory,budget,autoreclaim,activity,autoconfig}.py
+（deps.py 保留——供 lxc 检测复用）
 
-- `_tick` 的 `resume_paused_vms`、唤醒代理、活动探测降级：容器档
-  状态只有 running/stopped，**不需要** paused 救援逻辑
-- keepalive 的 balloon 相关对容器档跳过（`spec.kind` 判断）
-- 自动回收（autoreclaim）：容器档回收 = `lxc-stop`，唤醒 = `lxc-start`
-  （毫秒级，用户无感），**逻辑反而变简单**
+**大幅简化**：
+- manager.py：去掉 qemu/快照/端口分配/balloon；生命周期路由到 container.py
+- daemon.py：只保留基础 tick + 状态同步；paused 救援/唤醒代理/内存回收全删
+- ui/settings_page.py：资源页删除、VM 内存控件删除、加 lxc 检测
+- ui/vm_detail.py：保留三 tab 结构，去掉休眠/快照入口
+- ui/vm_page.py / vm_infocard.py：状态机简化（running/stopped）
 
-## 9. 存储布局
+**保留不动**（两类机器共用，已验证）：
+core/vm/{bridge,dns,ssh,sshconfig,files,network,sudo,hostinfo}.py
+
+## 7. 守护进程（daemon）
+
+- 保留：启动自检、状态上报、托盘/通知联动
+- 删除：resume_paused_vms、唤醒代理、balloon/内存预算、活动探测降级
+- 容器档「自动回收」若保留 = lxc-stop + 事件唤醒 lxc-start（可选，二期）
+
+## 8. 存储布局
 
 ```
-~/.local/share/podman-gui/vm/
-  machines/
-    <name>/
-      machine.json        # spec（kind=container）
-      lxc.conf
-      rootfs/             # 解包的发行版根文件系统
-      ssh_key / ssh_key.pub
+~/.local/share/podbox/            # 改名随 rename.md 一起
+  machines/<name>/
+    machine.json                  # spec
+    lxc.conf
+    rootfs/
+    ssh_key / ssh_key.pub
+  images/                         # rootfs tarball 缓存
 ```
 
-与 VM 档同一目录规范，`manager.load_all()` 不需要两套扫描逻辑。
+老 VM 机器目录（qcow2 等）不再兼容：首次启动检测到旧目录时提示一次性清理。
 
-## 10. 依赖与一次性初始化
+## 9. 实施步骤（每步带测试）
 
-| 项 | 方式 |
-|---|---|
-| lxc 包 | 设置页「服务」tab 检测 `lxc-start --version`，未装给安装引导（与 podman 同款） |
-| 网桥 | 已有 bridge.py，无新增 |
-| subuid | CachyOS 上 `john` 已有条目；缺失时并入 bridge 的一次性 pkexec 脚本 |
-| lxcfs | 可选（增强 free/uptime 显示），不装不影响功能 |
+1. **core/vm/container.py**：conf 生成/播种/start/stop/status/delete
+   （假 rootfs + 配置生成单测，lxc dry-run）
+2. **images.py 换目录**：rootfs tarball 三条目 + 下载解包管线
+3. **manager.py 重写底层**：路由 container.py；删 qemu 引用
+4. **删除清单执行**：整删 VM-only 模块 + 测试同步删除
+5. **daemon 简化**
+6. **UI 对齐**：向导 → 列表/卡片 → 详情三 tab → 设置页
+7. **端到端**：建 alpine 容器 → SSH → 共享目录 → 文件页 → 密码 → 删除
+8. **PodBox 改名收尾**（见 rename.md 阶段 2）
 
-## 11. 实施步骤（每步带测试）
+## 10. 测试要求
 
-1. **spec 扩展**：`kind` 字段 + `is_container()` + 载入兼容测试（老 json 无 kind → vm）
-2. **后端模块** `core/vm/container.py`：create/rootfs 播种/start/stop/status/delete/conf 生成；用 `/tmp` 假 rootfs + lxc dry-run 测配置生成（不打真容器）
-3. **镜像目录**：`-lxc` 三个条目 + 下载解包（现有 images.py 的下载管线复用）
-4. **manager 分派**：start_vm/stop_vm/delete 按 kind 路由；SSH 测试连真容器
-5. **共享目录**：lxc.mount.entry 生成 + 重启生效
-6. **daemon 简化**：容器档跳过 paused/wakeproxy/balloon
-7. **UI**：向导类型选择 → 列表徽标 → 详情差异 → 设置页依赖检查
-8. **端到端**：建 alpine 容器 → SSH → 共享目录 → 文件页 → 删除
-
-## 12. 现有代码处置表（供清理时参考）
-
-| 模块 | 容器档是否用 |
-|---|---|
-| qemu.py（build_command/snapshot/slirp） | 只 VM 档 |
-| cloudinit.py | 只 VM 档 |
-| virtiofs.py / shared_disk.py | 只 VM 档 |
-| keepalive.py / memory.py / budget.py / autoreclaim.py | VM 档；容器档分支跳过 |
-| wakeproxy.py / activity.py | VM 档；容器档不需要 |
-| ssh.py / files.py / sshconfig.py / dns.py / bridge.py / network.py | **两者共用，不要动** |
-| ui/vm_wizard.py / vm_page.py / vm_detail.py | 加 kind 分支 |
-| ui/charts.py / settings_page.py | 设置页加 lxc 检测 |
+- 每步新增行为都有对应测试；删除模块时其测试同删
+- `run_tests.sh` 全绿才允许构建（build.sh 已强制）
+- 端到端至少覆盖：创建/SSH/共享目录/文件页/改密码/删除
