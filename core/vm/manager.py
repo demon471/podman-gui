@@ -188,7 +188,11 @@ class VM:
     def ssh_host(self) -> str:
         """SSH 目标主机 = 机器自己的 IP（宿主机可达）"""
         if bridge.ready():
-            ip = bridge.lease_ip(self.spec.name)
+            # MAC 优先（租约里主机名常为 "*"），名字兜底
+            mac = container.conf_mac(self.dir)
+            ip = bridge.lease_ip(mac) if mac else ""
+            if not ip:
+                ip = bridge.lease_ip(self.spec.name)
             if ip:
                 return ip
         return "127.0.0.1"
@@ -534,6 +538,14 @@ def start_vm(vm: VM, *, vnc: int | None = None,
             "共享网络未启用：容器需要挂在共享网桥上。\n"
             "请到 设置 → 服务 → 虚拟机网络 先启用。"
         )
+
+    # 旧版配置的 MAC 是占位符（lxc 随机生成），租约无法对应
+    # 机器 —— 启动前统一迁移成固定 MAC（幂等）。
+    if "xx:xx:xx" in container.conf_mac(vm.dir):
+        try:
+            container.write_conf(vm.dir, vm.spec)
+        except RuntimeError:
+            pass
 
     ok, err = container.start(machines_dir(), vm.spec.name)
     if not ok:

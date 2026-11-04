@@ -273,20 +273,31 @@ def qemu_args(mac: str = "") -> list[str]:
 
 
 def lease_ip(mac_or_name: str) -> str:
-    """从 dnsmasq 租约里查某台 VM 的 IP
+    """从 dnsmasq 租约里查某台机器的 IP
 
     dnsmasq 租约格式：<到期时间> <MAC> <IP> <主机名> <客户端ID>
-    我们按主机名（= VM 名字）匹配，匹配不到返回空串。
+
+    **MAC 优先**：Alpine 的 dhcpcd 不发 hostname，租约里主机名
+    一栏全是 "*"，按名字匹配经常落空（机器重启换 IP 后拿到旧
+    地址，探测 "No route to host"）。容器现在有固定 MAC
+    （container.vm_mac），按 MAC 查永远准；主机名匹配保留作
+    兜底（兼容手写配置的机器）。
     """
     try:
         text = LEASES.read_text(encoding="utf-8")
     except OSError:
         return ""
+    is_mac = mac_or_name.count(":") == 5
+    fallback = ""
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) >= 4 and parts[3] == mac_or_name:
+        if len(parts) < 4:
+            continue
+        if is_mac and parts[1].lower() == mac_or_name.lower():
             return parts[2]
-    return ""
+        if not is_mac and parts[3] == mac_or_name:
+            fallback = parts[2]
+    return fallback
 
 
 def ping_ok(ip: str, timeout: int = 2) -> bool:

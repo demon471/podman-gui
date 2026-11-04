@@ -149,6 +149,29 @@ def prerequisites() -> tuple[bool, str]:
 # ─────────────────────────────────────────
 # 配置生成
 # ─────────────────────────────────────────
+def vm_mac(name: str) -> str:
+    """按机器名生成稳定 MAC（00:16:3e 是 Xensource/KVM 常用 OUI）"""
+    import zlib
+
+    h = zlib.crc32((name or "").encode("utf-8"))
+    return "00:16:3e:{:02x}:{:02x}:{:02x}".format(
+        (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF
+    )
+
+
+def conf_mac(vm_dir: Path) -> str:
+    """从机器的 lxc 配置里读出固定 MAC（没有返回空串）"""
+    conf = vm_dir / LXC_CONF_NAME
+    try:
+        for line in conf.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("lxc.net.0.hwaddr"):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def conf_text(
     spec,
     rootfs: Path,
@@ -192,7 +215,11 @@ def conf_text(
         f"lxc.net.0.link = {bridge_name}",
         "lxc.net.0.name = eth0",
         "lxc.net.0.flags = up",
-        "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx",  # 占位，start 时由 lxc 生成
+        # 固定 MAC：lxc 默认每次启动随机生成，DHCP 每次拿新 IP、
+        # 租约文件无法与机器对应起来。按名字生成稳定 MAC 后，
+        # 租约按 MAC 查就永远准（Alpine 的 dhcpcd 不发 hostname，
+        # 按主机名匹配租约实测全是 "*"，根本匹配不到）。
+        "lxc.net.0.hwaddr = " + vm_mac(spec.name),
     ]
 
     # 共享目录：bind mount，启动即挂（无需 VM 档的 virtiofs）。

@@ -770,16 +770,37 @@ class VMPage(QWidget):
             t0 = _time_mod.monotonic()
             last_err = ""
 
+            gone = 0
             while _time_mod.monotonic() - t0 < timeout_s:
-                # QEMU 进程没了 → 明确失败，不用等满超时
+                # host 每轮动态取：DHCP 首次租约未落下时
+                # ssh_host 还是空的，写死会一直连错地址
+                host = vm.ssh_host
+                # 进程没了 → 明确失败，不用等满超时。
+                # 容器刚 start 时 init 还在初始化，lxc-info 偶发
+                # 误报 STOPPED —— 连续 3 次（约 1.5s）都不在跑
+                # 才认定真退出了。
                 if not vm.running:
-                    last_err = "虚拟机进程已退出"
-                    break
+                    gone += 1
+                    if gone >= 3:
+                        last_err = "机器进程已退出"
+                        break
+                else:
+                    gone = 0
+
+                if not host or host == "127.0.0.1":
+                    # 还没拿到容器 IP（DHCP 未就绪/网桥未启用）
+                    _time_mod.sleep(0.5)
+                    continue
 
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(1.5)
-                    s.connect(("127.0.0.1", port))
+                    # 目标必须是 vm.ssh_host：容器档是容器自己的 IP
+                    # （网桥直通），连 127.0.0.1 打的是宿主的 22 端口
+                    # —— 宿主 sshd 没开就一直 connect refused，
+                    # 开了则永远「成功」但跟容器毫无关系（VM 档
+                    # hostfwd 时代的老代码遗留）。
+                    s.connect((host, port))
                     # 读到 banner 才算 sshd 真的在服务
                     banner = s.recv(64)
                     s.close()
