@@ -51,12 +51,23 @@ echo ""
 
 # ── 2. 单元测试 ──
 echo "▶ 2/4  单元测试"
+
+# 多核并行（pytest-xdist）：12 核实测 90s → 77s。
+# --dist loadfile 按文件分worker，同文件内保持串行 ——
+# 文件内的全局状态（qapp 样式表、monkeypatch）互不污染。
+# xdist 未装时回退串行，不硬性依赖。
+XDIST=()
+if "$PY" -c "import xdist" 2>/dev/null; then
+    XDIST=(-n auto --dist loadfile)
+fi
+
 if [ "$MODE" = "--all" ]; then
     echo "  （含 needs_vm，可能较慢）"
-    "$PY" -m pytest tests/ -q --tb=short -p no:cacheprovider "$@" 2>&1 | tail -30
+    "$PY" -m pytest tests/ -q --tb=short -p no:cacheprovider \
+        "${XDIST[@]}" "$@" 2>&1 | tail -30
 else
     "$PY" -m pytest tests/ -q --tb=short -p no:cacheprovider \
-        -m "not needs_vm" "$@" 2>&1 | tail -30
+        -m "not needs_vm" "${XDIST[@]}" "$@" 2>&1 | tail -30
 fi
 
 PYTEST_RC=${PIPESTATUS[0]}
