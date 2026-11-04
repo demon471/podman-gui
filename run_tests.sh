@@ -92,16 +92,18 @@ sys.path.insert(0, str(Path.cwd()))
 mods = [
     "core.async_task",
     "core.state",
-    "core.vm.activity",
+    "core.vm.bridge",
+    "core.vm.container",
     "core.vm.daemon",
+    "core.vm.dns",
     "core.vm.files",
     "core.vm.images",
-    "core.vm.keepalive",
     "core.vm.manager",
-    "core.vm.qemu",
-    "core.vm.shared_disk",
+    "core.vm.network",
+    "core.vm.spec",
+    "core.vm.ssh",
+    "core.vm.sshconfig",
     "core.vm.sudo",
-    "core.vm.wakeproxy",
 ]
 bad = []
 for m in mods:

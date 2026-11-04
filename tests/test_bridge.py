@@ -23,43 +23,41 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-class TestMacAddress:
-    def test_unique_per_vm(self):
-        from core.vm.qemu import vm_mac
 
-        assert vm_mac("dev") != vm_mac("rocky")
+class TestContainerNetwork:
+    """容器档的网络：veth 挂网桥 + DHCP，无 MAC 撞车问题
 
-    def test_stable(self):
-        from core.vm.qemu import vm_mac
+    QEMU 时代每台 VM 要手动生成唯一 MAC（默认 52:54:00:12:34:56
+    会撞）；lxc 的 lxc-user-nic 会给每台容器生成独立 veth 和 MAC，
+    这里验证配置生成层不再有 MAC 相关参数。
+    """
 
-        assert vm_mac("dev") == vm_mac("dev")
+    def test_conf_has_no_fixed_mac(self):
+        from core.vm.container import conf_text
 
-    def test_qemu_prefix(self):
-        from core.vm.qemu import vm_mac
+        class Spec:
+            name = "t"
+            hostname = "t"
+            arch = "amd64"
+            shares = []
+            autostart = False
 
-        assert vm_mac("x").startswith("52:54:00:")
+        text = conf_text(Spec(), Path("/tmp/rfs"), "pgbr0", 100000, 65536)
+        assert "52:54:00:12:34:56" not in text
 
-    def test_not_qemu_default(self):
-        """不能是 QEMU 的默认 MAC，否则多台 VM 撞车"""
-        from core.vm.qemu import vm_mac
+    def test_conf_uses_bridge(self):
+        from core.vm.container import conf_text
 
-        for name in ("dev", "rocky", "a", "b"):
-            assert vm_mac(name) != "52:54:00:12:34:56", name
+        class Spec:
+            name = "t"
+            hostname = "t"
+            arch = "amd64"
+            shares = []
+            autostart = False
 
-    def test_command_includes_mac(self):
-        import inspect
-
-        from core.vm import qemu
-
-        src = inspect.getsource(qemu.build_command)
-        assert "mac={mac}" in src or "mac=" in src
-
-
-class TestSubnet:
-    def test_slirp_subnets_differ(self):
-        from core.vm.qemu import slirp_subnet
-
-        assert slirp_subnet("dev") != slirp_subnet("rocky")
+        text = conf_text(Spec(), Path("/tmp/rfs"), "pgbr0", 100000, 65536)
+        assert "lxc.net.0.type = veth" in text
+        assert "lxc.net.0.link = pgbr0" in text
 
 
 class TestBridgeModule:
@@ -179,7 +177,7 @@ class TestSshTargetUsesGuestIp:
     如果连接目标还写死 127.0.0.1，那条命令会打到宿主机自己的
     22 端口 —— Connection refused。表面上「SSH 连不上」，
     实际是连错了机器，从界面上完全看不出来。
-    文件页、共享挂载、终端、唤醒探测走的都是同一个底层入口，
+    文件页、共享挂载、终端走的都是同一个底层入口，
     所以这里必须卡住。
     """
 
@@ -228,7 +226,3 @@ class TestSshTargetUsesGuestIp:
         assert "_ssh_target(" in src
         assert 'hostname="127.0.0.1"' not in src
 
-    def test_manager_probe_uses_ssh_host(self):
-        """启动探测（读 SSH banner）同样要用 guest IP"""
-        src = (ROOT / "core" / "vm" / "manager.py").read_text(encoding="utf-8")
-        assert 's.connect((vm.ssh_host, vm.ssh_port))' in src

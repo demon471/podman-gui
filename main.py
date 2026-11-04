@@ -303,11 +303,10 @@ def _restore_vms(win) -> None:
         ok_n = sum(1 for _, ok, _ in results if ok)
         print(f"[main] 已恢复 {ok_n}/{len(results)} 台虚拟机")
 
-        # 通知虚拟机页：这些 VM 现在在跑了，重新开始保活计时
+        # 通知虚拟机页：这些机器现在在跑了
         try:
             page = getattr(win, "page_vms", None)
             if page is not None:
-                page._sync_keepalive()
                 page.refresh_silent()
         except Exception:
             pass

@@ -151,23 +151,21 @@ class TestVMPageInteractions:
             page._starting.discard(name)
             page._rebuild()
 
-    def test_keepalive_status_queries(self, main_window, qapp):
-        """保活状态查询不应抛异常"""
-        win = main_window
-        page = win.page_vms
-        page.refresh_silent()
-        for vm in page._vms:
-            name = vm.spec.name
-            page.keepalive.wants_running(name)
-            page.keepalive.idle_left(name)
-            page.keepalive.needs_wake(name)
-            page.keepalive.status(name)
-            page._is_available(vm)
+    def test_vm_page_basic_queries(self, main_window, qapp):
+        """容器页基础查询不崩（旧 keepalive 接口已删）"""
+        from PyQt6.QtCore import QTimer
 
-
-class TestVMDetailDialog:
-    """详情对话框（含文件面板）"""
-
+        page = main_window.page_vms
+        for _ in range(5):
+            qapp.processEvents()
+        if not page._vms:
+            self.skipTest("没有容器")
+            return
+        name = page._vms[0].spec.name
+        vm = page._selected_vm()
+        assert page._is_available(vm) in (True, False)
+        assert isinstance(name, str)
+        QTimer.singleShot(0, lambda: None)
     def test_opens_and_renders(self, main_window, qapp):
         from core.vm import manager
         from ui.vm_detail import VMDetailDialog

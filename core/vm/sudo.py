@@ -201,7 +201,7 @@ def ensure_nopass(vm) -> bool:
         pass
 
     try:
-        from core.vm.cloudinit import DEFAULT_PASSWORD
+        from core.vm.spec import DEFAULT_PASSWORD
 
         if DEFAULT_PASSWORD not in candidates:
             candidates.append(DEFAULT_PASSWORD)

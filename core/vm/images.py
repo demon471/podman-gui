@@ -77,173 +77,36 @@ class ImageSpec:
 # ─────────────────────────────────────────
 # 发行版目录
 # ─────────────────────────────────────────
+# 纯容器目录（rootfs tarball，QEMU 云镜像条目已随 VM 档删除）：
+# format="rootfs"，key 以 -lxc 结尾（download_rootfs 按 key
+# 去掉 -lxc 后解析 distro/version 查索引）
 CATALOG: dict[str, ImageSpec] = {
-    # ════════════════════════════════════════════════════
-    # Debian 系
-    # ════════════════════════════════════════════════════
-    "ubuntu-24.04": ImageSpec(
-        key="ubuntu-24.04",
-        name="Ubuntu 24.04 LTS (Noble)",
-        family="debian",
-        mirrors_amd64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/noble/current/noble-server-cloudimg-amd64.img",
-            "https://mirrors.ustc.edu.cn/ubuntu-cloud-images/noble/current/noble-server-cloudimg-amd64.img",
-            "https://repo.huaweicloud.com/ubuntu-cloud-images/noble/current/noble-server-cloudimg-amd64.img",
-        ],
-        mirrors_arm64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/noble/current/noble-server-cloudimg-arm64.img",
-            "https://mirrors.ustc.edu.cn/ubuntu-cloud-images/noble/current/noble-server-cloudimg-arm64.img",
-        ],
-        url_amd64="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
-        url_arm64="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img",
-        default_user="ubuntu",
-        default_mem_mb=1024,
-        note="长期支持，软件生态最全（推荐）",
-    ),
-    "ubuntu-25.10": ImageSpec(
-        key="ubuntu-25.10",
-        name="Ubuntu 25.10 (Questing)",
-        family="debian",
-        mirrors_amd64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/questing/current/questing-server-cloudimg-amd64.img",
-        ],
-        mirrors_arm64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/questing/current/questing-server-cloudimg-arm64.img",
-        ],
-        url_amd64="https://cloud-images.ubuntu.com/questing/current/questing-server-cloudimg-amd64.img",
-        url_arm64="https://cloud-images.ubuntu.com/questing/current/questing-server-cloudimg-arm64.img",
-        default_user="ubuntu",
-        default_mem_mb=1024,
-        note="最新特性，非 LTS",
-    ),
-    "debian-13": ImageSpec(
-        key="debian-13",
-        name="Debian 13 (Trixie)",
-        family="debian",
-        mirrors_amd64=[
-            "https://mirrors.ustc.edu.cn/debian-cdimage/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
-            "https://mirror.sjtu.edu.cn/debian-cdimage/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
-            "https://cdimage.debian.org/cdimage/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
-        ],
-        mirrors_arm64=[
-            "https://mirrors.ustc.edu.cn/debian-cdimage/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
-            "https://cdimage.debian.org/cdimage/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
-        ],
-        url_amd64="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
-        url_arm64="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
-        default_user="debian",
-        default_mem_mb=1024,
-        note="最新稳定版（推荐）",
-    ),
-    "debian-12": ImageSpec(
-        key="debian-12",
-        name="Debian 12 (Bookworm)",
-        family="debian",
-        mirrors_amd64=[
-            "https://mirrors.ustc.edu.cn/debian-cdimage/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
-            "https://mirror.sjtu.edu.cn/debian-cdimage/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
-            "https://cdimage.debian.org/cdimage/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
-        ],
-        mirrors_arm64=[
-            "https://mirrors.ustc.edu.cn/debian-cdimage/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2",
-            "https://cdimage.debian.org/cdimage/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2",
-        ],
-        url_amd64="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
-        url_arm64="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2",
-        default_user="debian",
-        default_mem_mb=1024,
-        note="更保守，兼容老项目",
-    ),
-
-    # ════════════════════════════════════════════════════
-    # Alpine（轻量首选）
-    # ════════════════════════════════════════════════════
-    "alpine-3.22": ImageSpec(
-        key="alpine-3.22",
-        name="Alpine Linux 3.22",
+    "alpine-3.22-lxc": ImageSpec(
+        key="alpine-3.22-lxc",
+        name="Alpine 3.22（轻）",
         family="alpine",
-        # 注意：3.22 起文件名去掉了 nocloud_ 前缀，且小版本号会变。
-        # 下载时先用 latest 探测真实文件名，见 _resolve_alpine_url()。
-        mirrors_amd64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.22/releases/cloud/",
-            "https://mirrors.aliyun.com/alpine/v3.22/releases/cloud/",
-            "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/cloud/",
-        ],
-        url_amd64="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/cloud/alpine-3.22.7-x86_64-uefi-cloudinit-r0.qcow2",
-        default_user="alpine",
-        default_mem_mb=256,
-        default_disk_gb=8,
-        note="极轻量（guest 内约 150MB），启动最快",
+        default_user="dev",
+        format="rootfs",
+        uefi=False,
+        note="最轻，~60MB，秒级启动（推荐）",
     ),
-
-    # ════════════════════════════════════════════════════
-    # RHEL 系
-    # ════════════════════════════════════════════════════
-    "rocky-9": ImageSpec(
-        key="rocky-9",
-        name="Rocky Linux 9",
-        family="fedora",
-        mirrors_amd64=[
-            "https://mirrors.ustc.edu.cn/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2",
-            "https://mirrors.aliyun.com/rockylinux/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2",
-            "https://repo.huaweicloud.com/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2",
-        ],
-        mirrors_arm64=[
-            "https://mirrors.ustc.edu.cn/rocky/9/images/aarch64/Rocky-9-GenericCloud-Base.latest.aarch64.qcow2",
-            "https://mirrors.aliyun.com/rockylinux/9/images/aarch64/Rocky-9-GenericCloud-Base.latest.aarch64.qcow2",
-        ],
-        url_amd64="https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2",
-        url_arm64="https://download.rockylinux.org/pub/rocky/9/images/aarch64/Rocky-9-GenericCloud-Base.latest.aarch64.qcow2",
-        default_user="rocky",
-        default_mem_mb=1024,
-        note="RHEL 9 兼容，企业环境常用",
+    "rocky-10-lxc": ImageSpec(
+        key="rocky-10-lxc",
+        name="Rocky Linux 10（轻）",
+        family="rocky",
+        default_user="dev",
+        format="rootfs",
+        uefi=False,
+        note="RHEL 兼容，企业生态",
     ),
-    "rocky-10": ImageSpec(
-        key="rocky-10",
-        name="Rocky Linux 10",
-        family="fedora",
-        mirrors_amd64=[
-            "https://mirrors.ustc.edu.cn/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2",
-            "https://mirrors.aliyun.com/rockylinux/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2",
-        ],
-        url_amd64="https://download.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2",
-        default_user="rocky",
-        default_mem_mb=1024,
-        note="最新大版本",
-    ),
-
-    # ════════════════════════════════════════════════════
-    # Fedora
-    # ════════════════════════════════════════════════════
-    "fedora-42": ImageSpec(
-        key="fedora-42",
-        name="Fedora 42 Cloud",
-        family="fedora",
-        mirrors_amd64=[
-            "https://mirrors.ustc.edu.cn/fedora/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64.qcow2",
-            "https://mirrors.tuna.tsinghua.edu.cn/fedora/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64.qcow2",
-        ],
-        url_amd64="https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64.qcow2",
-        default_user="fedora",
-        default_mem_mb=1024,
-        note="最新内核与新特性",
-    ),
-
-    # ════════════════════════════════════════════════════
-    # Arch（滚动更新）
-    # ════════════════════════════════════════════════════
-    "arch": ImageSpec(
-        key="arch",
-        name="Arch Linux Cloud",
-        family="arch",
-        mirrors_amd64=[
-            "https://mirrors.tuna.tsinghua.edu.cn/archlinux/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
-            "https://mirrors.ustc.edu.cn/archlinux/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
-        ],
-        url_amd64="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
-        default_user="arch",
-        default_mem_mb=1024,
-        note="滚动更新，AUR 生态",
+    "debian-13-lxc": ImageSpec(
+        key="debian-13-lxc",
+        name="Debian 13（轻）",
+        family="debian",
+        default_user="dev",
+        format="rootfs",
+        uefi=False,
+        note="最稳的通用发行版",
     ),
 }
 
@@ -867,3 +730,200 @@ def verify_qcow2(path: Path) -> tuple[bool, str]:
         return False, (r.stderr or r.stdout).strip()[:300]
     except (subprocess.TimeoutExpired, OSError) as e:
         return False, str(e)
+
+
+# ═══════════════════════════════════════════════════════
+# 纯容器档：发行版 rootfs tarball
+#
+# QEMU 云镜像（qcow2 + cloud-init）已随 VM 档删除；
+# 容器档直接用发行版 rootfs，解包播种，1-2 秒启动。
+# 来源 images.linuxcontainers.org（清华 tuna 有同步）。
+# ═══════════════════════════════════════════════════════
+
+LXC_META_PATHS = [
+    # 国内优先（实测快 3-10 倍）
+    "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/meta/1.0/index-system",
+    "https://images.linuxcontainers.org/meta/1.0/index-system",
+]
+
+# distro 在 index 里的目录名（含别名尝试顺序）
+_LXC_DISTRO_ALIASES = {
+    "rocky": ("rockylinux", "rocky"),
+    "alpine": ("alpine",),
+    "debian": ("debian",),
+}
+
+# index 行字段位置：distro;version;arch;variant;date;path;...
+_IDX_DISTRO, _IDX_VER, _IDX_ARCH, _IDX_VARIANT, _IDX_DATE, _IDX_PATH = (
+    0, 1, 2, 3, 4, 5
+)
+
+
+def _fetch_index() -> list[list[str]]:
+    """拉取发行版索引（多源降级），返回按日期倒序的行"""
+    import urllib.request
+
+    for meta in LXC_META_PATHS:
+        try:
+            with urllib.request.urlopen(meta, timeout=10) as r:
+                text = r.read().decode("utf-8", "replace")
+            rows = [
+                l.split(";")
+                for l in text.splitlines()
+                if l.strip() and not l.startswith("#")
+            ]
+            rows = [r for r in rows if len(r) > _IDX_PATH]
+            rows.sort(key=lambda r: r[_IDX_DATE], reverse=True)
+            if rows:
+                return rows
+        except (OSError, ValueError):
+            continue
+    return []
+
+
+def resolve_rootfs_url(distro: str, version: str, arch: str = "amd64",
+                       variant: str = "default") -> str:
+    """解析最新 rootfs.tar.xz 的 URL
+
+    走 meta 索引：distro;version;arch;variant;date;path，
+    挑日期最新的一个。找不到返回空串。
+    """
+    aliases = _LXC_DISTRO_ALIASES.get(distro, (distro,))
+    for row in _fetch_index():
+        if row[_IDX_ARCH] != arch or row[_IDX_VARIANT] != variant:
+            continue
+        if row[_IDX_DISTRO] not in aliases:
+            continue
+        # 版本前缀匹配（3.22 匹配 3.22；10 匹配 10）
+        if not row[_IDX_VER].startswith(version):
+            continue
+        return row[_IDX_PATH].rstrip("/") + "/rootfs.tar.xz"
+    return ""
+
+
+def rootfs_path(spec: ImageSpec, arch: str = "amd64") -> Path:
+    """rootfs tarball 缓存路径"""
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    return IMAGES_DIR / f"{spec.key}-{arch}.tar.xz"
+
+
+def rootfs_downloaded(spec: ImageSpec, arch: str = "amd64") -> bool:
+    return rootfs_path(spec, arch).exists()
+
+
+def download_rootfs(
+    spec: ImageSpec,
+    arch: str = "amd64",
+    on_progress: Callable[[int, int], None] | None = None,
+    on_log: Callable[[str], None] | None = None,
+    cancel_flag: Callable[[], bool] | None = None,
+) -> tuple[bool, str]:
+    """下载发行版 rootfs tarball（多源降级）
+
+    distro/version 从 key 推导（alpine-3.22-lxc → alpine/3.22）。
+    """
+    log = on_log or (lambda _m: None)
+
+    distro, version = spec.key.removesuffix("-lxc").rsplit("-", 1)
+    url = resolve_rootfs_url(distro, version, arch)
+    if not url:
+        return False, f"索引里找不到 {spec.name} 的 rootfs"
+
+    log(f"源: {url}")
+    target = rootfs_path(spec, arch)
+    tmp = target.with_suffix(".part")
+
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "podbox"})
+        with urllib.request.urlopen(req, timeout=30) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                if cancel_flag and cancel_flag():
+                    tmp.unlink(missing_ok=True)
+                    return False, "已取消"
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if on_progress and total:
+                    on_progress(got, total)
+        tmp.rename(target)
+        return True, ""
+    except (OSError, ValueError) as e:
+        tmp.unlink(missing_ok=True)
+        return False, str(e)
+
+
+def extract_rootfs(
+    spec: ImageSpec, arch: str, target_dir: Path,
+) -> tuple[bool, str]:
+    """解包 rootfs tarball 到机器目录
+
+    必须带 --numeric-owner：tarball 里的 uid/gid 是发行版约定的
+    （root=0），按名字映射在非 root 下解包会错乱。
+    """
+    tarball = rootfs_path(spec, arch)
+    if not tarball.exists():
+        return False, f"缓存里没有 {tarball.name}，请先下载"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    import subprocess as _sp
+
+    try:
+        r = _sp.run(
+            ["tar", "-xJf", str(tarball), "-C", str(target_dir),
+             "--numeric-owner", "--skip-old-files"],
+            capture_output=True, text=True, timeout=600,
+        )
+    except (OSError, _sp.TimeoutExpired) as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:300]
+
+    # 容器 rootfs 需要 /dev/pts 等（lxc autodev 会补），目录先建好
+    for sub in ("dev", "proc", "sys"):
+        (target_dir / sub).mkdir(exist_ok=True)
+    return True, ""
+
+
+def chown_rootfs(target_dir: Path, subuid_start: int | None = None) -> None:
+    """把 rootfs 整树属主改成 subuid 起始值
+
+    非特权容器里 root(0) 映射到宿主 subuid 段；rootfs 文件必须
+    归属这个段，否则容器内 root 对 /etc /var 没有写权限，起不来。
+    """
+    import os as _os
+
+    if subuid_start is None:
+        from core.vm.container import subuid_range
+
+        got = subuid_range()
+        if not got:
+            return
+        subuid_start = got[0]
+
+    def _chown(p: Path) -> None:
+        try:
+            _os.chown(p, subuid_start, subuid_start)
+        except OSError:
+            pass
+
+    _chown(target_dir)
+    for p in target_dir.rglob("*"):
+        _chown(p)
+
+
+def rootfs_cache_size() -> int:
+    """rootfs tarball 缓存总字节"""
+    total = 0
+    if IMAGES_DIR.exists():
+        for p in IMAGES_DIR.glob("*.tar.xz"):
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total

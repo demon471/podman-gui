@@ -59,10 +59,11 @@ def temp_vm_dir(tmp_path):
 
 @pytest.fixture
 def real_vm():
-    """真实 VM（仅在 -m needs_vm 时使用）"""
+    """真实容器（仅在 -m needs_vm 时使用）"""
     from core.vm import manager
 
-    vm = manager.load("rocky")
-    if vm is None:
-        pytest.skip("rocky 虚拟机不存在")
-    return vm
+    for name in ("rocky", "dev"):
+        vm = manager.load(name)
+        if vm is not None:
+            return vm
+    pytest.skip("没有可用容器")

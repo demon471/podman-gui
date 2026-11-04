@@ -137,16 +137,31 @@ if ! iptables -C FORWARD -o {BRIDGE} -m state --state RELATED,ESTABLISHED -j ACC
 fi
 
 # 4. dnsmasq 负责给 guest 发 DHCP（开机自启）
+# 4. dnsmasq 负责给 guest 发 DHCP（开机自启）
+#
+#    **unit 必须自己建桥**：一次性脚本建的是内存态（ip link add），
+#    重启就没了 —— 之前 unit 只跑 dnsmasq，重启后 "unknown interface
+#    pgbr0" 无限崩溃循环（实测 1500+ 次）。桥 + 地址 + 转发 + NAT
+#    全部放进 ExecStartPre（system 级 root 权限），`-` 前缀让每条
+#    都幂等：已存在时报错被忽略，不存在时创建。
 cat > {UNIT_PATH} <<'UNIT'
 [Unit]
 Description=Podman GUI VM bridge DHCP
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null \\
-    --interface={BRIDGE} --bind-interfaces \\
-    --dhcp-range={DHCP_START},{DHCP_END},255.255.0.0,12h \\
-    --dhcp-leasefile={LEASES} \\
+ExecStartPre=-/usr/bin/ip link add {BRIDGE} type bridge
+ExecStartPre=/usr/bin/ip link set {BRIDGE} up
+ExecStartPre=-/usr/bin/ip addr add {HOST_IP}/16 dev {BRIDGE}
+ExecStartPre=/usr/bin/sysctl -w net.ipv4.ip_forward=1
+ExecStartPre=-/usr/bin/iptables -t nat -C POSTROUTING -s {SUBNET} ! -o {BRIDGE} -j MASQUERADE
+ExecStartPre=-/usr/bin/iptables -t nat -A POSTROUTING -s {SUBNET} ! -o {BRIDGE} -j MASQUERADE
+ExecStartPre=-/usr/bin/iptables -C FORWARD -i {BRIDGE} -j ACCEPT
+ExecStartPre=-/usr/bin/iptables -A FORWARD -i {BRIDGE} -j ACCEPT
+ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null \
+    --interface={BRIDGE} --bind-interfaces \
+    --dhcp-range={DHCP_START},{DHCP_END},255.255.0.0,12h \
+    --dhcp-leasefile={LEASES} \
     --port=0
 Restart=always
 RestartSec=2

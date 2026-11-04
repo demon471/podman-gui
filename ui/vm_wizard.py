@@ -37,8 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.async_task import run_async
-from core.vm import cloudinit, deps, hostinfo, images, manager as vm_manager
-from core.vm import qemu as vm_qemu
+from core.vm import container, deps, hostinfo, images, manager as vm_manager
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 
 
@@ -258,11 +257,9 @@ class VMWizard(QDialog):
         if not self.ed_user.text().strip():
             self._fail("请填写用户名。")
             return False
-        if not cloudinit.iso_tool_available():
-            self._fail(
-                "缺少 ISO 生成工具（xorriso / genisoimage），"
-                "无法生成 cloud-init 配置。"
-            )
+        ok, err = container.prerequisites()
+        if not ok:
+            self._fail(err)
             return False
         return True
 
@@ -273,8 +270,7 @@ class VMWizard(QDialog):
         """检测依赖
 
         刻意在 UI 线程执行（不用 run_async）：deps.check_all() 内部
-        会跑多条 subprocess（qemu-system-x86_64 --version、test -r /dev/kvm
-        等）。实测把这些 subprocess 放在 BackgroundTask 的工作线程里执行，
+        会跑多条 subprocess（lxc-start --version 等）。实测把这些 subprocess 放在 BackgroundTask 的工作线程里执行，
         会与 Qt 事件循环冲突并触发 QMessageLogger::fatal，整个进程 abort。
         检测本身很快（几十毫秒），在 UI 线程延迟到界面渲染完再跑即可。
         """

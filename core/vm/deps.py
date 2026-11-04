@@ -33,55 +33,21 @@ class Dependency:
 # ─────────────────────────────────────────
 DEPENDENCIES: list[Dependency] = [
     Dependency(
-        key="qemu",
-        name="QEMU 系统模拟器",
-        check="qemu-system-x86_64",
-        purpose="运行虚拟机（必需）",
+        key="lxc",
+        name="LXC 容器运行时",
+        check="lxc-start",
+        purpose="运行轻机器（必需）",
         packages={
-            "arch": "qemu-base",
-            "debian": "qemu-system-x86",
-            "fedora": "qemu-kvm",
-        },
-    ),
-    Dependency(
-        key="qemu-img",
-        name="QEMU 镜像工具",
-        check="qemu-img",
-        purpose="创建/转换 qcow2 磁盘（必需）",
-        packages={
-            "arch": "qemu-img",
-            "debian": "qemu-utils",
-            "fedora": "qemu-img",
-        },
-    ),
-    Dependency(
-        key="kvm",
-        name="KVM 硬件加速",
-        check="/dev/kvm",
-        kind="kvm",
-        purpose="硬件虚拟化，缺失时性能下降 10 倍以上",
-        packages={
-            "arch": "（内核内置，需 BIOS 开启 VT-x/AMD-V）",
-            "debian": "（内核内置，需 BIOS 开启 VT-x/AMD-V）",
-            "fedora": "（内核内置，需 BIOS 开启 VT-x/AMD-V）",
-        },
-    ),
-    Dependency(
-        key="xorriso",
-        name="ISO 生成工具",
-        check="xorriso",
-        purpose="生成 cloud-init seed 镜像",
-        packages={
-            "arch": "libisoburn",
-            "debian": "xorriso",
-            "fedora": "xorriso",
+            "arch": "lxc",
+            "debian": "lxc",
+            "fedora": "lxc",
         },
     ),
     Dependency(
         key="ssh",
         name="SSH 客户端",
         check="ssh",
-        purpose="连接虚拟机、传输文件",
+        purpose="连接机器、传输文件",
         packages={
             "arch": "openssh",
             "debian": "openssh-client",
@@ -92,7 +58,7 @@ DEPENDENCIES: list[Dependency] = [
         key="ssh-keygen",
         name="SSH 密钥工具",
         check="ssh-keygen",
-        purpose="生成虚拟机专属密钥对",
+        purpose="生成机器专属密钥对",
         packages={
             "arch": "openssh",
             "debian": "openssh-client",
@@ -103,7 +69,7 @@ DEPENDENCIES: list[Dependency] = [
         key="scp",
         name="SCP 传输",
         check="scp",
-        purpose="在宿主与虚拟机间复制文件",
+        purpose="在宿主与机器间复制文件",
         packages={
             "arch": "openssh",
             "debian": "openssh-client",

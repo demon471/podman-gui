@@ -973,22 +973,8 @@ class VMDetailDialog(QDialog):
     # 刷新
     # ─────────────────────────────────────────
     def _is_available(self) -> bool:
-        """对用户而言是否可用（含资源已释放、访问时秒级恢复的情况）"""
-        if self.vm.running:
-            return True
-        try:
-            from core.vm import keepalive as ka
-
-            enabled, _ = ka.load_config()
-            if not enabled:
-                return False
-            from core import state
-
-            return bool(state.get_setting(
-                f"vm.desired_running.{self.vm.spec.name}", False
-            ))
-        except Exception:
-            return False
+        """对用户而言是否可用"""
+        return self.vm.running
 
     def _ensure_running(self, then) -> None:
         """确保 VM 在跑；资源已释放则先恢复，然后执行 then"""
@@ -1002,7 +988,7 @@ class VMDetailDialog(QDialog):
         def work():
             from core.vm import manager as mgr
 
-            return mgr.resume_vm(self.vm)
+            return mgr.start_vm(self.vm)
 
         def done(res):
             self._set_busy(False)

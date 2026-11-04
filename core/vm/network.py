@@ -249,7 +249,7 @@ def suggest_forwards(preset: str = "web") -> list:
 
     返回 [(host_port, guest_port, 说明)]
     """
-    from core.vm.qemu import PortForward
+    from core.vm.spec import PortForward
 
     presets = {
         "web": [(8080, 80, "HTTP"), (8443, 443, "HTTPS")],

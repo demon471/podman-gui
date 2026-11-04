@@ -47,15 +47,11 @@ from PyQt6.QtWidgets import (
 
 from core.async_task import run_async
 from core.notify import notifier
-from core.vm import autoconfig as vm_autoconfig
-from core.vm import budget as vm_budget
 import time as _time_mod
 
 from core.vm import dns as vm_dns
-from core.vm import keepalive as vm_keepalive
 from core.vm import manager as vm_manager
 from core.vm import network as vm_network
-from core.vm import qemu as vm_qemu
 from core.vm import ssh as vm_ssh
 from resources.icons import ICON_SIZE_TOOLBAR, STATE_COLORS, icon
 from ui.utils import fmt_size
@@ -98,14 +94,8 @@ class VMPage(QWidget):
         self._spin_timer.timeout.connect(self._spin_tick)
         self._tasks: list = []
 
-        # 常驻保活：空闲超时自动休眠，运行意图保留
-        self.keepalive = vm_keepalive.KeepAliveManager(self)
-        self.keepalive.auto_slept.connect(self._on_auto_slept)
-        self.keepalive.auto_sleep_failed.connect(self._on_auto_sleep_failed)
-
         self._build_ui()
         self.refresh_silent()
-        self._sync_keepalive()
 
         # 列表状态轮询（5s）
         self._list_timer = QTimer(self)
@@ -287,8 +277,7 @@ class VMPage(QWidget):
 
         def work():
             st = vm_dns.status()
-            need, _msg = vm_autoconfig.needs_attention()
-            return st.ready, need
+            return st.ready, False
 
         def done(res):
             ready, need = res
@@ -517,86 +506,6 @@ class VMPage(QWidget):
             if name in self._pending_vms:
                 self.model.item(r, 1).setIcon(self._spin_icon())
 
-    # ─────────────────────────────────────────
-    # 常驻保活
-    # ─────────────────────────────────────────
-    def _sync_keepalive(self) -> None:
-        """把当前 VM 列表同步给保活管理器
-
-        启动意图从 SQLite 读回（应用重启后仍知道哪些该运行），
-        并且只对「确实在跑」的 VM 开始计时。
-        """
-        from core import state as _state
-
-        for vm in self._vms:
-            name = vm.spec.name
-            try:
-                want = _state.get_setting(f"vm.desired_running.{name}", False)
-            except Exception:
-                want = False
-
-            if want:
-                self.keepalive.note_started(vm)
-                if vm.running:
-                    self.keepalive.note_ready(vm)
-            elif not vm.running:
-                self.keepalive.note_stopped(vm)
-
-        # 应用启动时，仍在休眠的 VM 需要重新建立唤醒代理
-        # （代理随上个进程退出而释放了端口）
-        self.keepalive._sync_proxies()
-
-        # 上一轮可能因端口 TIME_WAIT 失败。应用刚启动时事件循环
-        # 尚未稳定，QTimer 重试不一定及时 —— 这里额外排几轮
-        # 主动补偿，确保休眠中的 VM 一定有代理在监听，
-        # 否则用户 ssh 会直接「连接被拒绝」。
-        self._ensure_proxies_ready(attempt=0)
-
-    def _ensure_proxies_ready(self, attempt: int = 0) -> None:
-        """确保所有「休眠中且应运行」的 VM 都有代理在监听
-
-        最多重试 10 次（每次间隔递增），足够覆盖 QEMU 退出后
-        端口的 TIME_WAIT 释放窗口。
-        """
-        if attempt > 10:
-            return
-
-        need = [
-            vm for vm in self._vms
-            if not vm.running
-            and self.keepalive.enabled
-            and self.keepalive.wants_running(vm.spec.name)
-        ]
-        if not need:
-            return
-
-        pending = []
-        for vm in need:
-            if vm.spec.name in self.keepalive.proxied_vms():
-                continue
-            ok, _err = self.keepalive._pool.ensure(vm, retries=1)
-            if not ok:
-                pending.append(vm)
-
-        if pending:
-            delay = 500 + attempt * 500      # 0.5s, 1s, 1.5s …
-            QTimer.singleShot(
-                delay,
-                lambda: self._ensure_proxies_ready(attempt + 1),
-            )
-
-    def _on_auto_slept(self, name: str) -> None:
-        """空闲资源回收完成
-
-        对用户完全静默：机器在用户看来始终可用，
-        底层释放内存属于实现细节，不该弹通知打扰。
-        """
-        self.refresh_silent()
-
-    def _on_auto_sleep_failed(self, name: str, err: str) -> None:
-        """资源回收失败：只记状态栏，不弹窗（不影响用户使用）"""
-        self.status_message.emit(f"{name} 资源回收未完成")
-
     def _rebuild(self) -> None:
         selected = self._selected_name()
 
@@ -614,13 +523,6 @@ class VMPage(QWidget):
             elif running:
                 state = "running"
                 state_text = "运行中"
-            elif self.keepalive.wants_running(name) and self.keepalive.enabled:
-                # 用户视角：这台机器「随时可用」。
-                # 底层可能是内存快照待恢复（1 秒级）或已驻留内存，
-                # 对用户来说没有区别，所以统一显示为就绪，
-                # 不暴露「休眠/倒计时/内存状态」这些实现细节。
-                state = "running"
-                state_text = "就绪"
             else:
                 state = "stopped"
                 state_text = "已停止"
@@ -675,11 +577,7 @@ class VMPage(QWidget):
             self._table_stack.setCurrentWidget(self.table)
 
         # 统计：只报数量，不暴露内存/磁盘/休眠等技术细节
-        ready_n = sum(
-            1 for vm in self._vms
-            if vm.running
-            or (self.keepalive.wants_running(vm.spec.name) and self.keepalive.enabled)
-        )
+        ready_n = sum(1 for vm in self._vms if vm.running)
         if ready_n:
             self.lbl_stats.setText(
                 f"共 {len(self._vms)} 台虚拟机 · {ready_n} 台运行中"
@@ -716,23 +614,8 @@ class VMPage(QWidget):
         return [vm] if vm else []
 
     def _is_available(self, vm) -> bool:
-        """对用户而言这台机器是否「可用」
-
-        包含两种情况：
-          · 真的在运行
-          · 资源已释放（内存快照待恢复），访问时 1 秒级恢复
-
-        用户视角两者没区别 —— 都能连上、都能用，
-        所以操作按钮按「可用」启用，而不是按进程状态。
-        """
-        if vm is None:
-            return False
-        if vm.running:
-            return True
-        return bool(
-            self.keepalive.enabled
-            and self.keepalive.wants_running(vm.spec.name)
-        )
+        """对用户而言这台机器是否「可用」（= 在运行）"""
+        return bool(vm and vm.running)
 
     def _update_actions(self) -> None:
         vm = self._selected_vm()
@@ -929,15 +812,7 @@ class VMPage(QWidget):
             self.refresh_silent()
 
             if ok:
-                # 保活空闲计时从这里开始
-                vm = next((v for v in self._vms if v.spec.name == name), None)
-                if vm is not None:
-                    self.keepalive.note_ready(vm)
-                    # 自动挂载共享目录。
-                    # QEMU 的 -virtfs 只是把目录暴露成 9p 设备，
-                    # guest 内还要 mount 才能访问 —— 之前没有任何
-                    # 地方做这一步，用户配了共享目录也看不到内容。
-                    self._mount_shares_async(vm)
+                pass
                 self.status_message.emit(f"{name} 已就绪（{detail}s）")
                 notifier().info("虚拟机已就绪", name)
             else:
@@ -951,34 +826,6 @@ class VMPage(QWidget):
             if not self._pending_vms:
                 self._spin_timer.stop()
             self.refresh_silent()
-
-        task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks.append(task)
-
-    def _mount_shares_async(self, vm) -> None:
-        """后台挂载该 VM 的全部共享目录（不阻塞 UI）"""
-        if not vm.spec.shares:
-            return
-
-        def work():
-            return vm_ssh.mount_all_shares(vm)
-
-        def done(results):
-            ok_n = sum(1 for _t, ok, _m in results if ok)
-            total = len(results)
-            if ok_n == total:
-                self.status_message.emit(
-                    f"{vm.spec.name} 共享目录已挂载（{ok_n} 个）"
-                )
-            else:
-                failed = [t for t, ok, _m in results if not ok]
-                self.status_message.emit(
-                    f"{vm.spec.name} 共享目录 {ok_n}/{total} 挂载成功，"
-                    f"失败：{', '.join(failed)}"
-                )
-
-        def error(msg):
-            self.status_message.emit(f"共享目录挂载失败: {msg}")
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
         self._tasks.append(task)
@@ -1002,16 +849,8 @@ class VMPage(QWidget):
         if not vm:
             return
 
-        # 启动前内存预检查
-        ok, msg = vm_budget.check_vm_start(None, vm.spec.memory_mb)
-        if not ok:
-            QMessageBox.warning(self, "内存不足", msg)
-            return
-
-        # 有内存快照就走恢复（1–2 秒），否则冷启动（十几秒）。
-        # resume_vm 内部会自动判断，这里统一用它。
         self.run_op(
-            "启动", vm_manager.resume_vm, vm,
+            "启动", vm_manager.start_vm, vm,
             pending_vm=vm.spec.name,
             release_when="ssh",
             busy_text=f"正在启动 {vm.spec.name}…",
@@ -1035,14 +874,6 @@ class VMPage(QWidget):
             notifier().op_failed("启动", vm.spec.name, err)
             return
 
-        # 运行意图：保活机制据此判断「可以自动休眠，也要自动恢复」
-        self.keepalive.note_started(vm)
-        from core import state as _state
-
-        try:
-            _state.set_setting(f"vm.desired_running.{vm.spec.name}", True)
-        except Exception:
-            pass
 
     def _stop_selected(self) -> None:
         vm = self._selected_vm()
@@ -1075,8 +906,6 @@ class VMPage(QWidget):
         notifier().info(
             "虚拟机已停止" if ok else "停止失败", vm.spec.name
         )
-        if ok:
-            self.keepalive.note_stopped(vm)
 
     def _restart_selected(self) -> None:
         vm = self._selected_vm()
@@ -1112,21 +941,13 @@ class VMPage(QWidget):
         notifier().info(
             "虚拟机已重启" if ok else "重启失败", vm.spec.name
         )
-        if ok:
-            self.keepalive.note_started(vm)
-            self.keepalive.note_ready(vm)
 
     def _open_ssh(self) -> None:
         vm = self._selected_vm()
         if not vm:
             return
 
-        # 资源已释放 → 后台恢复，用户不需要知道发生了什么
         if not vm.running:
-            if self.keepalive.needs_wake(vm.spec.name):
-                self.status_message.emit(f"{vm.spec.name} 正在连接…")
-                self._wake_and_open(vm)
-                return
             QMessageBox.information(
                 self, "未运行",
                 f"「{vm.spec.name}」当前未运行。\n\n"
@@ -1134,15 +955,14 @@ class VMPage(QWidget):
             )
             return
 
-        self.keepalive.note_activity(vm.spec.name)
         cmd = vm.ssh_command()
         self.status_message.emit(f"SSH: {cmd}")
         self.request_terminal.emit(vm)
 
     def _wake_and_open(self, vm) -> None:
-        """恢复已释放资源的 VM，就绪后自动打开 SSH"""
+        """启动未运行的机器，就绪后自动打开 SSH"""
         self.run_op(
-            "恢复", vm_manager.resume_vm, vm,
+            "启动", vm_manager.start_vm, vm,
             pending_vm=vm.spec.name,
             release_when="ssh",
             busy_text=f"正在连接 {vm.spec.name}…",
@@ -1154,8 +974,7 @@ class VMPage(QWidget):
         if not ok:
             notifier().op_failed("恢复", vm.spec.name, result[1] if result else "")
             return
-        self.keepalive.note_ready(vm)
-        # 唤醒完成后直接打开 SSH，用户感知不到中间状态
+        # 启动完成后直接打开 SSH，用户感知不到中间状态
         QTimer.singleShot(0, lambda: self._open_ssh_now(vm))
 
     def _open_ssh_now(self, vm) -> None:
@@ -1190,10 +1009,9 @@ class VMPage(QWidget):
         self._open_detail()
 
     def _wake_then(self, vm, action) -> None:
-        """唤醒 VM，就绪后执行 action"""
+        """启动 VM，就绪后执行 action"""
         def done(r):
             if r and r[0]:
-                self.keepalive.note_ready(vm)
                 QTimer.singleShot(0, action)
             else:
                 notifier().op_failed(
@@ -1201,10 +1019,10 @@ class VMPage(QWidget):
                 )
 
         self.run_op(
-            "恢复", vm_manager.resume_vm, vm,
+            "启动", vm_manager.start_vm, vm,
             pending_vm=vm.spec.name,
             release_when="ssh",
-            busy_text=f"正在恢复 {vm.spec.name}…",
+            busy_text=f"正在启动 {vm.spec.name}…",
             on_success=done,
         )
 
@@ -1253,7 +1071,7 @@ class VMPage(QWidget):
             if fresh is None:
                 return False, "重启后找不到虚拟机"
 
-            # 等 guest 真正起来（restart_vm 只保证 QEMU 进程）
+            # 等 SSH 真正就绪（容器启动毫秒级，这里给发行版 init 时间）
             deadline = _time_mod.monotonic() + 120
             ready = False
             while _time_mod.monotonic() < deadline:
@@ -1266,11 +1084,8 @@ class VMPage(QWidget):
             if not ready:
                 return False, "重启后 SSH 未就绪，共享目录未挂载"
 
-            if fresh.spec.shares:
-                results = vm_ssh.mount_all_shares(fresh)
-                failed = [t for t, ok2, _m in results if not ok2]
-                if failed:
-                    return True, f"已重启，但 {', '.join(failed)} 挂载失败"
+            # 共享目录是 lxc bind mount，重启即自动挂载，
+            # 不需要在 guest 里手动 mount（VM 档的旧逻辑已删）
             return True, ""
 
         def done(res):
@@ -1413,8 +1228,7 @@ class VMPage(QWidget):
         )
 
     def _on_vm_deleted(self, name: str) -> None:
-        """VM 删除后清掉保活记录与运行意图"""
-        self.keepalive.forget(name)
+        """VM 删除后清掉运行意图"""
         try:
             from core import state as _state
 
@@ -1485,7 +1299,6 @@ class VMPage(QWidget):
 
     def stop_timers(self) -> None:
         self._list_timer.stop()
-        self.keepalive.shutdown()
 
 
 

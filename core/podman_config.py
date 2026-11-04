@@ -817,10 +817,16 @@ def compute_usage(client) -> dict:
     vm_declared = 0.0
     vm_actual = 0.0
 
-    # 各虚拟机（内存预算与容器共用，一并统计）
+    # 容器档共享宿主内核，没有独立内存预算可统计；
+    # VM 贡献清零（memory_mb 仅为 SQLite 列兼容保留）。
     try:
-        from core.vm import budget as vm_budget
         from core.vm.manager import load_all
+
+        for _vm in load_all():
+            pass
+    except Exception:
+        pass
+
 
         for vm in load_all():
             running = vm.running

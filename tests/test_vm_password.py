@@ -18,7 +18,7 @@ class TestPasswordStorage:
 
     def test_default_when_unset(self):
         from core.vm import manager
-        from core.vm.cloudinit import DEFAULT_PASSWORD
+        from core.vm.spec import DEFAULT_PASSWORD
 
         assert manager.get_password("__nonexistent_vm__") == DEFAULT_PASSWORD
 
@@ -34,7 +34,7 @@ class TestPasswordStorage:
 
     def test_empty_falls_back_to_default(self):
         from core.vm import manager
-        from core.vm.cloudinit import DEFAULT_PASSWORD
+        from core.vm.spec import DEFAULT_PASSWORD
 
         name = "__pwd_test__"
         manager.set_password(name, "")
@@ -73,7 +73,7 @@ class TestInfocardShowsPassword:
 
     def test_card_shows_new_password(self, qapp):
         from core.vm import manager
-        from core.vm.cloudinit import DEFAULT_PASSWORD
+        from core.vm.spec import DEFAULT_PASSWORD
         from ui.vm_infocard import VMInfoCard
 
         vms = manager.load_all()
