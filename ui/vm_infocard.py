@@ -144,17 +144,6 @@ class VMInfoCard(QFrame):
         row1.addStretch()
         sv.addLayout(row1)
 
-        # 命令 2 + 复制按钮
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        self.lbl_cmd2 = QLabel()
-        self.lbl_cmd2.setObjectName("cardCmd")
-        row2.addWidget(self.lbl_cmd2)
-        self.btn_copy2 = self._make_copy_btn()
-        row2.addWidget(self.btn_copy2)
-        row2.addStretch()
-        sv.addLayout(row2)
-
         root.addWidget(ssh_wrap)
 
         # ── 端口区（按需显隐）──
@@ -231,27 +220,16 @@ class VMInfoCard(QFrame):
         for (_k, v), val in zip(self._rows, values):
             v.setText(val)
 
-        # SSH 命令
+        # SSH 命令（与 ~/.ssh/config 一致的短域名形式）
         self._cmd1_text = "ssh " + domain
         self.lbl_cmd1.setText(self._cmd1_text)
-        if vm.ssh_port:
-            # 与 ~/.ssh/config 一致的短域名形式
-            #（sshconfig 已写好 Host/User/IdentityFile）
-            self._cmd2_text = "ssh " + domain
-            self.lbl_cmd2.setText(self._cmd2_text)
-            self.lbl_cmd2.show()
-            self.btn_copy2.show()
-        else:
-            self._cmd2_text = ""
-            self.lbl_cmd2.hide()
-            self.btn_copy2.hide()
 
         # 端口转发（排除 SSH）
         others = [f for f in spec.forwards if f.guest_port != 22]
         if others:
             self.lbl_ports.setText(
                 "\n".join(
-                    "127.0.0.1:%d → VM:%d" % (f.host_port, f.guest_port)
+                    "机器端口 %d（%s）" % (f.guest_port, f.protocol)
                     for f in others
                 )
             )
@@ -275,10 +253,8 @@ class VMInfoCard(QFrame):
     # 复制
     # ─────────────────────────────────────────
     def _copy_clicked(self, btn: QToolButton) -> None:
-        """复制对应命令，按钮变绿勾"""
-        text = (
-            self._cmd1_text if btn is self.btn_copy1 else self._cmd2_text
-        )
+        """复制 SSH 命令，按钮变绿勾"""
+        text = self._cmd1_text
         if not text:
             return
 
@@ -294,8 +270,7 @@ class VMInfoCard(QFrame):
     def _reset_copy_icons(self) -> None:
         """复制按钮回灰色复制图标"""
         self._feedback_timer.stop()
-        for b in (getattr(self, "btn_copy1", None),
-                  getattr(self, "btn_copy2", None)):
+        for b in (getattr(self, "btn_copy1", None),):
             if b is None:
                 continue
             b.setIcon(icon("copy", 14))

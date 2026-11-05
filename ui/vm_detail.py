@@ -384,23 +384,16 @@ class VMDetailDialog(QDialog):
         gv.setContentsMargins(14, 12, 14, 14)
         gv.setSpacing(4)
 
-        from core.vm.dns import vm_domain
-
-        domain = vm_domain(self.vm.spec.name)
-
-        # 主机名（域名）—— 第三方工具首选，~/.ssh/config 已配
-        # IP —— 域名解析异常时的兜底
-        # 用户 / 密码
-        self.lbl_conn_domain = QLabel(domain)
-        self.lbl_conn_ip = QLabel("获取中…")
+        # 域名已在窗口头部显示，这里不再重复；
+        # IP 读本地租约文件（毫秒级），同步取值不用「获取中…」
+        ip = self.vm.ssh_host
+        self.lbl_conn_ip = QLabel(ip if ip and ip != "127.0.0.1" else "未获取")
         self.lbl_conn_user = QLabel(self.vm.spec.username)
         self.lbl_conn_pwd = QLabel(
             vm_manager.get_password(self.vm.spec.name)
         )
 
         rows = [
-            ("主机", self.lbl_conn_domain,
-             "ssh %s 即可连接（本应用已写好 ~/.ssh/config）" % domain),
             ("IP", self.lbl_conn_ip,
              "机器在共享网桥上的地址；域名解析有问题时直接填这个"),
             ("用户", self.lbl_conn_user, "登录用户名"),
@@ -427,14 +420,6 @@ class VMDetailDialog(QDialog):
             h.addWidget(widget, 1)
 
             gv.addLayout(h)
-
-        # 底部一行说明（不出授权框、不需要端口）
-        note = QLabel("外部客户端也可直接 ssh %s（已写好密钥与配置）"
-                      % domain)
-        note.setObjectName("hintLabel")
-        note.setWordWrap(True)
-        gv.addSpacing(4)
-        gv.addWidget(note)
 
         v.addWidget(g1)
 
@@ -516,24 +501,6 @@ class VMDetailDialog(QDialog):
         v.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
         return w
-
-    def _load_guest_ip(self) -> None:
-        """后台取机器 IP（租约查询可能读文件，不阻塞界面）"""
-        def work():
-            return self.vm.ssh_host
-
-        def done(ip):
-            # 域名始终可用（dnsmasq 通配），IP 拿不到就显示占位
-            self.lbl_conn_ip.setText(ip if ip else "未获取")
-            if ip:
-                self.lbl_conn_domain.setToolTip(
-                    f"实际指向 {ip}:{self.vm.ssh_port}"
-                )
-
-        def error(_msg):
-            self.lbl_conn_ip.setText("未获取")
-
-        self._spawn(work, done, error)
 
     def _copyable_value(self, label: str, value: str,
                         mono: bool = True) -> QWidget:

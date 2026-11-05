@@ -172,9 +172,10 @@ class TestVmDetailCopyButton:
         assert src.count("self.lbl_ssh = QLabel") == 1, (
             "lbl_ssh 只能定义一次（头部），否则引用会被覆盖"
         )
-        # 账户页连接信息用独立控件（不与头部共用）
-        assert "lbl_conn_domain" in src
+        # 账户页连接信息用独立控件（不与头部共用）；
+        # 域名只在头部显示，账户页只有 IP/用户/密码
         assert "lbl_conn_ip" in src
+        assert "lbl_conn_domain" not in src
 
 
 class TestBrowseButtonState:
