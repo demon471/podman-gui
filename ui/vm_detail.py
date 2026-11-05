@@ -374,125 +374,68 @@ class VMDetailDialog(QDialog):
         self._pwd_busy = False
 
         # ── 连接信息 ──
-        # 只留第三方 SSH 客户端真正要填的四项，一行两列。
-        # ssh 命令已在窗口顶部，这里不重复；私钥路径太长且一般不用手填，
-        # 也去掉（本应用已自动写进 ~/.ssh/config）。
+        # 第三方 SSH 客户端要填的全部信息，就这几项。
+        # 布局：左侧灰标签 + 右侧等宽可复制值，一行一项 ——
+        # 旧版两列网格带「宿主/VM 内」双徽标是 SLIRP 时代
+        # （两套地址容易混）的产物；容器只有一组地址，排两列
+        # 反而显得杂乱。
         g1 = QGroupBox("连接信息")
         gv = QVBoxLayout(g1)
         gv.setContentsMargins(14, 12, 14, 14)
-        gv.setSpacing(8)
+        gv.setSpacing(4)
 
-        port = self.vm.ssh_port
+        from core.vm.dns import vm_domain
 
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(8)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
+        domain = vm_domain(self.vm.spec.name)
 
-        def cell(label: str, value: str) -> QWidget:
-            box = QWidget()
-            h = QHBoxLayout(box)
+        # 主机名（域名）—— 第三方工具首选，~/.ssh/config 已配
+        # IP —— 域名解析异常时的兜底
+        # 用户 / 密码
+        self.lbl_conn_domain = QLabel(domain)
+        self.lbl_conn_ip = QLabel("获取中…")
+        self.lbl_conn_user = QLabel(self.vm.spec.username)
+        self.lbl_conn_pwd = QLabel(
+            vm_manager.get_password(self.vm.spec.name)
+        )
+
+        rows = [
+            ("主机", self.lbl_conn_domain,
+             "ssh %s 即可连接（本应用已写好 ~/.ssh/config）" % domain),
+            ("IP", self.lbl_conn_ip,
+             "机器在共享网桥上的地址；域名解析有问题时直接填这个"),
+            ("用户", self.lbl_conn_user, "登录用户名"),
+            ("密码", self.lbl_conn_pwd, "登录密码（可在下方修改）"),
+        ]
+        for label, widget, tip in rows:
+            h = QHBoxLayout()
             h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
+            h.setSpacing(10)
 
             k = QLabel(label)
             k.setObjectName("formLabel")
-            k.setFixedWidth(52)
+            k.setFixedWidth(48)
             k.setAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
             h.addWidget(k)
 
-            val = QLabel(value)
-            val.setTextInteractionFlags(
+            widget.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            val.setObjectName("monoLabel")
-            val.setToolTip(value)
-            val.setSizePolicy(
-                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-            )
-            h.addWidget(val, 1)
-            return box
+            widget.setObjectName("monoLabel")
+            widget.setToolTip(tip)
+            h.addWidget(widget, 1)
 
-        # 主机 / 端口显示的是 **guest 内部** 的地址与端口，
-        # 并标注「内部」——宿主侧的 127.0.0.1:port 只是转发端口，
-        # 用户去第三方工具里填写时经常搞混。
-        self.lbl_guest_host = QLabel("—")
-        self.lbl_guest_port = QLabel(str(vm_ssh.guest_ssh_port(self.vm)))
+            gv.addLayout(h)
 
-        def cell_widget(label: str, value_widget: QWidget,
-                        suffix: str = "") -> QWidget:
-            box = QWidget()
-            h = QHBoxLayout(box)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
+        # 底部一行说明（不出授权框、不需要端口）
+        note = QLabel("外部客户端也可直接 ssh %s（已写好密钥与配置）"
+                      % domain)
+        note.setObjectName("hintLabel")
+        note.setWordWrap(True)
+        gv.addSpacing(4)
+        gv.addWidget(note)
 
-            k = QLabel(label)
-            k.setObjectName("formLabel")
-            k.setFixedWidth(52)
-            k.setAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            h.addWidget(k)
-
-            value_widget.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            value_widget.setObjectName("monoLabel")
-            h.addWidget(value_widget)
-
-            if suffix:
-                # 用彩色徽标而不是灰色小字：这是个容易搞混的点，
-                # 得让人一眼看到「这是内部地址，不是宿主转发端口」
-                tag = QLabel(suffix)
-                tag.setObjectName(
-                    "badgeInfo" if suffix == "宿主" else "badgeMuted"
-                )
-                tag.setToolTip({
-                    "宿主": "从宿主机（第三方 SSH 工具）连接时用这组",
-                    "VM 内": (
-                        "机器在网桥上的独立地址。每台机器分配"
-                        " 10.0.2.0/24，所以多台 VM 的内部 IP 相同 —— "
-                        "它们各自独立、互不冲突，但不能拿来区分虚拟机。"
-                    ),
-                }.get(suffix, ""))
-                h.addWidget(tag)
-
-            h.addStretch(1)
-            return box
-
-        # 两套地址都要显示，否则容易误解：
-        #   · 宿主侧 127.0.0.1:<转发端口> —— 每台 VM 唯一，第三方工具填这个
-        #   · VM 内部 10.0.2.15:22 —— QEMU 用户网络（SLIRP）对每台 VM
-        #     都分配同一个网段，所以多台 VM 看到的内部 IP 必然相同。
-        #     它们在各自的虚拟网络里互不冲突，但不能用来区分虚拟机。
-        grid.addWidget(
-            cell_widget("主机", QLabel("127.0.0.1"), "宿主"), 0, 0
-        )
-        grid.addWidget(
-            cell_widget("端口", QLabel(str(port)), "宿主"), 0, 2
-        )
-        grid.addWidget(
-            cell_widget("内部", self.lbl_guest_host, "VM 内"), 1, 0
-        )
-        grid.addWidget(
-            cell_widget("内部", self.lbl_guest_port, "VM 内"), 1, 2
-        )
-        grid.addWidget(
-            cell_widget("用户", QLabel(self.vm.spec.username)), 2, 0
-        )
-        grid.addWidget(
-            cell_widget(
-                "密码",
-                QLabel(vm_manager.get_password(self.vm.spec.name)),
-            ), 2, 2
-        )
-
-        gv.addLayout(grid)
-        QTimer.singleShot(80, self._load_guest_ip)
         v.addWidget(g1)
 
         # ── 修改密码 ──
@@ -575,21 +518,20 @@ class VMDetailDialog(QDialog):
         return w
 
     def _load_guest_ip(self) -> None:
-        """后台取 guest 内部 IP（SSH 往返，不能阻塞界面）"""
+        """后台取机器 IP（租约查询可能读文件，不阻塞界面）"""
         def work():
-            return vm_ssh.guest_ip(self.vm)
+            return self.vm.ssh_host
 
         def done(ip):
-            text = ip or "未获取"
-            self.lbl_guest_host.setText(text)
+            # 域名始终可用（dnsmasq 通配），IP 拿不到就显示占位
+            self.lbl_conn_ip.setText(ip if ip else "未获取")
             if ip:
-                self.lbl_guest_host.setToolTip(
-                    f"guest 内部地址；宿主侧用 "
-                    f"{self.vm.ssh_host}:{self.vm.ssh_port}"
+                self.lbl_conn_domain.setToolTip(
+                    f"实际指向 {ip}:{self.vm.ssh_port}"
                 )
 
         def error(_msg):
-            self.lbl_guest_host.setText("未获取")
+            self.lbl_conn_ip.setText("未获取")
 
         self._spawn(work, done, error)
 

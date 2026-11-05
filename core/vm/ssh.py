@@ -347,43 +347,6 @@ def unmount_all_shares(vm) -> list[tuple[str, bool, str]]:
     return results
 
 
-def guest_ip(vm, timeout: int = 12) -> str:
-    """guest 内部的 IPv4 地址（取不到返回空串）
-
-    用于在界面上显示「内部 IP」——很多人会拿这个地址去填第三方
-    工具，或者去 guest 内 ssh 另一台机器。
-    """
-    ok, out = run_command(
-        vm,
-        "ip -4 -o addr show scope global 2>/dev/null | "
-        "awk '{print $4}' | head -1",
-        timeout=timeout,
-    )
-    if not ok or not out:
-        return ""
-    for line in (out or "").splitlines():
-        addr = line.strip().split("/")[0]
-        # 排除回环/链路本地
-        if addr and not addr.startswith(("127.", "169.254.")):
-            return addr
-    return ""
-
-
-def guest_ssh_port(vm) -> int:
-    """guest 内部 sshd 的端口（通常 22）
-
-    QEMU 的 hostfwd 是 宿主端口 → guest 端口，guest 里 sshd
-    一直监听 22；这里按 hostfwd 配置反推，取不到就默认 22。
-    """
-    for fwd in getattr(vm.spec, "forwards", []) or []:
-        try:
-            if int(getattr(fwd, "guest_port", 0)) == 22:
-                return 22
-        except (TypeError, ValueError):
-            continue
-    return 22
-
-
 def mounted_tags(vm) -> set[str]:
     """查询已挂载的共享目录 tag 集合
 

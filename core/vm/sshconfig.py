@@ -49,23 +49,18 @@ def _managed_block(vms: list) -> str:
     """生成本程序管理的配置段"""
     lines = [BEGIN]
 
+    from core.vm.dns import vm_domain
+
     for vm in vms:
-        # 找 SSH 转发（guest_port == 22）
-        ssh_fwd = next(
-            (f for f in vm.spec.forwards if f.guest_port == 22), None
-        )
-        if ssh_fwd is None:
-            continue
-
-        from core.vm.dns import vm_domain
-
+        # 容器直挂网桥：HostName 写机器的真实 IP。
+        # （旧版在这里找 forwards 里的 SSH 转发，找不到就
+        #   continue —— 容器档 forwards 恒空，整个配置段
+        #   从来没写进去过，ssh <名字>.vm.local 全部 refused）
         domain = vm_domain(vm.spec.name)
         key = vm.ssh_key
 
         lines += [
             f"Host {domain}",
-            # 网桥模式下直接指向 guest 的 IP（宿主机可达），
-            # 否则走 127.0.0.1 的转发端口
             f"    HostName {vm.ssh_host}",
             f"    Port {vm.ssh_port}",
             f"    User {vm.spec.username}",

@@ -235,15 +235,9 @@ class VMInfoCard(QFrame):
         self._cmd1_text = "ssh " + domain
         self.lbl_cmd1.setText(self._cmd1_text)
         if vm.ssh_port:
-            # 网桥模式下 ssh_host 是 guest 自己的 IP、端口就是 22，
-            # 再拼 -p 22 纯属噪音；SLIRP 模式才需要显式端口
-            if vm.ssh_port == 22:
-                self._cmd2_text = f"ssh {spec.username}@{vm.ssh_host}"
-            else:
-                self._cmd2_text = (
-                    "ssh -p %d %s@%s"
-                    % (vm.ssh_port, spec.username, vm.ssh_host)
-                )
+            # 与 ~/.ssh/config 一致的短域名形式
+            #（sshconfig 已写好 Host/User/IdentityFile）
+            self._cmd2_text = "ssh " + domain
             self.lbl_cmd2.setText(self._cmd2_text)
             self.lbl_cmd2.show()
             self.btn_copy2.show()

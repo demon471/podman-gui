@@ -198,11 +198,17 @@ class VM:
         return "127.0.0.1"
 
     def ssh_command(self) -> str:
-        return (
-            f"ssh -i {self.ssh_key} "
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"{self.spec.username}@{self.ssh_host}"
-        )
+        """给用户复制用的 SSH 命令：短域名形式
+
+        前提：~/.ssh/config 已由 sshconfig.sync_config 写好
+        （HostName=机器 IP / User / IdentityFile 全配置），
+        所以命令可以短到 `ssh <名字>.vm.local`。
+        之前显示的是一长串 -i + -o 参数 —— 与实际写入的配置
+        不一致，用户复制出来和界面上看到的对不上。
+        """
+        from core.vm.dns import vm_domain
+
+        return f"ssh {vm_domain(self.spec.name)}"
 
     def http_forwards(self) -> list[PortForward]:
         """Web 类端口（80/443/8080 等）"""
