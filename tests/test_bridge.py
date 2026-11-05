@@ -101,18 +101,20 @@ class TestBridgeModule:
 
 
 class TestBridgeSetupScript:
-    def test_conf_mode_644(self):
-        """白名单必须 644，否则 QEMU 解析失败"""
+    def test_no_qemu_leftover(self):
+        """纯容器架构不再写 /etc/qemu/bridge.conf（qemu 非依赖）"""
         from core.vm import bridge
 
         script = bridge._setup_script()
-        assert f"chmod 644 {bridge.BRIDGE_CONF}" in script
-        assert "chmod 640" not in script
+        assert "/etc/qemu" not in script
 
-    def test_conf_allow_entry(self):
+    def test_container_fixups_present(self):
+        """非特权容器前置（ACL + lxc-usernet）必须在脚本里"""
         from core.vm import bridge
 
-        assert f"allow {bridge.BRIDGE}" in bridge._setup_script()
+        script = bridge._setup_script()
+        assert "lxc-usernet" in script
+        assert "setfacl" in script
 
     def test_masquerade(self):
         """guest 要能上外网"""

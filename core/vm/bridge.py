@@ -49,6 +49,9 @@ def bridge_exists() -> bool:
 
 
 def helper_available() -> bool:
+    """（已废弃：容器档走 lxc-user-nic，不需要 qemu-bridge-helper。
+
+    保留函数仅为兼容旧调用点/测试，结果不再被用于阻止初始化。"""
     """qemu-bridge-helper 是否可用（setuid 才能免 root 挂网桥）"""
     for p in (
         "/usr/lib/qemu/qemu-bridge-helper",
@@ -113,16 +116,6 @@ if [ ! -e /sys/class/net/{BRIDGE} ]; then
 fi
 ip addr replace {HOST_IP}/{PREFIX} dev {BRIDGE}
 ip link set {BRIDGE} up
-
-# 2. 允许普通用户通过 qemu-bridge-helper 挂这个网桥
-#    必须是 644：QEMU 自己会解析这个文件，640 root:kvm 时
-#    普通用户读不到，启动直接报 "failed to parse default acl file"
-mkdir -p /etc/qemu
-touch {BRIDGE_CONF}
-if ! grep -qE '^[[:space:]]*allow[[:space:]]+({BRIDGE}|all)[[:space:]]*$' {BRIDGE_CONF}; then
-    echo "allow {BRIDGE}" >> {BRIDGE_CONF}
-fi
-chmod 644 {BRIDGE_CONF}
 
 # 3. 让 guest 能访问外网（源地址伪装）
 sysctl -qw net.ipv4.ip_forward=1

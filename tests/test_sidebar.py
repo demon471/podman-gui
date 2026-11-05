@@ -26,7 +26,9 @@ def sidebar(qapp):
         qapp.processEvents()
     yield sb
     sb.deleteLater()
-    qapp.processEvents()
+    from PyQt6.QtCore import QEvent
+
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class TestWidthFitsContent:

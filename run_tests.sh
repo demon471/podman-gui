@@ -66,7 +66,9 @@ if [ "$MODE" = "--all" ]; then
     "$PY" -m pytest tests/ -q --tb=short -p no:cacheprovider \
         "${XDIST[@]}" "$@" 2>&1 | tail -30
 else
+    # console_output_style=count：实时显示 [123/282] 计数进度
     "$PY" -m pytest tests/ -q --tb=short -p no:cacheprovider \
+        -o console_output_style=count \
         -m "not needs_vm" "${XDIST[@]}" "$@" 2>&1 | tail -30
 fi
 

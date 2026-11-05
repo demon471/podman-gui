@@ -31,16 +31,63 @@ class Dependency:
 # ─────────────────────────────────────────
 # 依赖清单
 # ─────────────────────────────────────────
+# 系统中间件清单（详见 docs/dependencies.md）
+# PyInstaller 包内已内置的不在此列（PyQt6/paramiko/pexpect/pyte 等）。
+# purpose 带括号标注检查时机：创建前 / 初始化时。
 DEPENDENCIES: list[Dependency] = [
+    Dependency(
+        key="podman",
+        name="Podman",
+        check="podman",
+        purpose="容器引擎（应用核心，启动时检测）",
+        packages={
+            "arch": "podman",
+            "debian": "podman",
+            "fedora": "podman",
+        },
+    ),
     Dependency(
         key="lxc",
         name="LXC 容器运行时",
         check="lxc-start",
-        purpose="运行轻机器（必需）",
+        purpose="轻机器运行时（创建/启动前检测）",
         packages={
             "arch": "lxc",
             "debian": "lxc",
             "fedora": "lxc",
+        },
+    ),
+    Dependency(
+        key="dnsmasq",
+        name="dnsmasq",
+        check="dnsmasq",
+        purpose=".vm.local 域名解析 + 网桥 DHCP（初始化时检测）",
+        packages={
+            "arch": "dnsmasq",
+            "debian": "dnsmasq",
+            "fedora": "dnsmasq",
+        },
+    ),
+    Dependency(
+        key="acl",
+        name="ACL 工具",
+        check="setfacl",
+        purpose="家目录访问授权（初始化时配置，初始化脚本用）",
+        packages={
+            "arch": "acl",
+            "debian": "acl",
+            "fedora": "acl",
+        },
+    ),
+    Dependency(
+        key="iptables",
+        name="iptables",
+        check="iptables",
+        purpose="网桥 NAT（初始化时配置，初始化脚本用）",
+        packages={
+            "arch": "iptables",
+            "debian": "iptables",
+            "fedora": "iptables",
         },
     ),
     Dependency(

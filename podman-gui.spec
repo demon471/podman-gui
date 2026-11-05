@@ -107,11 +107,19 @@ import re as _re
 _BIN_EXCLUDE = _re.compile(
     r"lib(x265|aom|SvtAv1Enc|x264|dav1d|rav1e|heif|jxl|gtk-3|glycin"
     r"|cairo|gio-2|glib-2|gobject-2|gmodule-2|gthread-2|pango"
-    r"|harfbuzz|KF6BreezeIcons|KF6WidgetsAddons"
+    r"|harfbuzz|KF6[A-Z]\w+"
+    r"|openh264|xml2|pixman|ldap|lber|krb5|k5crypto|gssapi"
     r"|Qt6Quick|Qt6Qml|Qt6Pdf|Qt6Designer|Qt6Help|Qt6Test"
     r"|Qt6WebEngine|Qt6Multimedia|Qt6Bluetooth|Qt6Nfc|Qt6SerialPort"
     r"|Qt6Sensors|Qt6Positioning|Qt6Location|Qt6WebChannel)"
 )
+
+# Qt 翻译文件（.qm）与 locale 数据：界面只有中文/英文，
+# Qt 自带的几十种翻译用不上
+a.binaries = [
+    b for b in a.binaries
+    if "/translations/" not in b[0] and not b[0].endswith(".qm")
+]
 
 a.binaries = [
     b for b in a.binaries if not _BIN_EXCLUDE.search(b[0])

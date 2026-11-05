@@ -24,14 +24,19 @@ def page(qapp):
     p = SettingsPage(PodmanClient())
     yield p
 
-    # deleteLater() 只是排队，要等事件循环才真正销毁。
-    # 不在这里驱动一次的话，几十个 SettingsPage 会一直活着，
-    # 它们的延迟刷新定时器（80ms / 500ms）持续排队，代价最后
-    # 算到下一个调用 processEvents 的用例头上 —— 表现为某个
-    # 无引用例莫名其妙跑 50 秒。
+    # deleteLater() 只是排队，要真正销毁。
+    # 这里**只处理延迟销毁事件**，不能用 processEvents()：
+    # processEvents 会把页面挂起的延迟刷新定时器（singleShot
+    # 80ms/500ms → _refresh_service/_refresh_storage_status）
+    # 全部触发，每个都在打真实 podman socket，一个用例的
+    # teardown 能吃掉 10-20 秒。
+    # sendPostedEvents(DeferredDelete) 只销毁对象；对象销毁后
+    # 挂在其上的定时器回调自动作废。
+    from PyQt6.QtCore import QEvent
+
     p.close()
     p.deleteLater()
-    qapp.processEvents()
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class TestTabLayout:
