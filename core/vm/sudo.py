@@ -33,7 +33,7 @@ import logging
 log = logging.getLogger(__name__)
 
 # sudoers 规则文件名（放在 /etc/sudoers.d/ 下，需 0440 权限）
-SUDOERS_FILE = "/etc/sudoers.d/90-podman-gui"
+SUDOERS_FILE = "/etc/sudoers.d/90-podbox"
 SUDOERS_RULE = "{user} ALL=(ALL) NOPASSWD: ALL"
 
 # 本次会话缓存的密码（内存，不落盘）

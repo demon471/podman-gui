@@ -145,7 +145,6 @@ class TreeLineDelegate(QStyledItemDelegate):
             return
 
         from PyQt6.QtGui import QColor, QPainter, QPen
-        from PyQt6.QtWidgets import QStyle
 
         view = tree
         indent = view.indentation()
@@ -160,14 +159,23 @@ class TreeLineDelegate(QStyledItemDelegate):
         if depth == 0:
             return
 
-        r = view.visualRect(index)
+        # ══ 坐标系是关键 ══
+        # Qt 传给 delegate 的 painter 原点已经在 option.rect.topLeft()
+        # （即本行内容区起点，不含分支缩进槽）。画线必须全部用
+        # **相对内容区**的坐标，否则 QSS/Breeze 的 padding 一变，
+        # 线就整体错位 —— 之前用 visualRect 的 viewport 坐标混着
+        # 画，真实主题下线穿过箭头、父子断开。
+        #
+        # 分支槽布局（viewport 坐标）：
+        #   第 k 层槽 = [k*indent, (k+1)*indent)
+        #   本项（depth 层）的分支槽 = [(depth-1)*i, depth*i)
+        #   其中心相对内容区 = (depth-1)*indent + indent//2 - rect.x()
+        # 而 rect.x() 恰好 = depth*indent（内容从第 depth 槽开始），
+        # 所以本项槽中心相对 painter = -indent + indent//2。
+        # 外层槽 k 的中心相对 painter = (k - depth)*indent + indent//2。
+        rect_x = option.rect.x()
+        mid_y = option.rect.center().y()
 
-        # 几何：QTreeView 的层级缩进从 x=0 开始，每层 indentation。
-        #   · 父链的竖线画在各层缩进槽的中间
-        #   · 本项的横线从父层槽中点连到本项内容左侧
-        # 旧算法 x = left - indent*depth + indent//2 把整条线
-        # 挂在「内容起点 - 半格」上，与展开箭头（占据父层缩进槽）
-        # 重叠，看起来线穿过箭头、子项线又缩进去一块。
         col = QColor(option.palette.color(
             option.palette.ColorRole.WindowText
         ))
@@ -179,31 +187,27 @@ class TreeLineDelegate(QStyledItemDelegate):
         pen.setWidth(1)
         painter.setPen(pen)
 
-        mid_y = r.center().y()
-
-        # 从最顶层父到本项，逐层画竖线（跨层时兄弟延续线也要画）
-        node = index
-        xs = []
-        while node.parent().isValid():
-            node = node.parent()
-            xs.append(r.left() - indent * (len(xs) + 1) + indent // 2)
-        # xs[0] = 最外层槽中点 … xs[-1] = 直接父层槽中点
-
         has_next = index.row() < view.model().rowCount(
             index.parent()
         ) - 1 if index.parent().isValid() else False
 
-        for k, x in enumerate(reversed(xs)):
-            is_last = (k == len(xs) - 1)
+        # 从最外层到直接父层，逐槽画线
+        for k in range(depth):
+            # 槽 k 的中心，相对 painter 原点
+            x = (k - depth) * indent + indent // 2
+            is_last = (k == depth - 1)
             if is_last:
-                # 直接父层：竖线从行顶到中点（最后兄弟）或贯穿
-                y_bottom = mid_y if not has_next else r.bottom() + 1
-                painter.drawLine(x, r.top(), x, y_bottom)
-                # 横线接到本项内容
-                painter.drawLine(x, mid_y, x + indent // 2, mid_y)
+                # 直接父层槽：本项的分支线
+                y_bottom = (
+                    option.rect.bottom() + 1 if has_next else mid_y
+                )
+                painter.drawLine(x, option.rect.top(), x, y_bottom)
+                # 横线接到内容起点（= painter x=0）
+                painter.drawLine(x, mid_y, 0, mid_y)
             else:
-                # 外层：只是「路过」，兄弟还有后续就贯穿整行
-                painter.drawLine(x, r.top(), x, r.bottom() + 1)
+                # 外层槽：路过线（本项之后的兄弟还要延续就贯穿）
+                painter.drawLine(x, option.rect.top(),
+                                 x, option.rect.bottom() + 1)
 
         painter.restore()
 

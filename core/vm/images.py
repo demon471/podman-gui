@@ -19,7 +19,7 @@ from typing import Callable
 from core.config import ROOT
 
 # 镜像缓存目录
-IMAGES_DIR = Path.home() / ".local" / "share" / "podman-gui" / "vm" / "images"
+IMAGES_DIR = Path.home() / ".local" / "share" / "podbox" / "vm" / "images"
 
 
 @dataclass
@@ -77,38 +77,144 @@ class ImageSpec:
 # ─────────────────────────────────────────
 # 发行版目录
 # ─────────────────────────────────────────
-# 纯容器目录（rootfs tarball，QEMU 云镜像条目已随 VM 档删除）：
-# format="rootfs"，key 以 -lxc 结尾（download_rootfs 按 key
-# 去掉 -lxc 后解析 distro/version 查索引）
-CATALOG: dict[str, ImageSpec] = {
-    "alpine-3.22-lxc": ImageSpec(
-        key="alpine-3.22-lxc",
-        name="Alpine 3.22",
-        family="alpine",
-        default_user="dev",
-        format="rootfs",
-        uefi=False,
-        note="最轻，~60MB，秒级启动（推荐）",
-    ),
-    "rocky-10-lxc": ImageSpec(
-        key="rocky-10-lxc",
-        name="Rocky Linux 10",
-        family="rocky",
-        default_user="dev",
-        format="rootfs",
-        uefi=False,
-        note="RHEL 兼容，企业生态",
-    ),
-    "debian-13-lxc": ImageSpec(
-        key="debian-13-lxc",
-        name="Debian 13",
-        family="debian",
-        default_user="dev",
-        format="rootfs",
-        uefi=False,
-        note="最稳的通用发行版",
-    ),
+# 两层结构：
+#   1. CATALOG —— 精选静态条目（友好名、推荐位、排序）
+#   2. 动态发现 —— 向导打开时从镜像站索引拉全部
+#      发行版/版本组合（24+ 个），精选之外自动补齐。
+# key 约定：<distro>-<version>-lxc，download_rootfs 按 key
+# 解析 distro/version 查索引。family 决定包管理器/sshd 安装命令。
+
+# 发行版元数据：显示名、家族（包管理器归类）、是否推荐
+DISTRO_META: dict[str, tuple[str, str]] = {
+    # distro: (显示名, family)
+    "alpine": ("Alpine", "alpine"),
+    "ubuntu": ("Ubuntu", "debian"),
+    "debian": ("Debian", "debian"),
+    "rockylinux": ("Rocky Linux", "rocky"),
+    "almalinux": ("AlmaLinux", "rocky"),
+    "fedora": ("Fedora", "fedora"),
+    "archlinux": ("Arch Linux", "arch"),
+    "cachyos": ("CachyOS", "arch"),
+    "opensuse": ("openSUSE", "suse"),
+    "centos": ("CentOS Stream", "rocky"),
+    "oracle": ("Oracle Linux", "rocky"),
+    "amazonlinux": ("Amazon Linux", "fedora"),
+    "openeuler": ("openEuler", "fedora"),
+    "kali": ("Kali", "debian"),
+    "mint": ("Linux Mint", "debian"),
+    "devuan": ("Devuan", "debian"),
+    "voidlinux": ("Void", "void"),
+    "alt": ("ALT Linux", "fedora"),
+    "slackware": ("Slackware", "slackware"),
+    "plamo": ("Plamo", "fedora"),
+    "nixos": ("NixOS", "nixos"),
+    "openwrt": ("OpenWrt", "openwrt"),
+    "busybox": ("BusyBox", "busybox"),
 }
+
+# 版本代号 → 人类可读（Debian/Ubuntu 用代号，其它是数字本身可读）
+VERSION_NAMES = {
+    "trixie": "13 (trixie)", "bookworm": "12 (bookworm)",
+    "forky": "14 (forky)",
+    "noble": "24.04 LTS", "jammy": "22.04 LTS",
+    "resolute": "25.10", "stonking": "26.04",
+    "tumbleweed": "Tumbleweed", "current": "当前版",
+    "edge": "edge(滚动)", "unstable": "unstable",
+    "Sisyphus": "Sisyphus", "p11": "p11",
+}
+
+# 推荐排序（向导里靠前）
+PREFERRED_ORDER = [
+    "alpine", "debian", "ubuntu", "rockylinux", "fedora",
+    "archlinux", "cachyos", "opensuse",
+]
+
+
+def _make_spec(distro: str, version: str) -> ImageSpec:
+    """从 distro/version 构造 ImageSpec"""
+    name, family = DISTRO_META.get(
+        distro, (distro.capitalize(), "debian")
+    )
+    ver_disp = VERSION_NAMES.get(version, version)
+    return ImageSpec(
+        key=f"{distro}-{version}-lxc",
+        name=f"{name} {ver_disp}",
+        family=family,
+        default_user="dev",
+        format="rootfs",
+        uefi=False,
+    )
+
+
+# 精选静态条目（无索引也能列表/创建；有索引时被动态版合并）
+# key 与动态生成的完全一致（<distro>-<version>-lxc），避免同一
+# 发行版出现两条（曾出现过 alpine-3.22-lxc / alpine-3.22-lxc 重复）。
+# 老机器的 image_key 可能还是 alpine-3.22-lxc 形式 → get_spec 时做别名映射。
+CATALOG: dict[str, ImageSpec] = {
+    _make_spec(d, v).key: _make_spec(d, v)
+    for d, v in [
+        ("alpine", "3.22"),
+        ("debian", "trixie"),
+        ("ubuntu", "noble"),
+        ("rockylinux", "10"),
+        ("fedora", "43"),
+        ("archlinux", "current"),
+    ]
+}
+
+# 老 key → 新 key（VM 档时代的静态目录遗留）
+_LEGACY_KEYS = {
+    "alpine-3.22-lxc": "alpine-3.22-lxc",
+    "rocky-10-lxc": "rockylinux-10-lxc",
+    "debian-13-lxc": "debian-trixie-lxc",
+}
+
+
+def discover_catalog(arch: str = "amd64") -> dict[str, ImageSpec]:
+    """从镜像站索引发现全部可用发行版/版本
+
+    索引拉不到（离线/超时）时返回静态 CATALOG。
+    结果带模块级缓存，一次会话只拉一遍。
+    """
+    global _DISCOVERED
+
+    if _DISCOVERED is not None:
+        return _DISCOVERED
+
+    rows, base = _fetch_index()
+    if not rows:
+        _DISCOVERED = dict(CATALOG)
+        return _DISCOVERED
+
+    out: dict[str, ImageSpec] = {}
+    for r in rows:
+        if r[_IDX_ARCH] != arch or r[_IDX_VARIANT] != "default":
+            continue
+        distro, version = r[_IDX_DISTRO], r[_IDX_VER]
+        # 过滤明显不适合当开发环境的
+        if distro in ("busybox", "openwrt"):
+            continue
+        spec = _make_spec(distro, version)
+        out[spec.key] = spec
+
+    # 排序：推荐的发行版在前，同发行版新版本在前
+    def _sort_key(item):
+        key = item[0]
+        d = key.removesuffix("-lxc").split("-")[0]
+        pri = PREFERRED_ORDER.index(d) if d in PREFERRED_ORDER else 99
+        return (pri, d, key)
+
+    _DISCOVERED = dict(sorted(out.items(), key=_sort_key))
+    return _DISCOVERED
+
+
+_DISCOVERED: dict[str, ImageSpec] | None = None
+
+
+def reset_discovered() -> None:
+    """清掉动态目录缓存（测试用/手动刷新）"""
+    global _DISCOVERED
+    _DISCOVERED = None
 
 
 def list_images(arch: str = "amd64") -> list[ImageSpec]:
@@ -120,14 +226,19 @@ def list_images(arch: str = "amd64") -> list[ImageSpec]:
     spec.url() 判断会把三个 rootfs 条目全部过滤掉 ——
     向导里就没有可下载的镜像了。
     """
-    out = []
-    for spec in CATALOG.values():
-        if spec.format == "rootfs" or spec.url(arch):
-            out.append(spec)
-    return out
+    # 动态发现优先（24+ 发行版），索引拉不到回落静态精选
+    return list(discover_catalog(arch).values())
 
 
 def get_spec(key: str) -> ImageSpec | None:
+    cat = discover_catalog()
+    if key in cat:
+        return cat[key]
+    # 老格式 key（VM 档时代 / 静态目录早期版本）
+    if key in _LEGACY_KEYS:
+        return cat.get(_LEGACY_KEYS[key]) or CATALOG.get(
+            _LEGACY_KEYS[key]
+        )
     return CATALOG.get(key)
 
 
@@ -381,14 +492,23 @@ def extract_rootfs(
 
 
 def fix_setuid_bits(rootfs: Path) -> None:
-    """在用户命名空间里恢复 rootfs 的 setuid/setgid 位
+    """解包后修权：setuid 位补回 + 播种路径放开
 
-    扫 tar 记录找 mode 带 setuid 的文件太慢；直接对已知清单
-    补位（各发行版通用，缺的文件 chmod 自然失败忽略）。
+    各发行版 tarball 的权限位差异是**静态可判定**的坑源
+    （不用逐个下载测试）：
+
+    1. setuid 位：内核禁止非 root 进程设置 setuid —— 普通用户
+       解包后 sudo/su/passwd 全部变普通文件（实测 debian）
+    2. 奇异 mode：Rocky 的 etc/shadow 是 0000（----------），
+       宿主用户连读都不行，播种直接 EACCES（实测 rocky）
+
+    两类都在用户命名空间里以 root 身份修（CAP_SETUID 可设
+    setuid，CAP_DAC_OVERRIDE 无视任何 mode 位）。
     """
     from core.vm.container import userns_run
 
-    targets = [
+    # 1) setuid 位清单（各发行版通用，缺的忽略）
+    su_targets = [
         "usr/bin/sudo", "usr/bin/su", "usr/bin/passwd",
         "usr/bin/chsh", "usr/bin/chfn", "usr/bin/newgrp",
         "usr/bin/gpasswd", "usr/bin/chage", "usr/bin/expiry",
@@ -397,11 +517,26 @@ def fix_setuid_bits(rootfs: Path) -> None:
         "bin/su", "usr/sbin/unix_chkpwd",
     ]
     existing = [
-        str(rootfs / t) for t in targets if (rootfs / t).exists()
+        str(rootfs / t) for t in su_targets if (rootfs / t).exists()
     ]
-    if not existing:
-        return
-    userns_run(["chmod", "u+s", *existing], timeout=60)
+    if existing:
+        userns_run(["chmod", "u+s", *existing], timeout=60)
+
+    # 2) 播种路径放开：目录 755（宿主可进可写）、
+    #    passwd/shadow/hosts 600（宿主可读写）。
+    #    属主在 idmap 下已是宿主用户，chmod 后全部可操作。
+    etc = rootfs / "etc"
+    if etc.exists():
+        userns_run([
+            "sh", "-c",
+            "chmod 755 {etc} && "
+            "chmod 600 {etc}/shadow {etc}/gshadow 2>/dev/null; "
+            "chmod 644 {etc}/passwd {etc}/group {etc}/hosts "
+            "{etc}/hostname 2>/dev/null; true".format(etc=etc),
+        ], timeout=60)
+    for d in ("root", "home"):
+        if (rootfs / d).exists():
+            userns_run(["chmod", "755", str(rootfs / d)], timeout=30)
 
 
 def rootfs_cache_size() -> int:

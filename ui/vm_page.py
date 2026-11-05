@@ -1022,7 +1022,8 @@ class VMPage(QWidget):
         vm = self._selected_vm()
         if vm is None:
             return
-        if vm.running or self._busy:
+        # 用 _is_available 而非 vm.running：与其它动作同一判断口径
+        if self._is_available(vm) or self._busy:
             return
         self._start_selected()
 

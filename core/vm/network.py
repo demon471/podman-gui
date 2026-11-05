@@ -23,7 +23,7 @@ HOSTS_FILE = Path("/etc/hosts")
 DOMAIN_SUFFIX = ".local"
 
 # 标记注释（用于识别本程序写入的条目）
-MARKER = "# podman-gui-vm"
+MARKER = "# podbox-vm"
 
 
 # ─────────────────────────────────────────

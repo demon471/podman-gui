@@ -51,6 +51,7 @@ class VMWizard(QDialog):
     # 由 Qt 自动投递到 UI 线程执行。
     _sig_progress = pyqtSignal(int, int)
     _sig_log = pyqtSignal(str)
+    _sig_catalog = pyqtSignal(list)   # 动态镜像目录拉取完成
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -64,7 +65,10 @@ class VMWizard(QDialog):
         self.resize(880, 620)
 
         self._host = hostinfo.host_profile()
-        self._specs = images.list_images()
+        # 静态精选目录（零网络，瞬时显示）—— 动态全量目录
+        # （24+ 发行版）要拉镜像站索引，网络慢时会把「新建」
+        # 卡住数秒，改为后台拉取后刷新列表。
+        self._specs = list(images.CATALOG.values())
 
         self._build_ui()
 
@@ -79,6 +83,10 @@ class VMWizard(QDialog):
         self._sig_log.connect(
             self._on_dl_log, _Qt.ConnectionType.QueuedConnection
         )
+        self._sig_catalog.connect(
+            self._on_catalog_ready, _Qt.ConnectionType.QueuedConnection
+        )
+        self._refresh_catalog_async()
 
         self._goto_step(0)
         QTimer.singleShot(80, self._check_deps)
@@ -200,16 +208,25 @@ class VMWizard(QDialog):
 
         v.addWidget(self.dep_row_widget)
 
-        # ── 镜像 ──
+        # ── 镜像：两级选择（大类 → 版本）──
+        # 52 个镜像平铺没法选。大类 = 发行版家族（横向档位按钮，
+        # 推荐的在前），小类 = 该发行版的版本列表。
         g2 = QGroupBox("选择系统")
         v2 = QVBoxLayout(g2)
         v2.setSpacing(8)
 
+        # 大类行
+        fam_row = QHBoxLayout()
+        fam_row.setSpacing(6)
+        self._fam_buttons: list[QPushButton] = []
+        self._fam_layout = fam_row
+        v2.addLayout(fam_row)
+
+        # 小类列表
         self.img_list = QListWidget()
         self.img_list.setAlternatingRowColors(True)
         self.img_list.currentRowChanged.connect(self._on_image_changed)
         v2.addWidget(self.img_list, 1)
-
 
         v.addWidget(g2, 1)
 
@@ -388,26 +405,109 @@ class VMWizard(QDialog):
     # ─────────────────────────────────────────
     # 步骤 2：镜像
     # ─────────────────────────────────────────
+    # 大类（family）→ 显示名与排序
+    FAMILIES = [
+        ("alpine", "Alpine"),
+        ("debian", "Debian 系"),
+        ("rocky", "RHEL 系"),
+        ("fedora", "Fedora 系"),
+        ("arch", "Arch 系"),
+        ("suse", "SUSE"),
+        ("其它", "其它"),
+    ]
+
+    def _refresh_catalog_async(self) -> None:
+        """后台拉完整镜像目录（含索引网络请求）"""
+        from core.async_task import run_async
+
+        def work():
+            images.reset_discovered()
+            return list(images.list_images())
+
+        def done(specs):
+            # 只有比静态目录多才算有收获（离线时返回的也是静态）
+            if len(specs) > len(self._specs):
+                self._sig_catalog.emit(specs)
+
+        self._tasks.append(
+            run_async(work, on_done=done,
+                      on_error=lambda _m: None, parent=self)
+        )
+
+    def _on_catalog_ready(self, specs: list) -> None:
+        """动态目录就绪：刷新大类按钮与版本列表"""
+        current = self._current_spec()
+        current_key = current.key if current else None
+
+        self._specs = specs
+        for b in self._fam_buttons:
+            self._fam_layout.removeWidget(b)
+            b.deleteLater()
+        self._fam_buttons.clear()
+        self.img_list.clear()
+        self._populate_images()
+
+        # 恢复用户之前选中的镜像
+        if current_key:
+            for r in range(self.img_list.count()):
+                if (self.img_list.item(r).data(
+                        Qt.ItemDataRole.UserRole) == current_key):
+                    self.img_list.setCurrentRow(r)
+                    break
+
     def _populate_images(self) -> None:
-        if self.img_list.count():
+        """按大类分组填充：先横向大类按钮，列表只显示该类版本"""
+        if not self._specs:
             return
 
+        # family → [specs]（保持动态目录的版本排序）
+        groups: dict[str, list] = {}
         for spec in self._specs:
-            # 容器档用 rootfs tarball 缓存判断（qcow2 时代的
-            # is_downloaded 已不适用）
+            groups.setdefault(spec.family, []).append(spec)
+
+        # 大类按钮（只有实际有版本的家族才显示）
+        fam_row = self._fam_layout
+        for name, label in self.FAMILIES:
+            if name != "其它" and name not in groups:
+                continue
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("familyKey", name)
+            btn.clicked.connect(
+                lambda _c, k=name: self._select_family(k)
+            )
+            fam_row.addWidget(btn)
+            self._fam_buttons.append(btn)
+        fam_row.addStretch()
+
+        # 默认选 Alpine（最轻最快）
+        self._select_family("alpine")
+
+    def _select_family(self, family: str) -> None:
+        """切换大类：刷新版本列表 + 按钮选中态"""
+        for b in self._fam_buttons:
+            b.setChecked(b.property("familyKey") == family)
+
+        self.img_list.blockSignals(True)
+        self.img_list.clear()
+
+        known = {f for f, _ in self.FAMILIES[:-1]}
+        if family == "其它":
+            items = [sp for sp in self._specs if sp.family not in known]
+        else:
+            items = [sp for sp in self._specs if sp.family == family]
+        for spec in items:
             downloaded = images.rootfs_downloaded(spec)
             mark = "已下载" if downloaded else "未下载"
             it = QListWidgetItem(f"{spec.name}    [{mark}]")
             it.setData(Qt.ItemDataRole.UserRole, spec.key)
             self.img_list.addItem(it)
+        self.img_list.blockSignals(False)
 
-        # 默认选 Alpine（内存友好）
-        for i, spec in enumerate(self._specs):
-            if spec.family == "alpine":
-                self.img_list.setCurrentRow(i)
-                break
-        else:
+        if self.img_list.count():
             self.img_list.setCurrentRow(0)
+        self._on_image_changed(0 if items else -1)
 
     def _current_spec(self):
         row = self.img_list.currentRow()

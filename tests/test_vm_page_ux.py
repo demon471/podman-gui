@@ -90,20 +90,22 @@ class TestStoppedVMNoDetail:
         assert started == [name], "双击未启动的机器应触发启动"
         assert not any("未启动" in m for m in msgs), "不该再弹「未启动」提示"
 
-        # 已启动：什么都不做（用运行中的真机器，不 patch 属性）
+        # 已启动：什么都不做。
+        # 不依赖环境里真有运行中的机器（全量测试时机器状态不定，
+        # 曾导致偶发失败）：page 实例上替换 running 判断入口
+        # _is_available —— 实例属性遮蔽类方法，测试结束自动还原。
         started.clear()
-        running_vm = next(
-            (v for v in page._vms if v.running), None
+        vm = page._vms[0]
+        monkeypatch.setattr(
+            page, "_is_available", lambda v: v.spec.name == vm.spec.name
         )
-        if running_vm is None:
-            pytest.skip("没有运行中的机器")
         idx = next(
             r for r in range(page.model.rowCount())
-            if page.model.item(r, 0).text() == running_vm.spec.name
+            if page.model.item(r, 0).text() == vm.spec.name
         )
         page.table.selectRow(idx)
         page._on_row_activated(page.table.currentIndex())
-        assert page._selected_vm().spec.name == running_vm.spec.name
+        assert started == [], "已启动的双击不应再次启动"
 
     def test_hover_does_not_start_card_timer(self, stopped_vm_page, qapp):
         """悬停未启动的 VM：不启动卡片定时器"""

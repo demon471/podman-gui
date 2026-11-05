@@ -615,16 +615,23 @@ class TestSystemFixups:
         assert "PKEXEC_UID" in script
 
     def test_list_images_includes_rootfs(self):
-        """rootfs 条目没有静态 url，不能被 list_images 过滤掉
+        """向导镜像列表：动态发现 + 老关键名兼容
 
-        否则向导里没有可下载的镜像（用户实测踩坑）。
+        rootfs 条目没有静态 url，不能被过滤；索引可达时应
+        列出全部发行版（用户反馈"只有三个 linux 太少"）。
         """
         from core.vm import images
 
         keys = [sp.key for sp in images.list_images()]
+        # 新格式 key
         assert "alpine-3.22-lxc" in keys
-        assert "rocky-10-lxc" in keys
-        assert "debian-13-lxc" in keys
+        assert "rockylinux-10-lxc" in keys
+        assert len(keys) >= 20, f"动态发现失效？只有 {len(keys)} 个"
+        # 老机器的 image_key 仍要能解析
+        assert images.get_spec("rocky-10-lxc") is not None
+        assert images.get_spec("debian-13-lxc") is not None
+        # 无重复
+        assert len(keys) == len(set(keys))
 
 
 class TestShareMountPoint:
@@ -693,7 +700,8 @@ class TestFilePanelDefaults:
         start = src.index("def _on_row_activated")
         body = src[start:start + 700]
         assert "_start_selected()" in body
-        assert "if vm.running" in body
+        # 判断走统一的 _is_available 口径（与其它动作一致）
+        assert "self._is_available(vm) or self._busy" in body
 
 
 class TestSudoProvisioned:

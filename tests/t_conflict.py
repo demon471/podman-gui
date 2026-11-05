@@ -1,5 +1,5 @@
 import sys, os, faulthandler, traceback
-sys.path.insert(0, '/home/john/项目/podman-gui')
+sys.path.insert(0, '/home/john/项目/podbox')
 os.environ['QT_QPA_PLATFORMTHEME'] = 'kde'
 os.environ.setdefault('DISPLAY', ':0')
 faulthandler.enable()

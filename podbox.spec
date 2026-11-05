@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置
 
-生成单文件可执行：dist/podman-gui
+生成单文件可执行：dist/podbox
 """
 
 import sys
@@ -12,7 +12,7 @@ PROJECT = Path(SPECPATH).resolve()
 # ── 数据文件 ──
 datas = [
     # 桌面文件随包分发（可选，安装时用）
-    (str(PROJECT / "resources" / "podman-gui.desktop"), "resources"),
+    (str(PROJECT / "resources" / "podbox.desktop"), "resources"),
     # 应用图标（多尺寸 PNG，运行时用于窗口/任务栏图标）
     (str(PROJECT / "resources" / "appicon"), "resources/appicon"),
 ]
@@ -133,7 +133,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="podman-gui",
+    name="podbox",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

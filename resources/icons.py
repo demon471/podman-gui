@@ -471,7 +471,7 @@ def app_icon() -> QIcon:
     ic = QIcon()
     base = Path(__file__).resolve().parent / "appicon"
     for s in (16, 22, 24, 32, 36, 42, 48, 64, 128, 256):
-        f = base / f"podman-gui-{s}.png"
+        f = base / f"podbox-{s}.png"
         if f.exists():
             ic.addFile(str(f), QSize(s, s))
     return ic

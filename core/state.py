@@ -1,7 +1,7 @@
 """应用状态存储（SQLite）
 
 把原先散落在多处的小状态统一到 SQLite：
-  · QSettings（~/.config/podman-gui/podman-gui.conf）里的内存限额、
+  · QSettings（~/.config/podbox/podbox.conf）里的内存限额、
     Compose 根目录
   · 每台 VM 一个 vm.json
   · 其它零散的键值
@@ -43,7 +43,46 @@ from pathlib import Path
 from typing import Any
 
 # 数据库位置（与其它应用数据同目录）
-DB_PATH = Path.home() / ".local" / "share" / "podman-gui" / "state.db"
+# ── PodBox 改名：旧数据目录一次性迁移 ──
+# 应用改名前的数据在 ~/.local/share/podman-gui，
+# 升级用户的数据必须跟过来（数据库 + 全部机器）。
+# 幂等：新目录已存在就不动；旧目录不存在就跳过。
+def _migrate_legacy_dir() -> None:
+    import shutil as _sh
+
+    old_root = Path.home() / ".local" / "share" / "podman-gui"
+    new_root = Path.home() / ".local" / "share" / "podbox"
+    if not old_root.exists() or new_root.exists():
+        return
+    try:
+        new_root.parent.mkdir(parents=True, exist_ok=True)
+        _sh.move(str(old_root), str(new_root))
+        print(f"[podbox] 已迁移旧数据目录: {old_root} → {new_root}")
+    except OSError as e:
+        print(f"[podbox] 旧数据目录迁移失败（不影响使用）: {e}")
+        return
+
+    # 迁移后修补机器的 lxc config：rootfs 路径是绝对路径，
+    # 不改的话容器启动直接报
+    # "Failed to open .../podman-gui/.../rootfs"（实测全部机器
+    # 起不来）。把新目录下所有 config 里的旧路径换成新目录。
+    try:
+        machines = new_root / "vm" / "machines"
+        if machines.is_dir():
+            for conf in machines.glob("*/config"):
+                text = conf.read_text(encoding="utf-8")
+                if "podman-gui" in text:
+                    conf.write_text(
+                        text.replace("podman-gui", "podbox"),
+                        encoding="utf-8",
+                    )
+    except OSError as e:
+        print(f"[podbox] lxc config 路径修补失败: {e}")
+
+
+_migrate_legacy_dir()
+
+DB_PATH = Path.home() / ".local" / "share" / "podbox" / "state.db"
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -345,8 +384,8 @@ def migrate_from_legacy() -> tuple[int, int]:
     返回 (迁移的设置数, 迁移的 VM 数)
 
     迁移内容：
-      · ~/.config/podman-gui/podman-gui.conf 的 [limits] memory_gb
-      · ~/.local/share/podman-gui/vm/machines/*/vm.json
+      · ~/.config/podbox/podbox.conf 的 [limits] memory_gb
+      · ~/.local/share/podbox/vm/machines/*/vm.json
 
     原文件改名为 .bak 保留，不删。
     """
@@ -356,7 +395,7 @@ def migrate_from_legacy() -> tuple[int, int]:
     # 1. QSettings（INI 格式，PyQt 写入的）
     #    也接受 .bak：上次迁移已把原文件改名，但值可能没写进数据库
     #    （例如数据库被重建），此时从备份恢复。
-    conf = Path.home() / ".config" / "podman-gui" / "podman-gui.conf"
+    conf = Path.home() / ".config" / "podbox" / "podbox.conf"
     if not conf.exists():
         bak = conf.with_suffix(".conf.bak")
         if bak.exists():
@@ -391,7 +430,7 @@ def migrate_from_legacy() -> tuple[int, int]:
             print(f"[state] 迁移 QSettings 失败: {e}")
 
     # 2. vm.json
-    machines = (Path.home() / ".local" / "share" / "podman-gui"
+    machines = (Path.home() / ".local" / "share" / "podbox"
                 / "vm" / "machines")
     if machines.is_dir():
         for d in sorted(machines.iterdir()):

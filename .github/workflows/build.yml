@@ -85,16 +85,16 @@ jobs:
         run: python -m py_compile main.py core/*.py ui/*.py resources/*.py
 
       - name: 打包
-        run: pyinstaller --clean --noconfirm podman-gui.spec
+        run: pyinstaller --clean --noconfirm podbox.spec
 
       - name: 验证产物内容
         run: |
-          ls -lh dist/podman-gui
-          file dist/podman-gui
+          ls -lh dist/podbox
+          file dist/podbox
           python - <<'PY'
           import subprocess, sys
 
-          BIN = "dist/podman-gui"
+          BIN = "dist/podbox"
 
           # 顶层条目（二进制库、数据文件）
           top = subprocess.run(
@@ -110,8 +110,8 @@ jobs:
           ).stdout
 
           checks = [
-              ("应用图标 256px", "resources/appicon/podman-gui-256.png", top),
-              ("桌面文件",       "resources/podman-gui.desktop",        top),
+              ("应用图标 256px", "resources/appicon/podbox-256.png", top),
+              ("桌面文件",       "resources/podbox.desktop",        top),
               ("Qt6 二进制库",   "PyQt6/Qt6/lib/libQt6Core",            top),
               ("PyYAML",         "'yaml'",                              pyz),
               ("pyte 终端",      "'pyte'",                              pyz),
@@ -137,7 +137,7 @@ jobs:
       - name: 冒烟测试
         run: |
           set +e
-          timeout 8 ./dist/podman-gui > /tmp/smoke.log 2>&1
+          timeout 8 ./dist/podbox > /tmp/smoke.log 2>&1
           RC=$?
           echo "退出码: $RC（124 = 超时正常，0 = 正常退出）"
           echo "--- 输出 ---"
@@ -155,19 +155,19 @@ jobs:
           else
             VERSION="dev-${GITHUB_SHA::7}"
           fi
-          NAME="podman-gui-v${VERSION}-linux-x86_64"
+          NAME="podbox-v${VERSION}-linux-x86_64"
 
           mkdir -p release
-          cp dist/podman-gui "release/${NAME}"
+          cp dist/podbox "release/${NAME}"
           chmod +x "release/${NAME}"
 
           # 安装脚本 + 桌面文件 + 图标，打成一个可解压即安装的包
           STAGE=$(mktemp -d)
-          cp dist/podman-gui "$STAGE/${NAME}"
+          cp dist/podbox "$STAGE/${NAME}"
           chmod +x "$STAGE/${NAME}"
           cp install.sh "$STAGE/"
           chmod +x "$STAGE/install.sh"
-          cp resources/podman-gui.desktop "$STAGE/"
+          cp resources/podbox.desktop "$STAGE/"
           cp -r resources/appicon "$STAGE/"
           tar -czf "release/${NAME}.tar.gz" -C "$STAGE" .
           rm -rf "$STAGE"
@@ -185,7 +185,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: podman-gui-${{ steps.pkg.outputs.version }}
+          name: podbox-${{ steps.pkg.outputs.version }}
           path: release/*
           retention-days: 14
           if-no-files-found: error
@@ -208,17 +208,17 @@ jobs:
             下载 `.tar.gz` 压缩包，解压后运行 `install.sh`：
 
             ```bash
-            tar -xzf ${{ steps.pkg.outputs.name }}.tar.gz -C podman-gui-install
-            cd podman-gui-install
+            tar -xzf ${{ steps.pkg.outputs.name }}.tar.gz -C podbox-install
+            cd podbox-install
             ./install.sh
             ```
 
             脚本会完成三件事：
-            - 复制可执行文件到 `~/.local/bin/podman-gui`
+            - 复制可执行文件到 `~/.local/bin/podbox`
             - 安装桌面入口到应用菜单
             - 安装图标到当前 KDE 主题目录（自动检测主题）
 
-            之后在应用菜单搜索「Podman」或终端执行 `podman-gui` 即可。
+            之后在应用菜单搜索「Podman」或终端执行 `podbox` 即可。
 
             **卸载**：`./install.sh --uninstall`
             **系统级安装**：`./install.sh --system`（需 sudo，装到 `/usr/local`）

@@ -40,28 +40,28 @@ fi
 
 # ── 2. 打包 ──
 echo "▶ 打包（PyInstaller，约 35 秒）…"
-if ! "$PY" -m PyInstaller --noconfirm --clean podman-gui.spec > /tmp/podman-gui-build.log 2>&1; then
+if ! "$PY" -m PyInstaller --noconfirm --clean podbox.spec > /tmp/podbox-build.log 2>&1; then
     echo "✗ 打包失败，日志尾部：" >&2
-    tail -30 /tmp/podman-gui-build.log >&2
+    tail -30 /tmp/podbox-build.log >&2
     exit 1
 fi
-echo "  ✓ 打包完成：$(du -h dist/podman-gui | cut -f1)"
+echo "  ✓ 打包完成：$(du -h dist/podbox | cut -f1)"
 
 # ── 3. 安装 ──
-echo "▶ 安装到 ~/.local/bin/podman-gui"
-install -Dm755 dist/podman-gui "$HOME/.local/bin/podman-gui"
+echo "▶ 安装到 ~/.local/bin/podbox"
+install -Dm755 dist/podbox "$HOME/.local/bin/podbox"
 echo "  ✓ 安装完成"
 
 # ── 4. 冒烟测试：打包版能否启动 ──
 echo "▶ 冒烟测试（打包版冷启动 15 秒）"
 
-pkill -x podman-gui 2>/dev/null || true
+pkill -x podbox 2>/dev/null || true
 sleep 1
 
 # 不用 coredumpctl 计数判断：coredump 会被轮转/清理，
 # 行数变少就会误报失败。直接看进程是否存活 + 日志有无崩溃痕迹。
 QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME="" \
-    timeout 20 "$HOME/.local/bin/podman-gui" > /tmp/podman-gui-smoke.log 2>&1 &
+    timeout 20 "$HOME/.local/bin/podbox" > /tmp/podbox-smoke.log 2>&1 &
 SMOKE_PID=$!
 sleep 15
 
@@ -72,7 +72,7 @@ fi
 
 CRASH=0
 if grep -qE "Fatal Python error|Traceback \(most recent|Aborted|core dumped" \
-        /tmp/podman-gui-smoke.log 2>/dev/null; then
+        /tmp/podbox-smoke.log 2>/dev/null; then
     CRASH=1
 fi
 
@@ -84,7 +84,7 @@ else
     echo "  ✗ 冒烟测试失败" >&2
     echo "    存活=$ALIVE  崩溃迹象=$CRASH" >&2
     echo "    日志：" >&2
-    head -30 /tmp/podman-gui-smoke.log >&2
+    head -30 /tmp/podbox-smoke.log >&2
     exit 1
 fi
 

@@ -31,7 +31,7 @@ DHCP_START = "10.99.10.1"
 DHCP_END = "10.99.250.254"
 
 LEASES = Path("/var/lib/misc/dnsmasq-pgbr0.leases")
-UNIT_NAME = "podman-gui-net.service"
+UNIT_NAME = "podbox-net.service"
 UNIT_PATH = Path("/etc/systemd/system") / UNIT_NAME
 # 初始化时给发起用户分配的 veth 配额（/etc/lxc/lxc-usernet）
 USERNET_QUOTA = 10
@@ -120,7 +120,7 @@ fi
 #    都幂等：已存在时报错被忽略，不存在时创建。
 cat > {UNIT_PATH} <<'UNIT'
 [Unit]
-Description=Podman GUI VM bridge DHCP
+Description=PodBox VM bridge DHCP
 After=network.target
 
 [Service]

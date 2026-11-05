@@ -304,6 +304,18 @@ def seed_rootfs(
             (username, f"home/{username}", uid),
         ):
             home_dir = rootfs / home
+
+            # 有些发行版（Rocky/Fedora 系）的 tarball 把 /root 设为
+            # 0700 —— tarball 里属主是 root(0)，idmap 后就是宿主
+            # 用户自己，但 mode 位原样保留 0700。宿主侧写入前先把
+            # 权限放开（idmap 下「属主是自己」，chmod 合法）。
+            # 不放开的话 mkdir(.ssh) 直接 EACCES —— 用户实测 Rocky。
+            if home_dir.exists():
+                try:
+                    home_dir.chmod(0o755)
+                except OSError:
+                    pass
+
             home_dir.mkdir(parents=True, exist_ok=True)
 
             ssh_dir = home_dir / ".ssh"
@@ -331,6 +343,13 @@ def seed_rootfs(
         home = rootfs / "home" / username
         home.mkdir(parents=True, exist_ok=True)
         _chown_tree(home, uid)
+
+        # 5. /root 还原严格权限（上面为写入放开过）
+        try:
+            (rootfs / "root" / ".ssh").chmod(0o700)
+            (rootfs / "root").chmod(0o700)
+        except OSError:
+            pass
 
         return True, ""
     except OSError as e:

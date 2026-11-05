@@ -199,7 +199,7 @@ class SftpSession:
 
         # 与登录用户比对（SFTP 侧拿到的是数字 uid）
         # 简单可靠的做法：直接尝试在 home 下建临时目录
-        probe = home.rstrip("/") + "/.podman-gui-write-probe"
+        probe = home.rstrip("/") + "/.podbox-write-probe"
         try:
             self._sftp.mkdir(probe)
             try:
@@ -308,7 +308,7 @@ class SftpSession:
             # 先传到用户可写的中转位置，再 sudo mv 过去
             import tempfile
 
-            tmp = f"/tmp/.podman-gui-up-{Path(remote).name}"
+            tmp = f"/tmp/.podbox-up-{Path(remote).name}"
             self._sftp.put(local, tmp)
             self._sudo_run(f"mv -f {_shq(tmp)} {_shq(remote)}")
 

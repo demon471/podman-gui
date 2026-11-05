@@ -55,7 +55,7 @@ def _window_icon() -> QIcon:
 
     from core.config import RESOURCES
 
-    png = RESOURCES / "appicon" / "podman-gui-256.png"
+    png = RESOURCES / "appicon" / "podbox-256.png"
     if png.exists():
         return QIcon(str(png))
     return icon("seal", 256)
@@ -635,7 +635,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             self.tray.show_message(
-                "Podman 管理器仍在运行",
+                "PodBox 管理器仍在运行",
                 "已最小化到系统托盘。点击托盘图标可恢复窗口。",
                 3000,
             )

@@ -25,8 +25,8 @@
   新增 VM 不需要任何宿主机改动。
 
 宿主机需要的一次性配置（本模块负责写入）：
-  1. /etc/dnsmasq.d/podman-gui-vm.conf   一条 address= 通配规则
-  2. /etc/systemd/resolved.conf.d/99-podman-gui-vm.conf
+  1. /etc/dnsmasq.d/podbox-vm.conf   一条 address= 通配规则
+  2. /etc/systemd/resolved.conf.d/99-podbox-vm.conf
      一条 Domains=~vm.local 路由域
   3. dnsmasq 设为开机自启（否则重启后失效）
 
@@ -68,15 +68,15 @@ DNSMASQ_PORT = 5354
 DNSMASQ_ADDR = "127.0.0.1"
 
 # 配置文件路径
-DNSMASQ_CONF = Path("/etc/dnsmasq.d/podman-gui-vm.conf")
-RESOLVED_CONF = Path("/etc/systemd/resolved.conf.d/99-podman-gui-vm.conf")
+DNSMASQ_CONF = Path("/etc/dnsmasq.d/podbox-vm.conf")
+RESOLVED_CONF = Path("/etc/systemd/resolved.conf.d/99-podbox-vm.conf")
 
 # 标记，用于识别本程序写入的配置
-DNSMASQ_MARKER = "podman-gui-vm"
-RESOLVED_MARKER = "podman-gui-vm"
+DNSMASQ_MARKER = "podbox-vm"
+RESOLVED_MARKER = "podbox-vm"
 
 DNSMASQ_CONF_TEMPLATE = """\
-# 由 podman-gui 生成：虚拟机域名解析
+# 由 podbox 生成：虚拟机域名解析
 #  · 有具体地址的虚拟机会写成独立的 A 记录（共享网桥模式下是
 #    guest 自己的 IP，宿主机可以直接访问）
 #  · 其余 *.{suffix} 仍然通配到 127.0.0.1，配合端口转发访问
@@ -90,7 +90,7 @@ address=/{suffix}/127.0.0.1
 """
 
 RESOLVED_CONF_TEMPLATE = """\
-# 由 podman-gui 生成：把 *.{suffix} 交给本地 dnsmasq 解析
+# 由 podbox 生成：把 *.{suffix} 交给本地 dnsmasq 解析
 # ~ 前缀表示「路由域」：只做后缀匹配转发，不会追加为搜索域，
 # 因此不影响其它域名的正常解析。
 [Resolve]
@@ -214,7 +214,7 @@ def _sudo_write(path: Path, content: str) -> tuple[bool, str]:
 
     tmp = None
     try:
-        fd, tmp = tempfile.mkstemp(prefix="podman-gui-", suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(prefix="podbox-", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -456,7 +456,7 @@ def _restart_dnsmasq() -> tuple[bool, str]:
     """
     unit = f"""\
 [Unit]
-Description=dnsmasq for podman-gui VM domains (*{DOMAIN_SUFFIX})
+Description=dnsmasq for podbox VM domains (*{DOMAIN_SUFFIX})
 After=network.target systemd-resolved.service
 Wants=systemd-resolved.service
 
@@ -469,14 +469,14 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 """
-    unit_path = Path("/etc/systemd/system/podman-gui-dnsmasq.service")
+    unit_path = Path("/etc/systemd/system/podbox-dnsmasq.service")
     ok, err = _sudo_write(unit_path, unit)
     if not ok:
         return False, f"写入 systemd unit 失败: {err}"
 
     steps = [
         ["systemctl", "daemon-reload"],
-        ["systemctl", "enable", "--now", "podman-gui-dnsmasq.service"],
+        ["systemctl", "enable", "--now", "podbox-dnsmasq.service"],
         ["systemctl", "restart", "systemd-resolved"],
     ]
     for cmd in steps:
@@ -536,7 +536,7 @@ def configure() -> tuple[bool, str]:
 
     return False, (
         "配置已写入但解析未生效。请检查：\n"
-        f"  systemctl status podman-gui-dnsmasq\n"
+        f"  systemctl status podbox-dnsmasq\n"
         f"  resolvectl status\n"
         f"  dig @127.0.0.1 -p {DNSMASQ_PORT} test.{DOMAIN_SUFFIX}"
     )
@@ -548,13 +548,13 @@ def unconfigure() -> tuple[bool, str]:
 
     ok, err = _run(
         ["/usr/bin/sudo", "-n", "systemctl", "disable", "--now",
-         "podman-gui-dnsmasq.service"],
+         "podbox-dnsmasq.service"],
         timeout=30,
     )
     if ok is False:
         errors.append(f"停止服务失败: {err.strip()[:150]}")
 
-    ok, err = _sudo_rm(Path("/etc/systemd/system/podman-gui-dnsmasq.service"))
+    ok, err = _sudo_rm(Path("/etc/systemd/system/podbox-dnsmasq.service"))
     if not ok:
         errors.append(f"删除 unit 失败: {err}")
 
@@ -580,7 +580,7 @@ def unconfigure() -> tuple[bool, str]:
 # ─────────────────────────────────────────
 def manual_commands() -> str:
     """返回用户可手动执行的配置命令（含 sudo 密码输入）"""
-    unit_path = "/etc/systemd/system/podman-gui-dnsmasq.service"
+    unit_path = "/etc/systemd/system/podbox-dnsmasq.service"
     return f"""\
 # 1. 安装 dnsmasq（若已安装可跳过）
 #    sudo pacman -S dnsmasq
@@ -599,7 +599,7 @@ EOF
 # 4. 用独立 unit 启动 dnsmasq（避免与发行版 service 抢 53 端口）
 sudo tee {unit_path} >/dev/null <<'EOF'
 [Unit]
-Description=dnsmasq for podman-gui VM domains (*{DOMAIN_SUFFIX})
+Description=dnsmasq for podbox VM domains (*{DOMAIN_SUFFIX})
 After=systemd-resolved.service
 
 [Service]
@@ -613,7 +613,7 @@ EOF
 
 # 5. 生效
 sudo systemctl daemon-reload
-sudo systemctl enable --now podman-gui-dnsmasq.service
+sudo systemctl enable --now podbox-dnsmasq.service
 sudo systemctl restart systemd-resolved
 
 # 6. 验证
@@ -625,8 +625,8 @@ ping -c1 anything.{DOMAIN_SUFFIX}
 def uninstall_commands() -> str:
     """返回撤销配置的命令"""
     return f"""\
-sudo systemctl disable --now podman-gui-dnsmasq.service
-sudo rm -f /etc/systemd/system/podman-gui-dnsmasq.service
+sudo systemctl disable --now podbox-dnsmasq.service
+sudo rm -f /etc/systemd/system/podbox-dnsmasq.service
 sudo rm -f {DNSMASQ_CONF}
 sudo rm -f {RESOLVED_CONF}
 sudo systemctl daemon-reload

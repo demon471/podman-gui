@@ -8,7 +8,7 @@ KDE Plasma 原生的 Podman 图形管理工具，基于 PyQt6 + Podman REST API 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 <p align="center">
-  <img src="resources/appicon/podman-gui-256.png" width="128" alt="Podman 管理器">
+  <img src="resources/appicon/podbox-256.png" width="128" alt="Podman 管理器">
 </p>
 
 ## 为什么选它
@@ -96,18 +96,18 @@ curl --unix-socket /run/user/$(id -u)/podman/podman.sock \
 ### 方式一：源码运行
 
 ```bash
-git clone <repo-url> podman-gui
-cd podman-gui
-./podman-gui
+git clone <repo-url> podbox
+cd podbox
+./podbox
 ```
 
 ### 方式二：单文件可执行
 
-从 [Releases](https://github.com/<user>/podman-gui/releases) 下载 `podman-gui-v*-linux-x86_64`，然后：
+从 [Releases](https://github.com/<user>/podbox/releases) 下载 `podbox-v*-linux-x86_64`，然后：
 
 ```bash
-chmod +x podman-gui-v1.0.0-linux-x86_64
-./podman-gui-v1.0.0-linux-x86_64
+chmod +x podbox-v1.0.0-linux-x86_64
+./podbox-v1.0.0-linux-x86_64
 ```
 
 单文件约 113 MB，内含 Python 运行时、Qt 库和全部依赖。
@@ -115,15 +115,15 @@ chmod +x podman-gui-v1.0.0-linux-x86_64
 ### 方式三：安装到系统
 
 ```bash
-cd podman-gui
+cd podbox
 
 # 启动脚本
 mkdir -p ~/.local/bin
-ln -sf "$PWD/podman-gui" ~/.local/bin/podman-gui
+ln -sf "$PWD/podbox" ~/.local/bin/podbox
 
 # 桌面入口
 mkdir -p ~/.local/share/applications
-cp resources/podman-gui.desktop ~/.local/share/applications/
+cp resources/podbox.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications
 
 # 图标（注意：要装到当前图标主题目录，KDE 不会去 hicolor 找应用图标）
@@ -136,7 +136,7 @@ for dir in hicolor "$THEME" "${THEME}-dark"; do
             dest="$HOME/.local/share/icons/$dir/apps/$size"
         fi
         mkdir -p "$dest"
-        cp "resources/appicon/podman-gui-${size}.png" "$dest/podman-gui.png"
+        cp "resources/appicon/podbox-${size}.png" "$dest/podbox.png"
     done
 done
 
@@ -149,10 +149,10 @@ kbuildsycoca6 --noincremental
 ## 项目结构
 
 ```
-podman-gui/
+podbox/
 ├── main.py                     # 入口
-├── podman-gui                  # 启动脚本
-├── podman-gui.spec             # PyInstaller 打包配置
+├── podbox                  # 启动脚本
+├── podbox.spec             # PyInstaller 打包配置
 ├── core/                       # 后端逻辑（与 UI 无关）
 │   ├── config.py               # 常量、socket 候选路径
 │   ├── podman_client.py        # REST API 封装（Unix socket HTTP）
@@ -184,7 +184,7 @@ podman-gui/
 └── resources/
     ├── icons.py                # 内置 SVG 图标（含状态图标、光学尺寸统一）
     ├── appicon/                # 应用图标（多尺寸 PNG + 源 SVG）
-    └── podman-gui.desktop      # 桌面入口
+    └── podbox.desktop      # 桌面入口
 ```
 
 **代码规模**：约 11,000 行 Python
@@ -316,10 +316,10 @@ source .build-venv/bin/activate
 pip install pyinstaller
 
 # 打包
-pyinstaller --clean --noconfirm podman-gui.spec
+pyinstaller --clean --noconfirm podbox.spec
 
 # 产物
-ls -lh dist/podman-gui
+ls -lh dist/podbox
 ```
 
 **注意**：`excludes` 里不能排除 `email`、`html`、`unittest` 等标准库，因为 `http.client` 依赖它们。

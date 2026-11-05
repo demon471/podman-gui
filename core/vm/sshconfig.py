@@ -9,15 +9,15 @@
 ────
 自动维护 ~/.ssh/config，为每台 VM 写入一段配置：
 
-    # === podman-gui managed: begin ===
+    # === podbox managed: begin ===
     Host test.vm.local
         HostName 127.0.0.1
         Port 2222
         User john
-        IdentityFile ~/.local/share/podman-gui/vm/machines/test/ssh_key
+        IdentityFile ~/.local/share/podbox/vm/machines/test/ssh_key
         StrictHostKeyChecking no
         UserKnownHostsFile /dev/null
-    # === podman-gui managed: end ===
+    # === podbox managed: end ===
 
 用标记注释包裹，同步时只替换这一段，不动用户自己的配置。
 
@@ -40,7 +40,7 @@ from pathlib import Path
 SSH_DIR = Path.home() / ".ssh"
 SSH_CONFIG = SSH_DIR / "config"
 
-MARKER = "podman-gui managed"
+MARKER = "podbox managed"
 BEGIN = f"# === {MARKER}: begin ==="
 END = f"# === {MARKER}: end ==="
 

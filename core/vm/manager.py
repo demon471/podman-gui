@@ -30,7 +30,7 @@ from core.vm import (
 from core.vm.spec import DEFAULT_PASSWORD, PortForward, VMSpec
 
 # 数据根目录（默认位置；用户可在「设置 → 存储」里改）
-DEFAULT_VM_ROOT = Path.home() / ".local" / "share" / "podman-gui" / "vm"
+DEFAULT_VM_ROOT = Path.home() / ".local" / "share" / "podbox" / "vm"
 KEY_VM_ROOT = "vm.root_dir"
 
 
@@ -424,7 +424,7 @@ def create_vm(
             spec_img, arch, on_progress=on_progress, on_log=on_log
         )
         if not ok:
-            shutil.rmtree(vm_dir, ignore_errors=True)
+            _cleanup_partial(vm_dir)
             return None, f"rootfs 下载失败: {err}"
 
     log("解包 rootfs…")
@@ -432,7 +432,7 @@ def create_vm(
         spec_img, arch, vm_dir / container.ROOTFS_DIR_NAME
     )
     if not ok:
-        shutil.rmtree(vm_dir, ignore_errors=True)
+        _cleanup_partial(vm_dir)
         return None, f"rootfs 解包失败: {err}"
 
     # ── 2. SSH 密钥 ──
@@ -440,7 +440,7 @@ def create_vm(
     key_path = vm_dir / "ssh_key"
     ok, err = _generate_ssh_key(key_path)
     if not ok:
-        shutil.rmtree(vm_dir, ignore_errors=True)
+        _cleanup_partial(vm_dir)
         return None, f"密钥生成失败: {err}"
 
     pubkey = key_path.with_suffix(".pub").read_text(encoding="utf-8")
@@ -452,7 +452,7 @@ def create_vm(
     try:
         pwhash = _password_hash(DEFAULT_PASSWORD)
     except RuntimeError as e:
-        shutil.rmtree(vm_dir, ignore_errors=True)
+        _cleanup_partial(vm_dir)
         return None, f"密码哈希生成失败: {e}"
 
     ok, err = container.seed_rootfs(
@@ -463,7 +463,7 @@ def create_vm(
         password_hash=pwhash,
     )
     if not ok:
-        shutil.rmtree(vm_dir, ignore_errors=True)
+        _cleanup_partial(vm_dir)
         return None, f"系统配置失败: {err}"
 
     # ── 4. lxc 配置 ──
@@ -481,7 +481,7 @@ def create_vm(
     try:
         container.write_conf(vm_dir, spec)
     except RuntimeError as e:
-        shutil.rmtree(vm_dir, ignore_errors=True)
+        _cleanup_partial(vm_dir)
         return None, str(e)
     vm.save()
 
@@ -490,6 +490,19 @@ def create_vm(
 
     log(f"创建完成：{name}")
     return vm, ""
+
+
+def _cleanup_partial(vm_dir: Path) -> None:
+    """创建中途失败后的目录清理
+
+    rootfs 里已有 userns 属主（uid 1000）文件时，普通 rmtree
+    会 EACCES —— ignore_errors=True 会把失败静默吞掉，留下
+    残缺空壳：用户再创建/启动这台「机器」会遇到莫名其妙的
+    半成品状态（曾表现为「挂载配置不生效」）。
+    """
+    shutil.rmtree(vm_dir, ignore_errors=True)
+    if vm_dir.exists():
+        container.rm_in_userns(vm_dir)
 
 
 def cleanup_orphan_dirs() -> int:

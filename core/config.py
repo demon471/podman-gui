@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-APP_NAME = "Podman 管理器"
-APP_ID = "podman-gui"
+APP_NAME = "PodBox 管理器"
+APP_ID = "podbox"
 APP_VERSION = "1.0.0"
 
 import sys
