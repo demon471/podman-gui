@@ -1,6 +1,6 @@
 """虚拟机依赖检测与安装引导
 
-检测 QEMU 相关工具是否可用，缺失时给出对应发行版的安装命令。
+检测系统级依赖是否可用，缺失时给出对应发行版的安装命令。
 """
 
 from __future__ import annotations
@@ -271,27 +271,6 @@ def ready_for_vm(results: list[CheckResult] | None = None) -> bool:
     if results is None:
         results = check_all()
     return all(r.ok for r in results if r.dep.required)
-
-
-def qemu_version() -> str:
-    """获取 QEMU 版本（用于显示）"""
-    path = shutil.which("qemu-system-x86_64")
-    if not path:
-        return ""
-    try:
-        r = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=5
-        )
-        line = (r.stdout or "").strip().splitlines()
-        if line:
-            # "QEMU emulator version 11.1.2" → "11.1.2"
-            parts = line[0].split()
-            for i, p in enumerate(parts):
-                if p == "version" and i + 1 < len(parts):
-                    return parts[i + 1]
-        return line[0] if line else ""
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
 
 
 def host_arch() -> str:

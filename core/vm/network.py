@@ -1,16 +1,12 @@
-"""VM 网络：端口转发管理 + 访问地址生成
+"""机器网络工具（域名、端口、访问地址）
 
-域名方案见 core/vm/dns.py：
-  宿主机一次性配置 dnsmasq 通配规则后，所有 *.<vm-name>.vm.local
-  都解析到 127.0.0.1，VM 增删不需要再改宿主机。
+容器直挂共享网桥（core/vm/bridge.py），网络概念只有一层：
+  · 每台机器固定 MAC → DHCP 稳定 IP（10.99.x.x）
+  · 宿主机直连机器 IP，机器之间互通
+  · `*.vm.local` 域名解析（dnsmasq 通配 → 127.0.0.1，
+    ~/.ssh/config 另写实际 IP）
 
-本模块负责：
-  - 端口占用检测
-  - 生成访问地址（localhost / 域名 两种形式）
-  - 按场景推荐端口转发
-
-旧的 /etc/hosts 方案已废弃，保留 sync_hosts / read_managed_hosts
-仅为兼容历史数据，新代码请用 dns.vm_domain()。
+没有 QEMU SLIRP、没有端口转发（hostfwd）——那些随 VM 档删除。
 """
 
 from __future__ import annotations
@@ -174,89 +170,66 @@ def scan_ports(start: int = 8000, count: int = 20) -> list[int]:
 # ─────────────────────────────────────────
 # 访问地址生成
 # ─────────────────────────────────────────
+WEB_PORTS = (80, 443, 3000, 8080, 8000, 5000, 9000)
+
+
 def access_urls(vm) -> list[tuple[str, str, str]]:
-    """生成 VM 的访问地址列表
+    """生成机器的访问地址列表
 
     返回 [(显示名, 地址, 说明)]
+
+    容器直挂网桥：SSH/IP 直连，无任何端口映射概念。
+    spec.forwards 只是历史数据（旧 VM 时代遗留），有记录的
+    端口仍按「机器内端口 = 宿主访问端口」展示 —— 反正直通。
     """
     out = []
-    domain = vm_domain(vm.name)
+    host = vm.ssh_host
+    user = vm.spec.username
 
-    # 网桥模式：guest 有自己的 IP，宿主机直接用 IP 访问即可，
-    # 端口也还是 guest 原来的端口（不再经过 hostfwd 映射）
-    try:
-        from core.vm import bridge
+    out.append((
+        "SSH",
+        f"ssh -i {vm.ssh_key} {user}@{host}",
+        "命令行连接",
+    ))
+    out.append((
+        "SSH（外部客户端）",
+        f"{vm.name}.vm.local",
+        "已写入 ~/.ssh/config",
+    ))
 
-        bridged = bridge.ready() and bool(bridge.lease_ip(vm.spec.name))
-    except Exception:
-        bridged = False
-
-    if bridged:
-        host = vm.ssh_host
-        for fwd in vm.spec.forwards:
-            if fwd.guest_port == 22:
-                out.append((
-                    "SSH",
-                    f"ssh -i {vm.ssh_key} {vm.spec.username}@{host}",
-                    "命令行连接",
-                ))
-                continue
-            if fwd.guest_port in (80, 443, 3000, 8080, 8000, 5000, 9000):
-                scheme = "https" if fwd.guest_port == 443 else "http"
-                out.append((
-                    f"Web (VM:{fwd.guest_port})",
-                    f"{scheme}://{host}:{fwd.guest_port}",
-                    "浏览器打开",
-                ))
-        return out
-
-    for fwd in vm.spec.forwards:
-        # SSH 单独处理
+    for fwd in getattr(vm.spec, "forwards", []) or []:
         if fwd.guest_port == 22:
-            out.append((
-                "SSH",
-                f"ssh -i {vm.ssh_key} -p {fwd.host_port} "
-                f"{vm.spec.username}@127.0.0.1",
-                "命令行连接",
-            ))
             continue
-
-        # Web 类端口：域名优先（更直观），localhost 兜底
-        if fwd.guest_port in (80, 443, 3000, 8080, 8000, 5000, 9000):
+        if fwd.guest_port in WEB_PORTS:
             scheme = "https" if fwd.guest_port == 443 else "http"
             out.append((
-                f"Web (VM:{fwd.guest_port})",
-                f"{scheme}://{domain}:{fwd.host_port}",
-                "域名访问",
-            ))
-            out.append((
-                f"Web (VM:{fwd.guest_port})",
-                f"{scheme}://127.0.0.1:{fwd.host_port}",
-                "localhost 访问",
+                f"Web (机器:{fwd.guest_port})",
+                f"{scheme}://{host}:{fwd.guest_port}",
+                "浏览器打开",
             ))
         else:
             out.append((
-                f"TCP (VM:{fwd.guest_port})",
-                f"127.0.0.1:{fwd.host_port}",
-                f"{fwd.protocol} 转发",
+                f"TCP (机器:{fwd.guest_port})",
+                f"{host}:{fwd.guest_port}",
+                "端口直通",
             ))
 
     return out
 
 
-def suggest_forwards(preset: str = "web") -> list:
-    """按预设推荐端口转发
+def suggest_forwards(preset: str = "web") -> list[tuple[int, int, str]]:
+    """按预设推荐要记录的端口
 
-    返回 [(host_port, guest_port, 说明)]
+    容器端口直通网桥，不存在「转发」，这里只是提示常用
+    服务端口，写进 spec.forwards 供界面展示。
     """
-    from core.vm.spec import PortForward
+    from core.vm.spec import PortForward  # noqa: F401  (兼容旧引用)
 
     presets = {
         "web": [(8080, 80, "HTTP"), (8443, 443, "HTTPS")],
         "node": [(3000, 3000, "Node.js 开发服务器")],
         "db": [(3306, 3306, "MySQL/MariaDB"), (5432, 5432, "PostgreSQL"),
                (6379, 6379, "Redis")],
-        "dev": [(8080, 80, "HTTP"), (3000, 3000, "开发服务器"),
-                (5173, 5173, "Vite"), (8000, 8000, "通用")],
+        "python": [(8000, 8000, "Django"), (5000, 5000, "Flask")],
     }
     return presets.get(preset, presets["web"])

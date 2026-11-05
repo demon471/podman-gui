@@ -96,7 +96,7 @@ def _install_signal_handlers(app, win) -> None:
     Qt 的事件循环不处理 Unix 信号，需要借助 QTimer 把
     信号回调转成主线程操作。这样 `kill <pid>`、桌面注销、
     systemd 停止服务都能优雅地把 VM 转入内存快照，
-    而不是留下没人管的 QEMU 进程。
+    而不是留下没人管的容器进程。
     """
     import signal
 
@@ -368,7 +368,7 @@ def main() -> int:
     _install_signal_handlers(app, win)
 
     # 恢复上次希望运行的虚拟机
-    # QEMU 用 -daemonize 独立运行，正常退出应用不会停 VM，
+    # 机器由 lxc 独立运行，正常退出应用不会停，
     # 所以通常这里是空操作；只有应用被强杀或系统重启后才需要拉起。
     # 先确保 Podman 可用（未安装则引导安装，未启动则自动拉起）
     QTimer.singleShot(300, lambda: _ensure_podman_ready(win))

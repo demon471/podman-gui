@@ -64,23 +64,8 @@ class TestBridgeModule:
     def test_api_exists(self):
         from core.vm import bridge
 
-        for fn in ("ready", "setup", "teardown", "qemu_args",
-                   "lease_ip", "bridge_exists", "helper_available"):
+        for fn in ("ready", "setup", "teardown", "lease_ip", "bridge_exists"):
             assert callable(getattr(bridge, fn)), fn
-
-    def test_qemu_args_contain_bridge(self):
-        from core.vm import bridge
-
-        args = bridge.qemu_args(mac="52:54:00:aa:bb:cc")
-        joined = " ".join(args)
-        assert f"br={bridge.BRIDGE}" in joined
-        assert "mac=52:54:00:aa:bb:cc" in joined
-
-    def test_qemu_args_mac_optional(self):
-        from core.vm import bridge
-
-        joined = " ".join(bridge.qemu_args())
-        assert "mac=" not in joined
 
     def test_constants(self):
         from core.vm import bridge
@@ -88,16 +73,6 @@ class TestBridgeModule:
         assert bridge.BRIDGE.startswith("pg")
         assert "/16" in bridge.SUBNET
         assert bridge.HOST_IP.startswith("10.")
-
-    def test_bridge_conf_readable_check(self):
-        """ready() 不能因为读不到 bridge.conf 就永久返回 False"""
-        import inspect
-
-        from core.vm import bridge
-
-        src = inspect.getsource(bridge.ready)
-        assert "os.access" in src
-        assert "R_OK" in src
 
 
 class TestBridgeSetupScript:

@@ -655,10 +655,10 @@ class VMPage(QWidget):
         该行进入 loading 态（灰字 + 转圈 + 禁止交互）。
 
         release_when：可选的异步解除条件。
-          - 启动/重启：传 "ssh" —— qemu 起来后继续探针，
+          - 启动/重启：传 "ssh" —— 进程起来后继续探针，
             直到 SSH 可连才解除 loading（启动成功的真正标准）
           - 停止：传 None —— stop_vm 返回即解除
-            （QEMU 进程消失 = 不可操作，无需探针）
+            （进程消失 = 不可操作，无需探针）
         """
         if self._busy:
             self.status_message.emit("上一个操作还未完成，请稍候…")
@@ -698,7 +698,7 @@ class VMPage(QWidget):
             self.act_new.setEnabled(True)
 
             # 状态栏文案要说实话：
-            # · release_when == "ssh" 时，这一步只代表 qemu 进程起来了，
+            # · release_when == "ssh" 时，这一步只代表进程起来了，
             #   guest 还在启动 —— 说「完成」会让用户以为已经能用，
             #   而列表还显示「启动中…」，两边对不上。
             # · 其他情况（停止/删除）此时确实完成了。
@@ -719,10 +719,10 @@ class VMPage(QWidget):
                 return
 
             if release_when == "ssh":
-                # 启动/重启：qemu 起来后继续等 guest 就绪
+                # 启动/重启：进程起来后继续等 SSH 就绪
                 self._probe_ssh_then_release(pending_vm)
             else:
-                # 停止：QEMU 进程已退出，直接解除
+                # 停止：进程已退出，直接解除
                 _release(pending_vm)
                 self._rebuild()
 
@@ -879,9 +879,9 @@ class VMPage(QWidget):
         )
 
     def _after_start(self, vm, result) -> None:
-        """QEMU 进程已启动（但 guest 还没就绪）
+        """机器进程已启动（但 SSH 还没就绪）
 
-        这里**不发「已启动」通知** —— 此时只是 qemu 进程起来了，
+        这里**不发「已启动」通知** —— 此时只是进程起来了，
         guest 里的系统还在启动，SSH 还连不上。列表行仍然是
         「启动中…」，探测任务会继续等就绪。
 
@@ -1188,7 +1188,7 @@ class VMPage(QWidget):
         vm_count = len(self._vms)
         img_count = sum(
             1 for spec in vm_images.list_images()
-            if vm_images.is_downloaded(spec)
+            if vm_images.rootfs_downloaded(spec)
         )
 
         ret = QMessageBox.warning(

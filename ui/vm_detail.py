@@ -325,7 +325,7 @@ class VMDetailDialog(QDialog):
         self.btn_share_mount = QPushButton("立即挂载")
         self.btn_share_mount.setIcon(icon("play", ICON_SIZE_BUTTON.width()))
         self.btn_share_mount.setToolTip(
-            "在 VM 内挂载选中的共享目录（需要 QEMU 已带 9p 设备，"
+            "确认共享目录已挂载（bind mount 由启动时自动完成，"
             "即添加后重启过）"
         )
         self.btn_share_mount.clicked.connect(self._mount_selected_share)
@@ -342,7 +342,7 @@ class VMDetailDialog(QDialog):
 
         self.btn_share_apply = QPushButton("应用并重启")
         self.btn_share_apply.setToolTip(
-            "共享目录的增删需要重启 VM 才能让 QEMU 加载 9p 设备"
+            "共享目录的增删需要重启机器（bind mount 在启动时生效）"
         )
         self.btn_share_apply.clicked.connect(self._apply_shares)
         self.btn_share_apply.setVisible(False)
@@ -454,7 +454,7 @@ class VMDetailDialog(QDialog):
                 tag.setToolTip({
                     "宿主": "从宿主机（第三方 SSH 工具）连接时用这组",
                     "VM 内": (
-                        "虚拟机内部的地址。QEMU 用户网络给每台 VM 都分配"
+                        "机器在网桥上的独立地址。每台机器分配"
                         " 10.0.2.0/24，所以多台 VM 的内部 IP 相同 —— "
                         "它们各自独立、互不冲突，但不能拿来区分虚拟机。"
                     ),
@@ -1277,7 +1277,7 @@ class VMDetailDialog(QDialog):
 
         用户视角的友好做法：
           · 不要求用户自己去点「重启」按钮
-          · 明确说清「为什么需要重启」（QEMU 的共享设备只在启动时加载）
+          · 明确说清「为什么需要重启」（bind mount 只在启动时生效）
           · 默认选「现在重启」，一键走完
         """
         self._shares_dirty = True
@@ -1377,7 +1377,7 @@ class VMDetailDialog(QDialog):
     def _restart(self) -> None:
         """重启：先停止再启动，直到 SSH 可连才算成功
 
-        与列表页的标准一致：qemu 进程起来不等于启动成功，
+        与列表页的标准一致：进程起来不等于启动成功，
         能 SSH 进去才算。等待期间底部按钮保持禁用。
         """
         r = QMessageBox.question(
@@ -1399,7 +1399,7 @@ class VMDetailDialog(QDialog):
             if not ok:
                 return False, err
 
-            # qemu 已起，轮询 SSH 直到可连（最多 180 秒）
+            # 进程已起，轮询 SSH 直到可连
             import time as _t
 
             t0 = _t.monotonic()

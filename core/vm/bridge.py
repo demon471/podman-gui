@@ -1,24 +1,19 @@
-"""虚拟机共享网桥（让 VM 之间互通、宿主机可用内部 IP 访问）
+"""轻机器共享网桥（机器互通、宿主机直连内部 IP）
 
-为什么要这个
-────────────
-QEMU 默认的用户网络（SLIRP）有两个硬限制：
-  · **VM 之间互相看不见** —— 每台 VM 一个独立 NAT，ping 不通
-  · **宿主机无法用内部 IP 访问** —— 只能靠 hostfwd 端口转发，
-    所以外部 SSH 工具只能填 127.0.0.1:222x，填内部 IP 必然失败
-
-改成共享网桥后：
-  · 所有 VM 挂在同一个二层网络上 → 互相能 ping
-  · 宿主机在网桥上有地址（10.99.0.1）→ 直接 ssh 10.99.x.y 就行
-  · dnsmasq 给 guest 发 DHCP，还能反解名字
+为什么需要
+──────────
+轻机器挂在这个网桥上：
+  · 所有机器在同一个二层网络 → 机器之间互通
+  · 宿主机在网桥上有地址（10.99.0.1）→ 直接 ssh 机器 IP
+  · dnsmasq 发 DHCP，每台固定 MAC → 租约稳定可查
+  · NAT 出外网（装包、下载）
 
 权限
 ────
-建网桥需要 root，但**只在初始化时一次**：
-之后的 QEMU 通过 setuid 的 qemu-bridge-helper 挂网桥（普通用户即可），
-需要把它加进 /etc/qemu/bridge.conf 的 allow 列表。
-
-初始化走 pkexec 弹系统授权框，不需要用户开终端。
+建网桥需要 root，只在初始化时一次（pkexec 弹系统授权框）。
+容器侧由 lxc-user-nic 接管（/etc/lxc/lxc-usernet 配额 +
+家目录 ACL），同一份脚本一并配置 —— 见 _setup_script。
+初始化幂等：重复执行不出错。
 """
 
 from __future__ import annotations
@@ -35,10 +30,11 @@ PREFIX = 16
 DHCP_START = "10.99.10.1"
 DHCP_END = "10.99.250.254"
 
-BRIDGE_CONF = Path("/etc/qemu/bridge.conf")
 LEASES = Path("/var/lib/misc/dnsmasq-pgbr0.leases")
 UNIT_NAME = "podman-gui-net.service"
 UNIT_PATH = Path("/etc/systemd/system") / UNIT_NAME
+# 初始化时给发起用户分配的 veth 配额（/etc/lxc/lxc-usernet）
+USERNET_QUOTA = 10
 
 
 # ─────────────────────────────────────────
@@ -48,51 +44,36 @@ def bridge_exists() -> bool:
     return Path(f"/sys/class/net/{BRIDGE}").exists()
 
 
-def helper_available() -> bool:
-    """（已废弃：容器档走 lxc-user-nic，不需要 qemu-bridge-helper。
-
-    保留函数仅为兼容旧调用点/测试，结果不再被用于阻止初始化。"""
-    """qemu-bridge-helper 是否可用（setuid 才能免 root 挂网桥）"""
-    for p in (
-        "/usr/lib/qemu/qemu-bridge-helper",
-        "/usr/libexec/qemu-bridge-helper",
-    ):
-        if Path(p).exists():
-            return True
-    return False
-
-
-def bridge_allowed() -> bool:
-    """网桥是否已加入 /etc/qemu/bridge.conf 白名单"""
-    try:
-        text = BRIDGE_CONF.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("allow"):
-            name = s.split(None, 1)[1].strip() if len(s.split()) > 1 else ""
-            if name in (BRIDGE, "all"):
-                return True
-    return False
-
-
 def ready() -> bool:
-    """是否已经可以直接给 QEMU 用（无需再提权）
+    """网桥是否就绪（机器能直接用，无需再提权）"""
+    return bridge_exists()
 
-    白名单文件可能因权限读不到，所以只在「能读到」时才要求它；
-    读不到就只看网桥和 helper —— 真配错了 QEMU 启动会报错，
-    那时再提示用户重新初始化。
+def lease_ip(mac_or_name: str) -> str:
+    """从 dnsmasq 租约里查某台机器的 IP
+
+    dnsmasq 租约格式：<到期时间> <MAC> <IP> <主机名> <客户端ID>
+
+    **MAC 优先**：Alpine 的 dhcpcd 不发 hostname，租约里主机名
+    一栏全是 "*"，按名字匹配经常落空（机器重启换 IP 后拿到旧
+    地址，探测 "No route to host"）。容器现在有固定 MAC
+    （container.vm_mac），按 MAC 查永远准；主机名匹配保留作
+    兜底（兼容手写配置的机器）。
     """
-    if not (bridge_exists() and helper_available()):
-        return False
     try:
-        readable = os.access(BRIDGE_CONF, os.R_OK)
+        text = LEASES.read_text(encoding="utf-8")
     except OSError:
-        readable = False
-    if readable:
-        return bridge_allowed()
-    return True
+        return ""
+    is_mac = mac_or_name.count(":") == 5
+    fallback = ""
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        if is_mac and parts[1].lower() == mac_or_name.lower():
+            return parts[2]
+        if not is_mac and parts[3] == mac_or_name:
+            fallback = parts[2]
+    return fallback
 
 
 def has_pkexec() -> bool:
@@ -166,7 +147,7 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
 
-# 5. 非特权容器前置（lxc 直管 veth，不走 qemu-bridge-helper）
+# 5. 非特权容器前置（lxc-user-nic 的配额与 ACL）
 #
 #    a) /etc/lxc/lxc-usernet：给发起用户分配 veth 配额，
 #       不存在时 lxc-user-nic 直接失败（"Failed to open
@@ -199,9 +180,6 @@ def setup(timeout: int = 180) -> tuple[bool, str]:
     """初始化共享网桥（会弹系统授权框）"""
     if not has_pkexec():
         return False, "系统缺少 pkexec（polkit），无法提权创建网桥"
-    # qemu-bridge-helper 是 VM 档的挂桥方式；容器档走
-    # lxc-user-nic（见脚本第 5 段的 lxc-usernet 配置）。
-    # helper 缺失只影响老的 QEMU 客户端，不再阻止初始化。
 
     try:
         r = subprocess.run(
@@ -232,7 +210,6 @@ iptables -t nat -D POSTROUTING -s {SUBNET} -j MASQUERADE 2>/dev/null || true
 iptables -D FORWARD -i {BRIDGE} -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -o {BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 ip link del {BRIDGE} 2>/dev/null || true
-sed -i '/^allow {BRIDGE}$/d' {BRIDGE_CONF} 2>/dev/null || true
 """
     try:
         r = subprocess.run(
@@ -248,49 +225,6 @@ sed -i '/^allow {BRIDGE}$/d' {BRIDGE_CONF} 2>/dev/null || true
 
 
 # ─────────────────────────────────────────
-# QEMU 侧
-# ─────────────────────────────────────────
-def qemu_args(mac: str = "") -> list[str]:
-    """挂到共享网桥的 netdev 参数
-
-    注意：网桥模式不需要 hostfwd —— 宿主机本来就能直接用
-    guest 的内部 IP 访问。
-
-    mac 必须每台 VM 不同：QEMU 默认给第一块网卡
-    52:54:00:12:34:56，两台 VM 一样的话网桥分不清它们。
-    """
-    dev = "virtio-net-pci,netdev=net0"
-    if mac:
-        dev += f",mac={mac}"
-    return ["-netdev", f"bridge,id=net0,br={BRIDGE}", "-device", dev]
-
-
-def lease_ip(mac_or_name: str) -> str:
-    """从 dnsmasq 租约里查某台机器的 IP
-
-    dnsmasq 租约格式：<到期时间> <MAC> <IP> <主机名> <客户端ID>
-
-    **MAC 优先**：Alpine 的 dhcpcd 不发 hostname，租约里主机名
-    一栏全是 "*"，按名字匹配经常落空（机器重启换 IP 后拿到旧
-    地址，探测 "No route to host"）。容器现在有固定 MAC
-    （container.vm_mac），按 MAC 查永远准；主机名匹配保留作
-    兜底（兼容手写配置的机器）。
-    """
-    try:
-        text = LEASES.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    is_mac = mac_or_name.count(":") == 5
-    fallback = ""
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        if is_mac and parts[1].lower() == mac_or_name.lower():
-            return parts[2]
-        if not is_mac and parts[3] == mac_or_name:
-            fallback = parts[2]
-    return fallback
 
 
 def ping_ok(ip: str, timeout: int = 2) -> bool:

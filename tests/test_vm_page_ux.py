@@ -91,12 +91,19 @@ class TestStoppedVMNoDetail:
         assert not any("未启动" in m for m in msgs), "不该再弹「未启动」提示"
 
         # 已启动：什么都不做
+        # （不真改 running 属性 —— 类级 monkeypatch 会泄漏到
+        #  其它用例；这里直接给实例挂属性，_on_row_activated
+        #  读的正是实例属性）
         started.clear()
         vm = next(v for v in page._vms if v.spec.name == name)
-        vm._spec_override_running = True
-        monkeypatch.setattr(type(vm), "running", property(lambda self: True))
-        page._on_row_activated(page.table.currentIndex())
-        assert started == [], "已启动的双击不应再次启动"
+        monkeypatch.setattr(type(vm), "running",
+                            property(lambda self: True), raising=False)
+        try:
+            page._on_row_activated(page.table.currentIndex())
+            assert started == [], "已启动的双击不应再次启动"
+        finally:
+            # 立即还原，避免 property 泄漏
+            del type(vm).running
 
     def test_hover_does_not_start_card_timer(self, stopped_vm_page, qapp):
         """悬停未启动的 VM：不启动卡片定时器"""

@@ -1415,18 +1415,18 @@ class SettingsPage(QWidget):
         net_row.addStretch()
         self.btn_net_setup = QPushButton("启用共享网络…")
         self.btn_net_setup.setToolTip(
-            "创建共享网桥（需要一次系统授权）。启用后虚拟机之间可以"
-            "互相访问，宿主机也能直接用内部 IP 连接。"
+            "创建共享网桥（需要一次系统授权）。同时配置轻机器的"
+            "网络权限。启用后机器之间互通，宿主机直连内部 IP。"
         )
         self.btn_net_setup.clicked.connect(self._setup_bridge)
         net_row.addWidget(self.btn_net_setup)
         nv2.addLayout(net_row)
 
         nv2.addWidget(_info_box(
-            "默认使用 QEMU 用户网络：虚拟机之间互不可见，宿主机只能"
-            "靠端口转发访问。启用共享网络后，虚拟机会挂在同一个二层"
-            "网络上，能互相 ping，宿主机也能直接 ssh 内部 IP。"
-            "切换后需要重启虚拟机生效。"
+            "轻机器通过共享网桥获得独立 IP（10.99.x.x）：机器之间"
+            "互通、宿主机直连、外部 SSH 客户端用 <名字>.vm.local。"
+            "本操作同时配置 /etc/lxc/lxc-usernet 配额与家目录 ACL"
+            "（非特权容器的必要前置），全部幂等，可放心重复执行。"
         ))
 
         v.addWidget(sec_net)
@@ -1444,15 +1444,9 @@ class SettingsPage(QWidget):
                 f"宿主机地址 {bridge.HOST_IP}"
             )
             self.btn_net_setup.setText("重新初始化…")
-        elif not bridge.helper_available():
-            self.lbl_net_mode.setText(
-                "当前：用户网络（独立 NAT）。系统缺少 qemu-bridge-helper，"
-                "无法启用共享网络。"
-            )
-            self.btn_net_setup.setEnabled(False)
         else:
             self.lbl_net_mode.setText(
-                "当前：用户网络（独立 NAT）· 虚拟机之间不可见"
+                "共享网络未启用 · 机器无法获得 IP，先启用再创建"
             )
             self.btn_net_setup.setText("启用共享网络…")
 
