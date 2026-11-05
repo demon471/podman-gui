@@ -161,31 +161,50 @@ class TreeLineDelegate(QStyledItemDelegate):
             return
 
         r = view.visualRect(index)
-        x = r.left() - indent * depth + indent // 2
-        mid_y = r.center().y()
 
+        # 几何：QTreeView 的层级缩进从 x=0 开始，每层 indentation。
+        #   · 父链的竖线画在各层缩进槽的中间
+        #   · 本项的横线从父层槽中点连到本项内容左侧
+        # 旧算法 x = left - indent*depth + indent//2 把整条线
+        # 挂在「内容起点 - 半格」上，与展开箭头（占据父层缩进槽）
+        # 重叠，看起来线穿过箭头、子项线又缩进去一块。
         col = QColor(option.palette.color(
             option.palette.ColorRole.WindowText
         ))
         col.setAlpha(70)
 
-        # 直接用传入的 painter（不能 new 一个，Qt 不允许重入）
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         pen = QPen(col)
         pen.setWidth(1)
         painter.setPen(pen)
 
-        # 竖线：最后一个兄弟只画到中点，其余画到行底
-        has_next = False
-        parent = index.parent()
-        if parent.isValid():
-            has_next = index.row() < view.model().rowCount(parent) - 1
-        y_bottom = r.bottom() + 1 if has_next else mid_y
-        painter.drawLine(x, r.top(), x, y_bottom)
+        mid_y = r.center().y()
 
-        # 横线：接到内容区
-        painter.drawLine(x, mid_y, x + indent // 2, mid_y)
+        # 从最顶层父到本项，逐层画竖线（跨层时兄弟延续线也要画）
+        node = index
+        xs = []
+        while node.parent().isValid():
+            node = node.parent()
+            xs.append(r.left() - indent * (len(xs) + 1) + indent // 2)
+        # xs[0] = 最外层槽中点 … xs[-1] = 直接父层槽中点
+
+        has_next = index.row() < view.model().rowCount(
+            index.parent()
+        ) - 1 if index.parent().isValid() else False
+
+        for k, x in enumerate(reversed(xs)):
+            is_last = (k == len(xs) - 1)
+            if is_last:
+                # 直接父层：竖线从行顶到中点（最后兄弟）或贯穿
+                y_bottom = mid_y if not has_next else r.bottom() + 1
+                painter.drawLine(x, r.top(), x, y_bottom)
+                # 横线接到本项内容
+                painter.drawLine(x, mid_y, x + indent // 2, mid_y)
+            else:
+                # 外层：只是「路过」，兄弟还有后续就贯穿整行
+                painter.drawLine(x, r.top(), x, r.bottom() + 1)
+
         painter.restore()
 
 
