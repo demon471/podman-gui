@@ -1013,21 +1013,18 @@ class VMPage(QWidget):
         self.request_terminal.emit(fresh)
 
     def _on_row_activated(self, index) -> None:
-        """双击行：打开详情（仅限已启动的虚拟机）
+        """双击行：未启动 → 启动；已启动 → 不做任何事
 
-        未启动的机器不响应双击：
-        详情页里的文件、控制台、共享目录都依赖 guest 在运行，
-        进去也是一片空白。此时用户该做的是先「启动」。
+        双击是最自然的「开始用这台机器」手势，不该是打开详情
+        （工具栏 SSH/详情按钮已覆盖）。已启动时双击必须安静：
+        弹提示或重复启动都是打扰。
         """
         vm = self._selected_vm()
         if vm is None:
             return
-        if not self._is_available(vm):
-            self.status_message.emit(
-                f"{vm.spec.name} 未启动，请先启动后再查看详情"
-            )
+        if vm.running or self._busy:
             return
-        self._open_detail()
+        self._start_selected()
 
     def _wake_then(self, vm, action) -> None:
         """启动 VM，就绪后执行 action"""

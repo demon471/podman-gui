@@ -625,3 +625,86 @@ class TestSystemFixups:
         assert "alpine-3.22-lxc" in keys
         assert "rocky-10-lxc" in keys
         assert "debian-13-lxc" in keys
+
+
+class TestShareMountPoint:
+    """共享目录挂载点统一为 /<tag>（Bug 修复守卫）
+
+    旧 VM 档用 /mnt/host/<tag>（9p），容器 bind mount 是 /<tag>，
+    界面与 ssh 命令曾因此显示错路径 + 永远「未挂载」。
+    """
+
+    def test_share_mount_point(self):
+        from core.vm.ssh import share_mount_point
+
+        assert share_mount_point("downloads") == "/downloads"
+        assert share_mount_point("/downloads/") == "/downloads"
+
+    def test_no_legacy_mnt_host(self):
+        """代码里不允许再出现 /mnt/host 路径"""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        for f in ("core/vm/ssh.py", "ui/vm_detail.py"):
+            src = (root / f).read_text(encoding="utf-8")
+            # 历史注释（docstring 里的说明）不算
+            code = "\n".join(
+                l for l in src.splitlines()
+                if not l.strip().startswith("#")
+            )
+            assert '"/mnt/host/' not in code, f
+
+    def test_mount_share_verifies_bind_mount(self):
+        """容器档 mount_share 只验证（bind mount 由 lxc 自动挂）"""
+        import inspect
+
+        from core.vm import ssh
+
+        src = inspect.getsource(ssh.mount_share)
+        assert "/proc/mounts" in src
+        assert "mount -t" not in src
+
+    def test_mounted_tags_matches_by_path(self):
+        """挂载状态按挂载点路径匹配，不是按文件系统类型"""
+        import inspect
+
+        from core.vm import ssh
+
+        src = inspect.getsource(ssh.mounted_tags)
+        assert "awk '{print $2}'" in src
+
+
+class TestFilePanelDefaults:
+    """文件页默认家目录（Bug 修复守卫）"""
+
+    def test_default_cwd_is_home(self, qapp):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "ui" / "vm_files.py").read_text(encoding="utf-8")
+        assert 'self.cwd = f"/home/{vm.spec.username}"' in src
+
+    def test_double_click_starts_when_stopped(self):
+        """双击 = 未启动则启动；已启动不响应"""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "ui" / "vm_page.py").read_text(encoding="utf-8")
+        start = src.index("def _on_row_activated")
+        body = src[start:start + 700]
+        assert "_start_selected()" in body
+        assert "if vm.running" in body
+
+
+class TestSudoProvisioned:
+    """ensure_sshd 必须装 sudo + 免密 sudoers（文件页提权兜底）"""
+
+    def test_alpine_cmd_includes_sudo(self):
+        import inspect
+
+        from core.vm import container
+
+        src = inspect.getsource(container.ensure_sshd)
+        assert "sudo" in src
+        assert "NOPASSWD" in src
+        assert "/etc/sudoers.d/podbox" in src

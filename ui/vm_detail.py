@@ -261,7 +261,7 @@ class VMDetailDialog(QDialog):
 
     # ── 共享 ──
     def _build_shares(self) -> QWidget:
-        """共享目录：宿主机目录 ↔ VM 内 /mnt/host/<挂载点>
+        """共享目录：宿主机目录 ↔ 机器内 /<挂载点>
 
         操作设计原则（用户视角）：
           · 选目录用文件浏览器，不用手打路径
@@ -275,7 +275,7 @@ class VMDetailDialog(QDialog):
         v.setSpacing(8)
 
         hint = QLabel(
-            "把宿主机目录挂进 VM，在 VM 内访问 /mnt/host/<挂载点>。"
+            "把宿主机目录挂进机器，在机器内访问 /<挂载点>（bind mount）。"
         )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
@@ -1052,7 +1052,7 @@ class VMDetailDialog(QDialog):
         for r, (host_path, tag) in enumerate(shares):
             self.tbl_shares.setItem(r, 0, QTableWidgetItem(host_path))
             self.tbl_shares.setItem(
-                r, 1, QTableWidgetItem(f"/mnt/host/{tag}")
+                r, 1, QTableWidgetItem(vm_ssh.share_mount_point(tag))
             )
             # 先占位，异步查询后回填
             state_item = QTableWidgetItem("…")
@@ -1175,7 +1175,7 @@ class VMDetailDialog(QDialog):
         dlg.setWindowTitle("挂载点")
         dlg.setLabelText(
             f"宿主机目录：{path}\n\n"
-            f"VM 内访问路径：/mnt/host/<挂载点>"
+            f"机器内访问路径：/<挂载点>"
             + ("\n\n（目录名含中文等字符，已自动命名为 share）" if auto else "")
         )
         dlg.setTextValue(tag)
@@ -1206,7 +1206,7 @@ class VMDetailDialog(QDialog):
             return
 
         self.refresh()
-        self._mark_shares_changed(f"已添加 {path} → /mnt/host/{tag}")
+        self._mark_shares_changed(f"已添加 {path} → /{tag}")
 
     def _del_share(self) -> None:
         """移除共享目录（若已挂载，先卸载再删配置）"""
@@ -1252,7 +1252,7 @@ class VMDetailDialog(QDialog):
             return
 
         self._spawn(
-            lambda: vm_ssh.mount_share(self.vm, tag, f"/mnt/host/{tag}"),
+            lambda: vm_ssh.mount_share(self.vm, tag),
             lambda res: self._on_mount_result(tag, res),
             lambda m: self.lbl_status.setText(f"挂载失败: {m}"),
         )
@@ -1260,7 +1260,7 @@ class VMDetailDialog(QDialog):
     def _on_mount_result(self, tag: str, result) -> None:
         ok, msg = result if isinstance(result, tuple) else (False, "")
         if ok:
-            self.lbl_status.setText(f"已挂载 /mnt/host/{tag}")
+            self.lbl_status.setText(f"已挂载 /{tag}")
         else:
             text = (msg or "").strip()
             low = text.lower()

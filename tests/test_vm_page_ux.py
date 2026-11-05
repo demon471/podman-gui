@@ -73,22 +73,30 @@ class TestStoppedVMNoDetail:
         assert self._select_vm(vm_page, name)
         return vm_page, name
 
-    def test_double_click_does_not_open_detail(self, stopped_vm_page, qapp):
-        """双击未启动的 VM：不打开详情，只提示"""
+    def test_double_click_starts_stopped_vm(self, stopped_vm_page, qapp, monkeypatch):
+        """双击未启动的 VM = 启动它（不弹提示、不打开详情）
+
+        双击是最自然的「开始用这台机器」手势；已启动时双击
+        必须安静（不弹提示、不重复启动）。
+        """
         page, name = stopped_vm_page
+        started = []
+        monkeypatch.setattr(page, "_start_selected", lambda: started.append(name))
         msgs = []
         page.status_message.connect(msgs.append)
 
+        # 未启动：触发启动
         page._on_row_activated(page.table.currentIndex())
-        for _ in range(10):
-            qapp.processEvents()
+        assert started == [name], "双击未启动的机器应触发启动"
+        assert not any("未启动" in m for m in msgs), "不该再弹「未启动」提示"
 
-        opened = any(
-            w.__class__.__name__ == "VMDetailDialog" and w.isVisible()
-            for w in qapp.topLevelWidgets()
-        )
-        assert not opened, "未启动时双击不该打开详情"
-        assert any("未启动" in m for m in msgs), f"应提示未启动，实际 {msgs}"
+        # 已启动：什么都不做
+        started.clear()
+        vm = next(v for v in page._vms if v.spec.name == name)
+        vm._spec_override_running = True
+        monkeypatch.setattr(type(vm), "running", property(lambda self: True))
+        page._on_row_activated(page.table.currentIndex())
+        assert started == [], "已启动的双击不应再次启动"
 
     def test_hover_does_not_start_card_timer(self, stopped_vm_page, qapp):
         """悬停未启动的 VM：不启动卡片定时器"""

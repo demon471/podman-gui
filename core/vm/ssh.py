@@ -284,78 +284,50 @@ def get_ip(vm) -> str:
 
 
 # ─────────────────────────────────────────
-# 挂载共享目录（9p）
+# 共享目录（容器 bind mount）
 # ─────────────────────────────────────────
-def mount_share(vm, tag: str, mount_point: str) -> tuple[bool, str]:
-    """在 VM 内挂载共享目录
+def share_mount_point(tag: str) -> str:
+    """共享目录在机器内的挂载点 = /<tag>
 
-    优先 virtiofs（新方案），失败回退 9p（老内核）。
-
-    为什么需要回退：
-    Rocky / RHEL 10 内核没有 9p 模块，只能 virtiofs；
-    而很老的发行版可能没有 virtiofs。两条都试，谁通用谁。
-
-    msize 262144（256KB）：9p 默认 8KB 会让大文件传输频繁分片。
+    lxc.mount.entry 的目标写的是相对 rootfs 的 <tag>，
+    机器内看到的就是 /<tag>。旧 VM 档（9p/virtiofs）用
+    /mnt/host/<tag>，已随 QEMU 删除 —— 界面曾因此显示错路径。
     """
-    mp = shlex.quote(mount_point)
-
-    # 已挂载就跳过（幂等 —— 每次启动都会调一遍）
-    check = (
-        f"sudo mkdir -p {mp}; "
-        f"if grep -qs ' {mount_point} ' /proc/mounts; then "
-        f"echo ALREADY_MOUNTED; exit 0; fi; "
-    )
-
-    # 1) virtiofs
-    vfs_cmd = (
-        check
-        + "sudo modprobe virtiofs 2>/dev/null; "
-        + f"sudo mount -t virtiofs {shlex.quote(tag)} {mp} 2>/dev/null "
-        + "&& echo MOUNT_OK_VIRTIOFS && exit 0; "
-    )
-
-    # 2) 9p 回退（需要完整的模块链：文件系统 + 网络 + virtio 传输）
-    p9_cmd = (
-        "sudo modprobe 9p 2>/dev/null; "
-        "sudo modprobe 9pnet 2>/dev/null; "
-        "sudo modprobe 9pnet_virtio 2>/dev/null; "
-        f"sudo mount -t 9p "
-        f"-o trans=virtio,version=9p2000.L,msize=262144 "
-        f"{shlex.quote(tag)} {mp} 2>&1 "
-        "&& echo MOUNT_OK_9P && exit 0; "
-        "echo MOUNT_FAILED"
-    )
-
-    ok, out = run_command(vm, vfs_cmd + p9_cmd, timeout=40)
-    text = out or ""
-    if "MOUNT_OK_VIRTIOFS" in text or "MOUNT_OK_9P" in text:
-        return True, ""
-    if "ALREADY_MOUNTED" in text:
-        return True, ""
-
-    # 给出能直接看懂的原因
-    if "unknown filesystem type" in text:
-        return False, (
-            "该发行版内核既不支持 virtiofs 也不支持 9p。\n"
-            "共享目录不可用，请改用「文件」页的上传/下载。"
-        )
-    return False, text.strip()[:300] or "挂载失败"
+    return "/" + tag.strip("/")
 
 
-def unmount_share(vm, tag: str, mount_point: str | None = None) -> tuple[bool, str]:
-    """卸载 VM 内的 9p 共享
+def mount_share(vm, tag: str, mount_point: str | None = None) -> tuple[bool, str]:
+    """确认共享目录已挂载
 
-    删除共享目录时调用，避免留下悬空的挂载点
-    （后续访问会报 "Stale file handle"）。
+    容器档的共享目录是 lxc bind mount：lxc-start 时自动挂载，
+    **机器内不需要（也不能）手动 mount**。这里只做验证 ——
+    挂载点出现在 /proc/mounts 即已挂载；没有说明配置是在
+    启动后才加的，需要重启机器生效。
     """
-    mp = mount_point or f"/mnt/host/{tag}"
-    cmd = (
-        f"sudo umount {shlex.quote(mp)} 2>/dev/null; "
-        f"sudo rmdir {shlex.quote(mp)} 2>/dev/null; "
-        f"echo UM_OK"
+    mp = mount_point or share_mount_point(tag)
+    ok, out = run_command(
+        vm,
+        f"grep -qs ' {mp} ' /proc/mounts && echo MOUNTED || echo ABSENT",
+        timeout=15,
     )
-    ok, out = run_command(vm, cmd, timeout=20)
-    return ok and "UM_OK" in (out or ""), out
+    if ok and "MOUNTED" in out:
+        return True, ""
+    return False, "未挂载（新加的共享目录需重启机器生效）"
+
+
+def unmount_share(vm, tag: str,
+                  mount_point: str | None = None) -> tuple[bool, str]:
+    """卸载机器内的共享目录
+
+    容器 bind mount 的卸载只影响当前这次运行；配置（lxc.mount.entry）
+    已在 remove_share 里删掉，下次启动自然不再挂。这里 umount
+    只是让「删除后立刻不可见」，失败也不阻塞。
+    """
+    mp = mount_point or share_mount_point(tag)
+    run_command(
+        vm, f"sudo umount {shlex.quote(mp)} 2>/dev/null; true", timeout=20
+    )
+    return True, ""
 
 
 def unmount_all_shares(vm) -> list[tuple[str, bool, str]]:
@@ -413,29 +385,27 @@ def guest_ssh_port(vm) -> int:
 
 
 def mounted_tags(vm) -> set[str]:
-    """查询 VM 内已挂载的 9p tag 集合
+    """查询已挂载的共享目录 tag 集合
 
-    读 /proc/mounts 里 type=9p 的条目，第二列是挂载点，
-    第一列是 tag。用于在界面上显示「已挂载 / 未挂载」。
+    容器档是 bind mount，文件系统类型是 btrfs/ext4 等宿主
+    文件系统 —— 按类型（9p/virtiofs）查永远查不到，界面上
+    就是「明明挂了却显示未挂载」。改为拉全部挂载点，
+    在本地按 /<tag> 反查 tag。
     """
-    # 必须同时匹配 virtiofs 和 9p：
-    # 现在主用 virtiofs，只查 9p 会让状态一直显示「未挂载」，
-    # 而实际已经挂上了 —— 用户看到的就是「挂载成功但显示未挂载」。
     ok, out = run_command(
         vm,
-        "awk '$3==\"9p\" || $3==\"virtiofs\" {print $1\" \"$2}' "
-        "/proc/mounts 2>/dev/null",
+        "awk '{print $2}' /proc/mounts 2>/dev/null",
         timeout=15,
     )
     if not ok:
         return set()
 
-    tags = set()
-    for line in (out or "").splitlines():
-        parts = line.split()
-        if parts:
-            tags.add(parts[0])
-    return tags
+    points = {line.strip() for line in (out or "").splitlines() if line.strip()}
+    return {
+        tag.strip("/")
+        for tag in (t for _h, t in getattr(vm.spec, "shares", []) or [])
+        if share_mount_point(tag) in points
+    }
 
 
 def share_states(vm) -> dict[str, bool]:
@@ -445,17 +415,13 @@ def share_states(vm) -> dict[str, bool]:
 
 
 def mount_all_shares(vm) -> list[tuple[str, bool, str]]:
-    """挂载所有共享目录到 /mnt/host/<tag>
+    """验证所有共享目录的挂载状态
 
-    **这是共享目录功能的关键一环**：QEMU 用 -virtfs 把宿主机目录
-    暴露成 9p 设备，但 guest 内还需要主动 mount 才能访问。
-    之前没有任何地方调用本函数，导致用户配好共享目录、重启 VM 后
-    /mnt/host/ 下依然什么都没有。
-
-    调用时机：VM 启动且 SSH 就绪之后。
+    容器档的 bind mount 由 lxc-start 自动完成，这里逐个确认
+    （新加的配置在重启前会返回未挂载，界面据此提示）。
     """
     results = []
     for _host_path, tag in vm.spec.shares:
-        ok, msg = mount_share(vm, tag, f"/mnt/host/{tag}")
+        ok, msg = mount_share(vm, tag, share_mount_point(tag))
         results.append((tag, ok, msg))
     return results

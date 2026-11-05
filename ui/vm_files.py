@@ -85,7 +85,10 @@ class FilePanel(QWidget):
     def __init__(self, vm, parent: QWidget | None = None):
         super().__init__(parent)
         self.vm = vm
-        self.cwd = "/"
+        # 默认打开用户家目录而不是 /：
+        # 容器内登录用户是普通用户（uid 1000），对 / 没有写权限，
+        # 落在根目录会直接触发「无权限」（VM 档时代的默认值）。
+        self.cwd = f"/home/{vm.spec.username}"
         self._entries: list[vm_files.RemoteEntry] = []
         self._session: vm_files.SftpSession | None = None
         self._tasks: list = []

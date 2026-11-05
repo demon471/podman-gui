@@ -657,17 +657,29 @@ def ensure_sshd(
             "M=https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.22; "
             'echo "$M/main" > /etc/apk/repositories; '
             'echo "$M/community" >> /etc/apk/repositories; '
-            "apk add --no-cache openssh && "
+            "apk add --no-cache openssh sudo && "
             "ssh-keygen -A && "
             "rc-update add sshd default 2>/dev/null; "
-            "rc-service sshd start 2>/dev/null || /usr/sbin/sshd"
+            "rc-service sshd start 2>/dev/null || /usr/sbin/sshd; "
+            # 免密 sudo：文件页的写操作提权兜底需要它。
+            # 用户是播种时我们创建的，免密安全边界等同于
+            # 宿主用户本人（idmap 又把容器 root 映射回宿主）。
+            f"mkdir -p /etc/sudoers.d && "
+            f"echo '{username} ALL=(ALL) NOPASSWD: ALL' "
+            f"> /etc/sudoers.d/podbox && chmod 440 /etc/sudoers.d/podbox"
         )
     elif family in ("debian",):
         cmd = ("DEBIAN_FRONTEND=noninteractive apt-get update "
-               "&& apt-get install -y openssh-server "
-               "&& systemctl enable ssh")
+               "&& apt-get install -y openssh-server sudo "
+               "&& systemctl enable ssh && "
+               f"mkdir -p /etc/sudoers.d && echo "
+               f"'{username} ALL=(ALL) NOPASSWD: ALL' "
+               f"> /etc/sudoers.d/podbox && chmod 440 /etc/sudoers.d/podbox")
     elif family in ("fedora", "rocky", "rhel", "suse"):
-        cmd = "dnf install -y openssh-server && systemctl enable sshd"
+        cmd = ("dnf install -y openssh-server sudo && systemctl enable sshd && "
+               f"mkdir -p /etc/sudoers.d && echo "
+               f"'{username} ALL=(ALL) NOPASSWD: ALL' "
+               f"> /etc/sudoers.d/podbox && chmod 440 /etc/sudoers.d/podbox")
     elif family == "arch":
         cmd = "pacman -Sy --noconfirm openssh && systemctl enable sshd"
     else:
