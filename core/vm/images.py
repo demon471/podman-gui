@@ -922,7 +922,39 @@ def extract_rootfs(
     # 容器 rootfs 需要 /dev/pts 等（lxc autodev 会补），目录先建好
     for sub in ("dev", "proc", "sys"):
         (target_dir / sub).mkdir(exist_ok=True)
+
+    # **普通用户解包会丢失全部 setuid/setgid 位**：内核禁止
+    # 非 root 进程设置 setuid（安全规则）。tarball 里 sudo/su/
+    # passwd 等都是 rwsr，解包后变 rwxr —— 容器内 sudo 直接报
+    # "must be owned by uid 0 and have the setuid bit set"。
+    # 解法：在用户命名空间里以 root 身份按 tar 记录补回
+    # （userns 的 root 有 CAP_SETUID，可以设 setuid 位）。
+    fix_setuid_bits(target_dir)
     return True, ""
+
+
+def fix_setuid_bits(rootfs: Path) -> None:
+    """在用户命名空间里恢复 rootfs 的 setuid/setgid 位
+
+    扫 tar 记录找 mode 带 setuid 的文件太慢；直接对已知清单
+    补位（各发行版通用，缺的文件 chmod 自然失败忽略）。
+    """
+    from core.vm.container import userns_run
+
+    targets = [
+        "usr/bin/sudo", "usr/bin/su", "usr/bin/passwd",
+        "usr/bin/chsh", "usr/bin/chfn", "usr/bin/newgrp",
+        "usr/bin/gpasswd", "usr/bin/chage", "usr/bin/expiry",
+        "usr/bin/wall", "usr/bin/mount", "usr/bin/umount",
+        "usr/lib/openssh/ssh-keysign", "bin/mount", "bin/umount",
+        "bin/su", "usr/sbin/unix_chkpwd",
+    ]
+    existing = [
+        str(rootfs / t) for t in targets if (rootfs / t).exists()
+    ]
+    if not existing:
+        return
+    userns_run(["chmod", "u+s", *existing], timeout=60)
 
 
 def rootfs_cache_size() -> int:

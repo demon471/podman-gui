@@ -708,3 +708,36 @@ class TestSudoProvisioned:
         assert "sudo" in src
         assert "NOPASSWD" in src
         assert "/etc/sudoers.d/podbox" in src
+
+
+class TestExtractSetuid:
+    """普通用户解包丢 setuid 位，extract 必须补回
+
+    内核禁止非 root 设置 setuid —— 不补的话容器里 sudo 直接
+    "must be owned by uid 0 and have the setuid bit set"，
+    文件页授权全部失效（用户实测 debian）。
+    """
+
+    def test_extract_restores_setuid(self, monkeypatch, tmp_path):
+        import tarfile
+
+        from core.vm import images
+
+        # 造一个带 setuid 文件的 rootfs tarball
+        src = tmp_path / "src"
+        (src / "usr" / "bin").mkdir(parents=True)
+        fake = src / "usr" / "bin" / "sudo"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake.chmod(0o4755)
+        tarball = tmp_path / "r.tar.xz"
+        with tarfile.open(tarball, "w:xz") as tf:
+            tf.add(fake, arcname="./usr/bin/sudo")
+
+        spec = images.get_spec("alpine-3.22-lxc")
+        monkeypatch.setattr(images, "rootfs_path",
+                            lambda s, arch="amd64": tarball)
+        out = tmp_path / "out"
+        ok, err = images.extract_rootfs(spec, "amd64", out)
+        assert ok, err
+        mode = (out / "usr" / "bin" / "sudo").stat().st_mode
+        assert mode & 0o4000, f"setuid 位丢了: {oct(mode)}"
