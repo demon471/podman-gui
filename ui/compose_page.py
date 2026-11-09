@@ -130,51 +130,55 @@ class YamlHighlighter(QSyntaxHighlighter):
             self.setFormat(m.start(), m.end() - m.start(), self.fmt_num)
 
 class TreeLineDelegate(QStyledItemDelegate):
-    """在树的第一列左侧自绘分支连线
+    """在树的第一列自绘分支连线（├ / └ / 引导线）
 
-    系统默认的分支指示器一旦被 QSS 干预就会断线或丢箭头，
-    这里自己画：父项下方画一条竖线，子项画「├」或「└」。
-    展开/折叠箭头仍交给基类，不碰它。
+    QSS 已压掉 Breeze 原生的引导线（style.py 的
+    ::branch:!has-children 规则），展开箭头仍由原生绘制；
+    连线在这里补上，几何完全可控。
+
+    ══ 坐标系（PyQt6 + Breeze 实测）══
+    Qt 传给 delegate 的 painter 原点是 **viewport 原点**，
+    与 option.rect 同一坐标系 —— 不是 option.rect.topLeft()
+    （9fe0022 当时的注释搞错了这一点，线全部画到负坐标上
+    不可见，实际显示的是被 QSS padding 推偏的原生线）。
+
+    缩进槽布局（rootIsDecorated=True，viewport 坐标）：
+      · 第 k 层槽 = [k*indent, (k+1)*indent)
+      · depth 层项的内容从 (depth+1)*indent 开始（顶层也占
+        一个箭头槽），即 option.rect.x() = (depth+1)*indent
+      · 槽 k 中心 x = k*indent + indent//2
+      · 父链槽 = 0..depth-1（引导线），自己的拐角槽 = depth
+
+    线画在 super().paint() **之前**：内容/选中高亮盖在线上，
+    不会出现深色分支线压在蓝色选中条上（与 QTreeView
+    drawRow 先画分支后画 item 的顺序一致）。
     """
 
     def paint(self, painter, option, index) -> None:
+        tree = self.parent()
+        if (
+            tree is not None
+            and index.column() == 0
+            and tree.indentation() > 0
+            and index.parent().isValid()
+        ):
+            self._draw_branches(painter, option, index, tree)
         super().paint(painter, option, index)
 
-        tree = self.parent()
-        if tree is None or index.column() != 0:
-            return
-
+    def _draw_branches(self, painter, option, index, tree) -> None:
         from PyQt6.QtGui import QColor, QPainter, QPen
 
-        view = tree
-        indent = view.indentation()
-        if indent <= 0:
-            return
+        indent = tree.indentation()
+        model = tree.model()
 
         depth = 0
         it = index.parent()
         while it.isValid():
             depth += 1
             it = it.parent()
-        if depth == 0:
-            return
 
-        # ══ 坐标系是关键 ══
-        # Qt 传给 delegate 的 painter 原点已经在 option.rect.topLeft()
-        # （即本行内容区起点，不含分支缩进槽）。画线必须全部用
-        # **相对内容区**的坐标，否则 QSS/Breeze 的 padding 一变，
-        # 线就整体错位 —— 之前用 visualRect 的 viewport 坐标混着
-        # 画，真实主题下线穿过箭头、父子断开。
-        #
-        # 分支槽布局（viewport 坐标）：
-        #   第 k 层槽 = [k*indent, (k+1)*indent)
-        #   本项（depth 层）的分支槽 = [(depth-1)*i, depth*i)
-        #   其中心相对内容区 = (depth-1)*indent + indent//2 - rect.x()
-        # 而 rect.x() 恰好 = depth*indent（内容从第 depth 槽开始），
-        # 所以本项槽中心相对 painter = -indent + indent//2。
-        # 外层槽 k 的中心相对 painter = (k - depth)*indent + indent//2。
-        rect_x = option.rect.x()
-        mid_y = option.rect.center().y()
+        rect = option.rect
+        mid_y = rect.center().y()
 
         col = QColor(option.palette.color(
             option.palette.ColorRole.WindowText
@@ -187,27 +191,34 @@ class TreeLineDelegate(QStyledItemDelegate):
         pen.setWidth(1)
         painter.setPen(pen)
 
-        has_next = index.row() < view.model().rowCount(
-            index.parent()
-        ) - 1 if index.parent().isValid() else False
+        def row_has_next(i) -> bool:
+            return i.row() < model.rowCount(i.parent()) - 1
 
-        # 从最外层到直接父层，逐槽画线
+        # 父链槽 0..depth-1：引导线。
+        # 延续条件与 QCommonStyle 的 State_Sibling 一致：
+        #   · 直接父层槽（depth-1）：本项后面还有兄弟 → 贯穿整行
+        #   · 更外层槽 k：第 k 层祖先还有兄弟 → 贯穿，否则止于本行中部
         for k in range(depth):
-            # 槽 k 的中心，相对 painter 原点
-            x = (k - depth) * indent + indent // 2
-            is_last = (k == depth - 1)
-            if is_last:
-                # 直接父层槽：本项的分支线
-                y_bottom = (
-                    option.rect.bottom() + 1 if has_next else mid_y
-                )
-                painter.drawLine(x, option.rect.top(), x, y_bottom)
-                # 横线接到内容起点（= painter x=0）
-                painter.drawLine(x, mid_y, 0, mid_y)
+            x = k * indent + indent // 2
+            if k < depth - 1:
+                ancestor = index
+                for _ in range(depth - 1 - k):
+                    ancestor = ancestor.parent()
+                cont = row_has_next(ancestor)
             else:
-                # 外层槽：路过线（本项之后的兄弟还要延续就贯穿）
-                painter.drawLine(x, option.rect.top(),
-                                 x, option.rect.bottom() + 1)
+                cont = row_has_next(index)
+            if cont:
+                painter.drawLine(x, rect.top(), x, rect.bottom() + 1)
+            else:
+                painter.drawLine(x, rect.top(), x, mid_y)
+
+        # 自己的拐角槽（depth）：└ 或 ├ + 横线接到内容起点
+        x = depth * indent + indent // 2
+        if row_has_next(index):
+            painter.drawLine(x, rect.top(), x, rect.bottom() + 1)
+        else:
+            painter.drawLine(x, rect.top(), x, mid_y)
+        painter.drawLine(x, mid_y, rect.x(), mid_y)
 
         painter.restore()
 

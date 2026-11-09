@@ -82,7 +82,16 @@ a = Analysis(
                 "imageformats/libqico.so",
                 "imageformats/libqjpeg.so",
                 "iconengines/libqsvgicon.so",
-                "styles/libqcleanlooksstyle.so",
+
+                # ── 原生外观的关键 ──
+                # 没有样式插件时 setStyle("Breeze") 静默失败，
+                # 应用回退到 Qt 内置 Fusion——控件/树分支线/箭头
+                # 全变成 Fusion 风格，和 Dolphin 的 Breeze 观感差异
+                # 很大。打包 Breeze 让打包版与 KDE 原生应用一致。
+                "styles/*breeze*.so",
+                # 平台主题：读 KDE 配色/字体/图标主题
+                # （kde_theme.py 设置的 QT_QPA_PLATFORMTHEME=kde 需要它）
+                "platformthemes/*KDEPlasma*",
             ],
         }
     },
@@ -99,17 +108,18 @@ a = Analysis(
 #     —— Qt 图像插件链拖进来的，我们只需要 jpeg/png/svg/ico
 #   · GTK 链（gtk-3/glycin/cairo/gio…）—— libqgtk3 平台主题
 #     的依赖，KDE 下走 xcb/wayland + kde 主题，不用 GTK
-#   · KF6BreezeIcons / KF6WidgetsAddons —— KDE 图标包
-#   · QtQuick/Qml/Pdf —— excludes 排了 Python 端，但 .so 仍被
-#     依赖扫描拖进来
+#   · 其余大块头 Qt 模块（Pdf/Designer/Help/Test/WebEngine…）
+#
+# 注意：KF6* 和 Qt6Quick/Qml **不能**排除——它们是 Breeze
+# 样式插件的链接依赖（ldd breeze6.so 可见），排掉后插件加载
+# 失败，打包版回退 Fusion，观感回到「和 Dolphin 不一样」。
 import re as _re
 
 _BIN_EXCLUDE = _re.compile(
     r"lib(x265|aom|SvtAv1Enc|x264|dav1d|rav1e|heif|jxl|gtk-3|glycin"
     r"|cairo|gio-2|glib-2|gobject-2|gmodule-2|gthread-2|pango"
-    r"|harfbuzz|KF6[A-Z]\w+"
     r"|openh264|xml2|pixman|ldap|lber|krb5|k5crypto|gssapi"
-    r"|Qt6Quick|Qt6Qml|Qt6Pdf|Qt6Designer|Qt6Help|Qt6Test"
+    r"|Qt6Pdf|Qt6Designer|Qt6Help|Qt6Test"
     r"|Qt6WebEngine|Qt6Multimedia|Qt6Bluetooth|Qt6Nfc|Qt6SerialPort"
     r"|Qt6Sensors|Qt6Positioning|Qt6Location|Qt6WebChannel)"
 )

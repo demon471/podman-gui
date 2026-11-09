@@ -64,11 +64,18 @@ class VMWizard(QDialog):
         self.setWindowTitle("新建虚拟机")
         self.resize(880, 620)
 
-        self._host = hostinfo.host_profile()
-        # 静态精选目录（零网络，瞬时显示）—— 动态全量目录
-        # （24+ 发行版）要拉镜像站索引，网络慢时会把「新建」
-        # 卡住数秒，改为后台拉取后刷新列表。
-        self._specs = list(images.CATALOG.values())
+        # 默认用户名（纯 Python，零开销）。不要在这里调
+        # host_profile()：它串行跑 timedatectl / localectl /
+        # resolvectl 三组 D-Bus 调用，systemd 会话冷启动时
+        # 第一次要 1~2s，正是「第一次点开新建卡住」的主因。
+        # 而向导实际只需要用户名这一项。
+        self._host_username = hostinfo.username()
+        # 镜像目录一次性加载：打开时显示「正在加载…」，目录就绪后
+        # 只填充一次。此前是「静态精选秒开 → 后台拉到完整目录后
+        # 原地重建列表和按钮」——用户正要点击时列表数据跳变
+        # （大类按钮增减、行位置移动），观感很差。
+        self._specs: list = []
+        self._images_loaded = False
 
         self._build_ui()
 
@@ -87,6 +94,12 @@ class VMWizard(QDialog):
             self._on_catalog_ready, _Qt.ConnectionType.QueuedConnection
         )
         self._refresh_catalog_async()
+
+        # 目录加载兜底：镜像站索引最坏 2×15s 超时，12s 还没回来
+        # 就先用静态精选目录填充（离线场景也走这里）；迟到的
+        # 动态目录会被 _on_catalog_ready 的一次性加载守卫忽略，
+        # 保证列表绝不中途跳变。
+        QTimer.singleShot(12000, self._catalog_timeout)
 
         self._goto_step(0)
         QTimer.singleShot(80, self._check_deps)
@@ -180,7 +193,7 @@ class VMWizard(QDialog):
         self.ed_name.setPlaceholderText("例如 ubuntu-dev、my-server")
         f1.addRow("虚拟机名称", self.ed_name)
 
-        self.ed_user = QLineEdit(self._host.username)
+        self.ed_user = QLineEdit(self._host_username)
         self.ed_user.setToolTip("虚拟机内的登录用户名")
         f1.addRow("登录用户名", self.ed_user)
 
@@ -223,6 +236,13 @@ class VMWizard(QDialog):
         v2.addLayout(fam_row)
 
         # 小类列表
+        # 目录未就绪时列表为空 + 一行居中提示，就绪后填充一次。
+        # 保持列表控件始终可见（不 hide），避免布局高度跳动。
+        self.lbl_img_loading = QLabel("正在加载镜像目录…")
+        self.lbl_img_loading.setObjectName("hintLabel")
+        self.lbl_img_loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v2.addWidget(self.lbl_img_loading)
+
         self.img_list = QListWidget()
         self.img_list.setAlternatingRowColors(True)
         self.img_list.currentRowChanged.connect(self._on_image_changed)
@@ -284,24 +304,30 @@ class VMWizard(QDialog):
     # 步骤 1：依赖
     # ─────────────────────────────────────────
     def _check_deps(self) -> None:
-        """检测依赖
+        """后台检测依赖
 
-        刻意在 UI 线程执行（不用 run_async）：deps.check_all() 内部
-        会跑多条 subprocess（lxc-start --version 等）。实测把这些 subprocess 放在 BackgroundTask 的工作线程里执行，
-        会与 Qt 事件循环冲突并触发 QMessageLogger::fatal，整个进程 abort。
-        检测本身很快（几十毫秒），在 UI 线程延迟到界面渲染完再跑即可。
+        deps.check_all() 要串行跑 8 条 --version 子进程，
+        冷启动时一次 fork+exec 几十毫秒，全放 UI 线程会把
+        刚弹出的窗口冻住几百毫秒（首次打开尤其明显）。
+
+        工作线程跑 subprocess 本身没有问题 —— 本文件的
+        _install_deps、manager.create_vm 都在工作线程跑
+        subprocess；之前观察到 abort 的根因是工作线程直接
+        碰控件，run_async 的 QueuedConnection 已规避。
         """
-        # 检测开始时保持隐藏；只有缺失时才显示提示行
-        self.dep_row_widget.hide()
-        QTimer.singleShot(0, self._do_check_deps)
+        # 检测期间显示「正在检查…」，完成后按结果渲染
+        self.lbl_dep.setText("正在检查运行环境…")
+        self.lbl_dep.setStyleSheet("")
+        self.dep_row_widget.show()
+        self.btn_install.hide()
 
-    def _do_check_deps(self) -> None:
-        try:
-            results = deps.check_all()
-        except Exception as e:
-            self._fail(f"检测失败：{e}")
-            return
+        self._spawn(
+            deps.check_all,
+            self._after_check_deps,
+            lambda msg: self._fail(f"检测失败：{msg}"),
+        )
 
+    def _after_check_deps(self, results) -> None:
         self._dep_results = results
         self._dep_ok = deps.ready_for_vm(results)
         self._render_deps()
@@ -325,7 +351,6 @@ class VMWizard(QDialog):
             self.dep_row_widget.hide()
             self.btn_next.setEnabled(not self._busy)
             self.lbl_error.hide()
-            self._populate_images()
             return
 
         # 有必需依赖缺失：显示提示行和安装按钮
@@ -417,7 +442,11 @@ class VMWizard(QDialog):
     ]
 
     def _refresh_catalog_async(self) -> None:
-        """后台拉完整镜像目录（含索引网络请求）"""
+        """后台拉完整镜像目录（含索引网络请求）
+
+        无论成功失败都发 _sig_catalog：离线时 list_images()
+        回落静态精选目录，照常填充一次。
+        """
         from core.async_task import run_async
 
         def work():
@@ -425,35 +454,32 @@ class VMWizard(QDialog):
             return list(images.list_images())
 
         def done(specs):
-            # 只有比静态目录多才算有收获（离线时返回的也是静态）
-            if len(specs) > len(self._specs):
-                self._sig_catalog.emit(specs)
+            self._sig_catalog.emit(specs)
 
         self._tasks.append(
             run_async(work, on_done=done,
-                      on_error=lambda _m: None, parent=self)
+                      on_error=lambda _m: self._catalog_timeout(),
+                      parent=self)
         )
 
+    def _catalog_timeout(self) -> None:
+        """兜底：目录迟迟未回（离线/网络慢）就用静态精选填充"""
+        if not self._images_loaded:
+            self._sig_catalog.emit(list(images.CATALOG.values()))
+
     def _on_catalog_ready(self, specs: list) -> None:
-        """动态目录就绪：刷新大类按钮与版本列表"""
-        current = self._current_spec()
-        current_key = current.key if current else None
+        """目录就绪：一次性填充列表与按钮
+
+        一次性加载守卫：之后的迟到目录一律忽略，
+        用户操作期间列表数据绝不跳变。
+        """
+        if self._images_loaded:
+            return
+        self._images_loaded = True
 
         self._specs = specs
-        for b in self._fam_buttons:
-            self._fam_layout.removeWidget(b)
-            b.deleteLater()
-        self._fam_buttons.clear()
-        self.img_list.clear()
+        self.lbl_img_loading.hide()
         self._populate_images()
-
-        # 恢复用户之前选中的镜像
-        if current_key:
-            for r in range(self.img_list.count()):
-                if (self.img_list.item(r).data(
-                        Qt.ItemDataRole.UserRole) == current_key):
-                    self.img_list.setCurrentRow(r)
-                    break
 
     def _populate_images(self) -> None:
         """按大类分组填充：先横向大类按钮，列表只显示该类版本"""
@@ -510,15 +536,23 @@ class VMWizard(QDialog):
         self._on_image_changed(0 if items else -1)
 
     def _current_spec(self):
-        row = self.img_list.currentRow()
-        if row < 0 or row >= len(self._specs):
+        """当前选中的镜像
+
+        必须从列表项的 UserRole 读 spec.key 再查目录——列表显示
+        的是当前大类的过滤子集，行号不能直接当 self._specs 索引
+        用（旧实现返回错镜像，选中第 2 行可能创建第 2 个发行版）。
+        """
+        it = self.img_list.currentItem()
+        if it is None:
             return None
-        return self._specs[row]
+        return images.get_spec(it.data(Qt.ItemDataRole.UserRole))
 
     def _on_image_changed(self, _row: int) -> None:
-        # 界面不再显示镜像详情，选中变化只需刷新按钮状态
-        if self._current_spec() is not None:
-            self.btn_next.setEnabled(True)
+        # 选中镜像只在依赖就绪时才允许创建
+        self.btn_next.setEnabled(
+            self._dep_ok and not self._busy
+            and self._current_spec() is not None
+        )
 
 
 

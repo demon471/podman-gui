@@ -272,16 +272,33 @@ QFrame#listCard QScrollBar:horizontal {{
     background-color: {base};
 }}
 
-/* 树的行高由行内文字决定；加 padding 会让分支连线错位，
-   所以树单独不给内边距 */
+/* ═══════════ 树（Compose 项目/服务）═══════════
+   QSS 给 ::item 的 padding 会把 Breeze 原生分支线整体推偏
+   同样的距离（横线戳进图标区、引导线伸进相邻行，实测偏移
+   恰好 = 水平内边距 8px），所以树必须零内边距，行高用
+   min-height 维持；引导线 / └ 拐角由 Compose 页的
+   TreeLineDelegate 自绘（见下一条 branch 规则）。 */
 QTreeView, QTreeWidget {{
     show-decoration-selected: 0;
 }}
 
-QTableView::item, QTableWidget::item, QTreeView::item, QListView::item {{
+QTableView::item, QTableWidget::item, QListView::item {{
     padding: 4px 8px;
     border: none;
     min-height: 24px;
+}}
+
+QTreeView::item, QTreeWidget::item {{
+    padding: 0px;
+    border: none;
+    min-height: 24px;
+}}
+
+/* 压掉 Breeze 原生引导线 / └ 拐角（它们在 QSS 下几何不可控）。
+   只压无子节点的槽位：展开箭头画在 :has-children 槽位，
+   不加规则就保留原生箭头。 */
+QTreeView::branch:!has-children, QTreeWidget::branch:!has-children {{
+    background: transparent;
 }}
 
 QTableView::item:selected, QTableWidget::item:selected,
