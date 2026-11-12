@@ -333,6 +333,99 @@ def restart_podman_socket() -> tuple[bool, str]:
         return False, str(e)
 
 
+def podman_installed() -> bool:
+    """是否安装了 podman 可执行文件"""
+    import shutil
+
+    return shutil.which("podman") is not None
+
+
+def podman_version() -> str:
+    """podman 版本号（取不到返回空串）"""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["podman", "--version"], capture_output=True, text=True, timeout=8
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    out = (r.stdout or "").strip()
+    # 形如 "podman version 5.4.2"
+    return out.split()[-1] if out else ""
+
+
+def install_podman() -> tuple[bool, str]:
+    """引导安装 podman（按发行版调用包管理器）
+
+    用 pkexec 弹系统授权框，不需要用户自己开终端。
+    """
+    import subprocess
+
+    from core.vm import deps
+
+    distro = deps.detect_distro()
+    pkgs = "podman"
+
+    # 非交互参数：没有 TTY 时包管理器会卡在确认提示上
+    cmds = {
+        "arch": f"pacman -S --needed --noconfirm {pkgs}",
+        "debian": f"apt-get install -y {pkgs}",
+        "fedora": f"dnf install -y {pkgs}",
+    }
+    inner = cmds.get(distro)
+    if not inner:
+        label = deps.DISTRO_LABELS.get(distro, distro)
+        return False, (
+            f"无法自动识别发行版（{label}），请手动安装 podman。"
+        )
+
+    try:
+        r = subprocess.run(
+            ["pkexec", "sh", "-c", inner],
+            capture_output=True, text=True, timeout=600,
+        )
+    except FileNotFoundError:
+        return False, "系统缺少 pkexec（polkit），请手动安装 podman。"
+    except subprocess.TimeoutExpired:
+        return False, "安装超时，请手动安装 podman。"
+
+    if r.returncode == 0 and podman_installed():
+        return True, "Podman 安装完成"
+
+    detail = (r.stderr or r.stdout or "").strip().splitlines()
+    tail = " / ".join(detail[-3:])[:300] if detail else "未知错误"
+    if r.returncode in (126, 127):
+        tail = "已取消授权"
+    return False, tail
+
+
+def ensure_user_service() -> tuple[bool, str]:
+    """确保用户级 podman.socket 已启用并在运行（幂等）
+
+    应用启动时调用：用户不需要知道 systemd 的存在，
+    打开软件就能用。
+    """
+    import subprocess
+
+    if not podman_installed():
+        return False, "未安装 podman"
+
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", "podman.socket"],
+            capture_output=True, text=True, timeout=25,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+
+    if res.returncode == 0:
+        return True, ""
+
+    detail = (res.stderr or res.stdout or "").strip()[:300]
+    return False, detail or "systemctl 返回非零"
+
+
 def socket_status() -> tuple[bool, str]:
     """检查 podman.socket 状态"""
     try:
@@ -647,27 +740,31 @@ def _diagnose_service_failure() -> str:
 # 设置 mem_limit。这里在「启动容器」前预检查：
 #   已运行容器 mem_limit 之和 + 本次要启动的 limit > 阈值 → 拒绝启动
 #
-# 阈值保存在 QSettings（不写入 Podman 配置），默认 0 表示不限制。
+# 阈值保存在 SQLite（不写入 Podman 配置），默认 0 表示不限制。
+# 容器与虚拟机共用这个内存预算。
 # ─────────────────────────────────────────
 
-def get_memory_limit_gb() -> float:
-    """读取用户设置的内存阈值（GB，0 表示不限制）"""
-    from PyQt6.QtCore import QSettings
+MEMORY_LIMIT_KEY = "limits/memory_gb"
 
-    s = QSettings("podman-gui", "podman-gui")
+
+def get_memory_limit_gb() -> float:
+    """读取用户设置的内存阈值（GB，0 表示不限制）
+
+    存 SQLite（core.state）。容器与虚拟机共用这个预算。
+    """
+    from core import state
+
     try:
-        return float(s.value("limits/memory_gb", 0) or 0)
+        return float(state.get_setting(MEMORY_LIMIT_KEY, 0) or 0)
     except (TypeError, ValueError):
         return 0.0
 
 
 def set_memory_limit_gb(gb: float) -> None:
     """保存内存阈值（GB，0 表示不限制）"""
-    from PyQt6.QtCore import QSettings
+    from core import state
 
-    s = QSettings("podman-gui", "podman-gui")
-    s.setValue("limits/memory_gb", float(gb))
-    s.sync()
+    state.set_setting(MEMORY_LIMIT_KEY, float(gb))
 
 
 def container_memory_bytes(info: dict) -> int:
@@ -685,12 +782,16 @@ def compute_usage(client) -> dict:
     返回:
         {
             "limit_gb":   阈值（GB，0=不限制）,
-            "declared_gb": 所有运行容器 mem_limit 之和（GB）,
-            "actual_gb":  实际占用（GB，来自 cgroup）,
+            "declared_gb": 运行容器 mem_limit 之和（GB）,
+            "actual_gb":  实际占用（容器 cgroup）（GB）,
             "host_gb":    整机内存（GB）,
             "containers": [{"name","state","limit_gb","actual_gb"}...],
+            "vms":        []（容器档恒为空，兼容图表接口）,
             "unlimited":  [无 mem_limit 的容器名],
         }
+
+    机器（LXC 容器）共享宿主内核，没有独立内存预算；
+    它们的磁盘占用在「设置 → 存储」统计。
     """
     out = {
         "limit_gb": get_memory_limit_gb(),
@@ -698,6 +799,7 @@ def compute_usage(client) -> dict:
         "actual_gb": 0.0,
         "host_gb": 0.0,
         "containers": [],
+        "vms": [],
         "unlimited": [],
     }
 
@@ -712,11 +814,19 @@ def compute_usage(client) -> dict:
     except (OSError, ValueError, IndexError):
         pass
 
+    # 容器档共享宿主内核，没有独立内存预算可统计；
+    # VM 贡献清零（memory_mb 仅为 SQLite 列兼容保留）。
+    # 容器档共享宿主内核：没有独立内存预算（memory_mb 仅是
+    # SQLite 列兼容残留，恒为 0），也不再有 QEMU 进程 RSS 可读。
+    # 运行中容器的真实内存占用由下方 cgroup 统计覆盖；
+    # 机器的磁盘占用在「设置 → 存储」里按目录大小统计。
+    # （这里不再统计任何 VM/机器内存 —— vms 列表恒为空。）
+
     # 各容器
     try:
         ctrs = client.list_containers(all=True)
     except Exception:
-        return out
+        ctrs = []
 
     for c in ctrs:
         name = (c.get("Names") or ["?"])[0]
@@ -742,12 +852,17 @@ def compute_usage(client) -> dict:
                 except (OSError, ValueError):
                     continue
 
+        # compose 项目归属（docker-compose / podman-compose 都会打这个标签）
+        labels = (info.get("Config") or {}).get("Labels") or {}
+        project = labels.get("com.docker.compose.project") or ""
+
         out["containers"].append({
             "name": name,
             "state": state,
             "limit_gb": limit_gb,
             "actual_gb": actual_gb,
             "unlimited": limit == 0,
+            "project": project,
         })
 
         if state == "running":
@@ -756,6 +871,7 @@ def compute_usage(client) -> dict:
             if limit == 0:
                 out["unlimited"].append(name)
 
+    # VM 的声明/实际并入总量（与容器同一预算）
     return out
 
 

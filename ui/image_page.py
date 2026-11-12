@@ -55,12 +55,6 @@ class ImagePage(ResourcePage):
     def empty_hint(self) -> str:
         return "可以拉取镜像，或用「构建」从 Dockerfile 创建。"
 
-    def empty_action_text(self) -> str:
-        return "拉取镜像"
-
-    def empty_action(self):
-        return self._pull
-
     def item_id(self, item: dict) -> str:
         return item.get("Id", "")
 

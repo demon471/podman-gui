@@ -209,7 +209,7 @@ class SystemPage(QWidget):
             self.status_message.emit(f"加载失败: {msg}")
 
         task = run_async(load, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _apply(self, d: dict) -> None:

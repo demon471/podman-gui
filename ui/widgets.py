@@ -12,13 +12,24 @@ Qt 原生滚动条无法"不滚动时淡出"，这里通过覆写 QPlainTextEdit
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPropertyAnimation, QTimer, Qt, pyqtProperty
-from PyQt6.QtGui import QColor, QPainter, QPalette
+from PyQt6.QtCore import (
+    QPropertyAnimation,
+    QRect,
+    QTimer,
+    Qt,
+    pyqtProperty,
+)
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -345,10 +356,192 @@ def ask_text(
 # 空状态提示
 # ─────────────────────────────────────────
 
+class AlignedItemDelegate(QStyledItemDelegate):
+    """让列表里的图标与文字视觉居中对齐
+
+    问题：Qt 把图标按「单元格矩形」垂直居中，文字却按字体基线
+    居中。字体有下伸部（p/g/_ 等），文字的视觉中心被拉低，
+    于是图标总是比文字高 2–3px —— 表格里一眼就能看出来。
+
+    做法：先让基类照常画背景和文字（临时把图标换成透明占位，
+    保留横向留白），再用样式算出的装饰矩形把真实图标画在
+    「文字的视觉中心」高度上。
+    """
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        # 记住视图：subElementRect 必须传一个真实 widget，
+        # 传 None 会返回空矩形（那样就等于没生效）
+        self._view = view
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        icon = opt.icon
+        if icon.isNull():
+            super().paint(painter, option, index)
+            return
+
+        view = self._view if self._view is not None else opt.widget
+        style = view.style() if view is not None else QApplication.style()
+        # 样式算出的真实装饰矩形：横向位置和尺寸都与 Qt 完全一致
+        deco = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemDecoration, opt, view
+        )
+        if deco.width() <= 0 or deco.height() <= 0:
+            super().paint(painter, option, index)
+            return
+
+        # 1) 背景 + 文字：用透明占位图标保留横向留白。
+        #    这里必须直接调 style.drawControl —— 不能调 super().paint()，
+        #    因为 QStyledItemDelegate.paint 内部会重新 initStyleOption，
+        #    把图标又装回去，导致画两个图标。
+        blank = QPixmap(deco.size())
+        blank.fill(Qt.GlobalColor.transparent)
+        text_opt = QStyleOptionViewItem(opt)
+        text_opt.icon = QIcon(blank)
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, text_opt, painter, view
+        )
+
+        # 2) 自己把图标画在「文字的视觉中心」高度上
+        fm = opt.fontMetrics
+        text_top = opt.rect.top() + (opt.rect.height() - fm.height()) // 2
+        baseline = text_top + fm.ascent()
+        # 用 capHeight（大写字母高度）而不是 xHeight 来定视觉中心：
+        # 列表里多是 nginx_web / pod_compose 这种带升部的名字，
+        # 只按小写字母高度对齐会让图标明显偏低（看起来「下沉」）。
+        visual_center = baseline - fm.capHeight() / 2.0
+
+        # 向上取整：图标字形在自身方框里略微偏下（约 0.5px），
+        # 用 ceil 让「墨迹中心」而不是「方框中心」落在文字中心上
+        import math
+
+        y = int(math.ceil(visual_center - deco.height() / 2.0))
+        # 不允许画出单元格
+        y = max(opt.rect.top(),
+                min(y, opt.rect.bottom() - deco.height() + 1))
+        target = QRect(deco.left(), y, deco.width(), deco.height())
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            # 选中行：图标要跟着文字变高亮色，否则深色图标
+            # 压在蓝底上几乎看不见
+            painter.drawPixmap(target, _tint_icon(icon, deco.size(),
+                                                  opt.palette.highlightedText().color()))
+        else:
+            icon.paint(painter, target)
+
+
+def _tint_icon(icon, size, color) -> QPixmap:
+    """把图标整体染成指定颜色（保留透明度）
+
+    QIcon 自身不认识「选中态」颜色，主题引擎只按窗口前景色渲染，
+    所以选中行必须自己染色，否则深色图标压在选中蓝底上看不清。
+    """
+    src_pm = icon.pixmap(size)
+    out = QPixmap(src_pm.size())
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.drawPixmap(0, 0, src_pm)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(out.rect(), color)
+    p.end()
+    return out
+
+
+def apply_aligned_delegate(view) -> None:
+    """给列表/表格装上下图标对齐的委托（幂等）"""
+    if isinstance(view.itemDelegate(), AlignedItemDelegate):
+        return
+    view.setItemDelegate(AlignedItemDelegate(view))
+
+
+def apply_dialog_geometry(dialog, *, width_ratio: float = 0.44,
+                          height_ratio: float = 0.50,
+                          min_w: int = 680, min_h: int = 460) -> None:
+    """按屏幕百分比给对话框定初始尺寸并居中
+
+    主窗口用 50%×56%；对话框是「子视图」，应当比主窗口更小更窄，
+    所以默认取 44%×50%。固定像素在小屏上会超出、大屏上又太小。
+    """
+    from PyQt6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.screenAt(
+        dialog.pos()
+    ) or QGuiApplication.primaryScreen()
+    if screen is None:
+        dialog.resize(min_w, min_h)
+        return
+
+    avail = screen.availableGeometry()
+    w = max(min_w, int(avail.width() * width_ratio))
+    h = max(min_h, int(avail.height() * height_ratio))
+    # 别超出可用区域
+    w = min(w, avail.width() - 40)
+    h = min(h, avail.height() - 80)
+
+    dialog.resize(w, h)
+
+    # 优先相对父窗口居中，没有父窗口就居中屏幕
+    parent = dialog.parentWidget()
+    if parent is not None and parent.isVisible():
+        g = parent.frameGeometry()
+        dialog.move(
+            g.x() + (g.width() - w) // 2,
+            g.y() + (g.height() - h) // 2,
+        )
+    else:
+        dialog.move(
+            avail.x() + (avail.width() - w) // 2,
+            avail.y() + (avail.height() - h) // 2,
+        )
+
+
+class ListCard(QFrame):
+    """把表格/列表包进圆角白底卡片
+
+    为什么不能只给 QTableView 加 border-radius：
+      · QAbstractScrollArea 的 viewport 是方形子控件，会用自己的
+        底色把圆角盖掉
+      · 表头（QHeaderView）同样会画满整个矩形，连左上角也不放过
+    所以只能外面套一层卡片，内部的表格、表头、角落按钮全部改成
+    透明；表头首尾两节自己带圆角，否则上边的圆角会被表头盖成方的。
+    """
+
+    def __init__(self, content: QWidget, padding: int = 0,
+                 parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("listCard")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(padding, padding, padding, padding)
+        v.setSpacing(0)
+        v.addWidget(content)
+        self.content = content
+
+
+def make_list_card(content, padding: int = 0) -> ListCard:
+    """content 可以是控件，也可以是布局（如 QStackedLayout）"""
+    if isinstance(content, QWidget):
+        host = content
+    else:
+        host = QWidget()
+        host.setLayout(content)
+    return ListCard(host, padding)
+
+
 class EmptyState(QWidget):
     """列表空状态
 
-    居中显示：大图标 + 主标题 + 副说明 + 可选操作按钮
+    只显示：大图标 + 主标题（+ 可选的单行副说明）。
+
+    刻意不带操作按钮：
+      · 空状态里的按钮和工具栏上的按钮重复，还多占一块视觉重量
+      · 「可以点下方按钮查看可用镜像…」这类文字是在教用户用界面，
+        而按钮就在工具栏上，一眼就能看到
+
+    副说明只留给「不是空、而是出错」的场景（比如 Podman 断开），
+    那种情况下用户确实需要知道该怎么办。
     """
 
     def __init__(
@@ -356,65 +549,45 @@ class EmptyState(QWidget):
         icon_name: str = "info",
         title: str = "暂无数据",
         subtitle: str = "",
-        action_text: str = "",
-        on_action=None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setObjectName("emptyState")
+        # 普通 QWidget 默认不绘制 QSS 背景，必须打开这个属性，
+        # 否则圆角白底卡片完全不显示
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(24, 24, 24, 24)
         v.setSpacing(10)
         v.addStretch(1)
 
-        # 图标
         from resources.icons import icon
 
         self._icon_label = QLabel()
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon_label.setPixmap(
-            icon(icon_name, 48).pixmap(48, 48)
-        )
+        self._icon_label.setPixmap(icon(icon_name, 48).pixmap(48, 48))
         self._icon_label.setObjectName("emptyIcon")
         v.addWidget(self._icon_label)
 
-        # 标题
         self._title = QLabel(title)
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setObjectName("emptyTitle")
         v.addWidget(self._title)
 
-        # 副说明
-        if subtitle:
-            self._subtitle = QLabel(subtitle)
-            self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._subtitle.setObjectName("emptySubtitle")
-            self._subtitle.setWordWrap(True)
-            v.addWidget(self._subtitle)
-        else:
-            self._subtitle = None
-
-        # 操作按钮
-        if action_text and on_action:
-            row = QHBoxLayout()
-            row.addStretch()
-            btn = QPushButton(action_text)
-            btn.clicked.connect(on_action)
-            row.addWidget(btn)
-            row.addStretch()
-            v.addSpacing(6)
-            v.addLayout(row)
-            self._action_btn = btn
-        else:
-            self._action_btn = None
+        self._subtitle = QLabel(subtitle)
+        self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._subtitle.setObjectName("emptySubtitle")
+        self._subtitle.setWordWrap(True)
+        self._subtitle.setVisible(bool(subtitle))
+        v.addWidget(self._subtitle)
 
         v.addStretch(1)
 
     def set_text(self, title: str, subtitle: str = "") -> None:
         self._title.setText(title)
-        if self._subtitle is not None:
-            self._subtitle.setText(subtitle)
+        self._subtitle.setText(subtitle)
+        self._subtitle.setVisible(bool(subtitle))
 
 
 def install_empty_state(
@@ -423,9 +596,6 @@ def install_empty_state(
     *,
     icon_name: str = "info",
     title: str = "暂无数据",
-    subtitle: str = "",
-    action_text: str = "",
-    on_action=None,
 ) -> EmptyState:
     """把空状态叠加到表格上（表格隐藏时显示）
 
@@ -436,9 +606,6 @@ def install_empty_state(
     state = EmptyState(
         icon_name=icon_name,
         title=title,
-        subtitle=subtitle,
-        action_text=action_text,
-        on_action=on_action,
         parent=table_widget.parentWidget(),
     )
     # 直接作为兄弟控件插入布局

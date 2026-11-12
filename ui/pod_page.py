@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QToolBar
 
 from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
-from resources.icons import icon
+from resources.icons import icon, state_icon
 from ui.widgets import ask_text
 from ui.resource_page import ResourcePage
 from ui.utils import fmt_time
@@ -75,12 +75,6 @@ class PodPage(ResourcePage):
 
     def empty_hint(self) -> str:
         return "Pod 是一组共享网络命名空间的容器。\n常用于需要 localhost 互通的场景。"
-
-    def empty_action_text(self) -> str:
-        return "新建 Pod"
-
-    def empty_action(self):
-        return self._create
 
     def item_id(self, item: dict) -> str:
         return item.get("Id", "")

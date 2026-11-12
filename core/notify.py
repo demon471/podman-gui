@@ -18,7 +18,7 @@ from pathlib import Path
 from core.config import APP_ID, APP_NAME
 
 # 图标缓存目录
-_ICON_DIR = Path.home() / ".cache" / "podman-gui" / "icons"
+_ICON_DIR = Path.home() / ".cache" / "podbox" / "icons"
 
 
 class Notifier:

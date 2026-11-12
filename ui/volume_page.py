@@ -40,12 +40,6 @@ class VolumePage(ResourcePage):
     def empty_hint(self) -> str:
         return "命名卷用于持久化容器数据。\n可以在启动容器时用 -v 卷名:/路径 挂载。"
 
-    def empty_action_text(self) -> str:
-        return "新建卷"
-
-    def empty_action(self):
-        return self._create
-
     def item_id(self, item: dict) -> str:
         return item.get("Name", "")
 

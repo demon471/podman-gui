@@ -16,6 +16,7 @@ from pathlib import Path
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PyQt6.QtWidgets import (
+    QStyledItemDelegate,
     QApplication,
     QFrame,
     QDialog,
@@ -48,7 +49,7 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.podman_client import PodmanClient
 from resources.icons import ICON_SIZE_TOOLBAR, icon, state_icon
-from ui.widgets import AutoHidePlainTextEdit, ask_text
+from ui.widgets import make_list_card, apply_aligned_delegate, AutoHidePlainTextEdit, ask_text
 
 # 默认根目录（可在界面切换，记住到 QSettings）
 DEFAULT_COMPOSE_ROOT = "/data"
@@ -128,6 +129,100 @@ class YamlHighlighter(QSyntaxHighlighter):
         for m in re.finditer(r"\b\d+(\.\d+)?\b", text):
             self.setFormat(m.start(), m.end() - m.start(), self.fmt_num)
 
+class TreeLineDelegate(QStyledItemDelegate):
+    """在树的第一列自绘分支连线（├ / └ / 引导线）
+
+    QSS 已压掉 Breeze 原生的引导线（style.py 的
+    ::branch:!has-children 规则），展开箭头仍由原生绘制；
+    连线在这里补上，几何完全可控。
+
+    ══ 坐标系（PyQt6 + Breeze 实测）══
+    Qt 传给 delegate 的 painter 原点是 **viewport 原点**，
+    与 option.rect 同一坐标系 —— 不是 option.rect.topLeft()
+    （9fe0022 当时的注释搞错了这一点，线全部画到负坐标上
+    不可见，实际显示的是被 QSS padding 推偏的原生线）。
+
+    缩进槽布局（rootIsDecorated=True，viewport 坐标）：
+      · 第 k 层槽 = [k*indent, (k+1)*indent)
+      · depth 层项的内容从 (depth+1)*indent 开始（顶层也占
+        一个箭头槽），即 option.rect.x() = (depth+1)*indent
+      · 槽 k 中心 x = k*indent + indent//2
+      · 父链槽 = 0..depth-1（引导线），自己的拐角槽 = depth
+
+    线画在 super().paint() **之前**：内容/选中高亮盖在线上，
+    不会出现深色分支线压在蓝色选中条上（与 QTreeView
+    drawRow 先画分支后画 item 的顺序一致）。
+    """
+
+    def paint(self, painter, option, index) -> None:
+        tree = self.parent()
+        if (
+            tree is not None
+            and index.column() == 0
+            and tree.indentation() > 0
+            and index.parent().isValid()
+        ):
+            self._draw_branches(painter, option, index, tree)
+        super().paint(painter, option, index)
+
+    def _draw_branches(self, painter, option, index, tree) -> None:
+        from PyQt6.QtGui import QColor, QPainter, QPen
+
+        indent = tree.indentation()
+        model = tree.model()
+
+        depth = 0
+        it = index.parent()
+        while it.isValid():
+            depth += 1
+            it = it.parent()
+
+        rect = option.rect
+        mid_y = rect.center().y()
+
+        col = QColor(option.palette.color(
+            option.palette.ColorRole.WindowText
+        ))
+        col.setAlpha(70)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(col)
+        pen.setWidth(1)
+        painter.setPen(pen)
+
+        def row_has_next(i) -> bool:
+            return i.row() < model.rowCount(i.parent()) - 1
+
+        # 父链槽 0..depth-1：引导线。
+        # 延续条件与 QCommonStyle 的 State_Sibling 一致：
+        #   · 直接父层槽（depth-1）：本项后面还有兄弟 → 贯穿整行
+        #   · 更外层槽 k：第 k 层祖先还有兄弟 → 贯穿，否则止于本行中部
+        for k in range(depth):
+            x = k * indent + indent // 2
+            if k < depth - 1:
+                ancestor = index
+                for _ in range(depth - 1 - k):
+                    ancestor = ancestor.parent()
+                cont = row_has_next(ancestor)
+            else:
+                cont = row_has_next(index)
+            if cont:
+                painter.drawLine(x, rect.top(), x, rect.bottom() + 1)
+            else:
+                painter.drawLine(x, rect.top(), x, mid_y)
+
+        # 自己的拐角槽（depth）：└ 或 ├ + 横线接到内容起点
+        x = depth * indent + indent // 2
+        if row_has_next(index):
+            painter.drawLine(x, rect.top(), x, rect.bottom() + 1)
+        else:
+            painter.drawLine(x, rect.top(), x, mid_y)
+        painter.drawLine(x, mid_y, rect.x(), mid_y)
+
+        painter.restore()
+
+
 class ComposePage(QWidget):
     """Compose 项目管理"""
 
@@ -167,10 +262,6 @@ class ComposePage(QWidget):
             self.act_pull.setIcon(icon("down"))
         if hasattr(self, 'act_logs'):
             self.act_logs.setIcon(icon("log"))
-        if hasattr(self, 'act_save'):
-            self.act_save.setIcon(icon("save"))
-        if hasattr(self, 'act_refresh'):
-            self.act_refresh.setIcon(icon("refresh"))
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -190,13 +281,10 @@ class ComposePage(QWidget):
         self.act_new.triggered.connect(self._new_project)
         tb.addAction(self.act_new)
 
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        self.act_delete = QAction(icon("delete"), "删除", self)
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.triggered.connect(self._delete_project)
         tb.addAction(self.act_delete)
-        _btn = tb.widgetForAction(self.act_delete)
-        if _btn is not None:
-            _btn.setObjectName("dangerDelete")
 
         self.act_up = QAction(icon("play"), "启动", self)
 
@@ -228,28 +316,11 @@ class ComposePage(QWidget):
         self.act_logs.triggered.connect(self._show_logs)
         tb.addAction(self.act_logs)
 
-        self.act_save = QAction(icon("save"), "保存", self)
-
-        self.act_save.setProperty("iconName", "save")
-        self.act_save.triggered.connect(self._save_yaml)
-        tb.addAction(self.act_save)
-
-        self.act_refresh = QAction(icon("refresh"), "刷新", self)
-
-        self.act_refresh.setProperty("iconName", "refresh")
-        self.act_refresh.triggered.connect(self.refresh)
-        tb.addAction(self.act_refresh)
-
-        tb.addWidget(QLabel("根目录:"))
-        self.ed_root = QLineEdit(str(self.root))
-        self.ed_root.setFixedWidth(200)
-        self.ed_root.setFixedHeight(26)
-        self.ed_root.returnPressed.connect(self._on_root_changed)
-        tb.addWidget(self.ed_root)
-
-        act_browse = QAction(icon("folder"), "浏览", self)
-        act_browse.triggered.connect(self._browse_root)
-        tb.addAction(act_browse)
+        # 「保存 / 刷新 / 根目录 / 浏览」已移除：
+        #   · 保存：YAML 编辑器已改为自动保存（切走/失焦时落盘）
+        #   · 刷新：项目列表本来就定时刷新，页面切换也会刷
+        #   · 根目录：几乎不会改，改也是去设置里一次搞定
+        # 工具栏只留真正会反复用的操作，一行放下不挤。
 
         layout.addWidget(tb)
 
@@ -259,13 +330,19 @@ class ComposePage(QWidget):
         # 左侧：项目树
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(0)
+        lv.setContentsMargins(8, 8, 4, 8)
+        lv.setSpacing(6)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["项目 / 服务", "状态"])
         self.tree.setRootIsDecorated(True)
-        self.tree.setAlternatingRowColors(True)
+        # 交替行底色会让树的分支连线看起来断成一截一截
+        self.tree.setAlternatingRowColors(False)
+        self.tree.setIndentation(18)
+        self.tree.setUniformRowHeights(True)
+        # 自己画分支线：QSS 的 ::branch 规则在不同 Breeze 版本下
+        # 表现不一致（要么断线要么丢箭头），自绘最稳
+        self.tree.setItemDelegate(TreeLineDelegate(self.tree))
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setFrameShape(QTreeWidget.Shape.NoFrame)
         self.tree.header().setFixedHeight(26)
@@ -277,7 +354,8 @@ class ComposePage(QWidget):
         self.tree.itemDoubleClicked.connect(self._on_tree_double_click)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_context_menu)
-        lv.addWidget(self.tree)
+        # 与其他列表统一：圆角白底卡片
+        lv.addWidget(make_list_card(self.tree), 1)
 
         self.lbl_stats = QLabel("")
         self.lbl_stats.setObjectName("hintLabel")
@@ -312,10 +390,19 @@ class ComposePage(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # 项目信息
-        grp = QGroupBox("项目信息")
-        f = QFormLayout(grp)
-        f.setContentsMargins(12, 14, 12, 10)
+        # 项目信息：标题在卡片外，卡片只装内容
+        t1 = QLabel("项目信息")
+        t1.setObjectName("sectionTitle")
+        layout.addWidget(t1)
+
+        grp = QFrame()
+        grp.setObjectName("card")
+        gv = QVBoxLayout(grp)
+        gv.setContentsMargins(16, 12, 16, 14)
+        gv.setSpacing(0)
+
+        f = QFormLayout()
+        f.setContentsMargins(0, 0, 0, 0)
         f.setSpacing(6)
         self.lbl_name = QLabel("—")
         self.lbl_name.setTextInteractionFlags(
@@ -337,18 +424,30 @@ class ComposePage(QWidget):
         self.ed_data.setFrame(False)
         self.ed_data.setStyleSheet("background: transparent; padding: 0;")
         f.addRow("数据目录:", self.ed_data)
+        gv.addLayout(f)
         layout.addWidget(grp)
 
-        # 服务表格
-        grp2 = QGroupBox("服务")
+        # 服务：标题在卡片外，卡片只装表格
+        t2 = QLabel("服务")
+        t2.setObjectName("sectionTitle")
+        layout.addWidget(t2)
+
+        grp2 = QFrame()
+        # 用 listCard：表格贴边不留缝，表头首尾自带圆角
+        grp2.setObjectName("listCard")
         g2 = QVBoxLayout(grp2)
-        g2.setContentsMargins(12, 14, 12, 10)
+        g2.setContentsMargins(0, 0, 0, 0)
+        g2.setSpacing(0)
 
         self.tbl_svc = QTableWidget(0, 5)
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.tbl_svc)
         self.tbl_svc.setHorizontalHeaderLabels(
-            ["服务", "状态", "镜像", "端口", "容器名"]
+            ["服务", "状态", "镜像", "端口", "内存"]
         )
         self.tbl_svc.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.tbl_svc.setCornerButtonEnabled(False)
         self.tbl_svc.verticalHeader().setDefaultSectionSize(26)
         self.tbl_svc.setShowGrid(False)
         self.tbl_svc.setFrameShape(QTableWidget.Shape.NoFrame)
@@ -360,17 +459,19 @@ class ComposePage(QWidget):
         h = self.tbl_svc.horizontalHeader()
         h.setFixedHeight(26)
         h.setHighlightSections(False)
-        h.setStretchLastSection(False)
+        # 最后一列拉伸填满，避免内容比卡片宽时冒出横向滚动条
+        h.setStretchLastSection(True)
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)   # 镜像占剩余空间
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         h.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self.tbl_svc.setColumnWidth(0, 88)
-        self.tbl_svc.setColumnWidth(1, 90)
-        self.tbl_svc.setColumnWidth(3, 110)
-        self.tbl_svc.setColumnWidth(4, 100)
-        g2.addWidget(self.tbl_svc)
+        # 右侧面板不宽，列宽要克制，否则会撑出横向滚动条
+        self.tbl_svc.setColumnWidth(0, 78)
+        self.tbl_svc.setColumnWidth(1, 92)     # 状态要放得下图标 +「运行中」
+        self.tbl_svc.setColumnWidth(3, 92)
+        self.tbl_svc.setColumnWidth(4, 116)
+        g2.addWidget(self.tbl_svc, 1)
         layout.addWidget(grp2, 1)
 
         return w
@@ -412,6 +513,8 @@ class ComposePage(QWidget):
         self.ed_yaml.setTabStopDistance(24)
         self._highlighter = YamlHighlighter(self.ed_yaml.document())
         self.ed_yaml.textChanged.connect(self._on_yaml_changed)
+        # 失焦即保存：没有「保存」按钮，不能靠用户记得手动存
+        self.ed_yaml.focusOutEvent = self._yaml_focus_out(self.ed_yaml)
         layout.addWidget(self.ed_yaml, 1)
 
         return w
@@ -420,30 +523,22 @@ class ComposePage(QWidget):
     # 根目录设置
     # ─────────────────────────────────────────
     def _load_root_setting(self) -> None:
-        from PyQt6.QtCore import QSettings
+        """读 Compose 根目录（存 SQLite）"""
+        from core import state
 
-        s = QSettings("podman-gui", "podman-gui")
-        root = s.value("compose/root", DEFAULT_COMPOSE_ROOT)
+        root = state.get_setting("compose/root", str(DEFAULT_COMPOSE_ROOT))
         if root and Path(str(root)).is_dir():
             self.root = Path(str(root))
-            self.ed_root.setText(str(self.root))
 
     def _save_root_setting(self) -> None:
-        from PyQt6.QtCore import QSettings
+        """保存 Compose 根目录（存 SQLite）"""
+        from core import state
 
-        s = QSettings("podman-gui", "podman-gui")
-        s.setValue("compose/root", str(self.root))
+        state.set_setting("compose/root", str(self.root))
 
-    def _browse_root(self) -> None:
-        d = QFileDialog.getExistingDirectory(
-            self, "选择 Compose 根目录", str(self.root)
-        )
-        if d:
-            self.ed_root.setText(d)
-            self._on_root_changed()
-
-    def _on_root_changed(self) -> None:
-        p = Path(self.ed_root.text().strip())
+    def set_root(self, path: str) -> None:
+        """设置 Compose 根目录（由设置页调用，界面上不再有入口）"""
+        p = Path((path or "").strip())
         if not p.is_dir():
             QMessageBox.warning(self, "目录不存在", f"{p} 不是一个目录")
             return
@@ -458,7 +553,6 @@ class ComposePage(QWidget):
         if self._loading:
             return
         self._loading = True
-        self.act_refresh.setEnabled(False)
         self.status_message.emit(f"正在扫描 {self.root}…")
 
         root = self.root
@@ -480,18 +574,18 @@ class ComposePage(QWidget):
             self.projects = projects
             self._populate_tree(statuses)
             self._loading = False
-            self.act_refresh.setEnabled(True)
+            pass
             self.status_message.emit(
                 f"{root} 下找到 {len(projects)} 个 Compose 项目"
             )
 
         def error(msg):
             self._loading = False
-            self.act_refresh.setEnabled(True)
+            pass
             self.status_message.emit(f"扫描失败: {msg}")
 
         task = run_async(load, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def refresh_silent(self) -> None:
@@ -626,6 +720,10 @@ class ComposePage(QWidget):
         return next((p for p in self.projects if p.name == name), None)
 
     def _on_tree_select(self, cur: QTreeWidgetItem | None, _prev) -> None:
+        # 切到别的项目前先把未保存的 YAML 落盘
+        # （工具栏的「保存」已移除，不能指望用户手动点）
+        self._autosave_yaml()
+
         if cur is None:
             self._current = None
             self._update_actions()
@@ -672,17 +770,40 @@ class ComposePage(QWidget):
         statuses = cm.get_status(proj)
         self.tbl_svc.setRowCount(0)
 
+        # 内存用量：一次算好整张表要用的数据，避免每行都去查
+        mem = {}
+        try:
+            from core import podman_config as pcfg
+
+            for c in pcfg.compute_usage(self.client).get("containers", []):
+                mem[c["name"]] = c
+        except Exception:
+            pass
+
         for svc in proj.services:
             row = self.tbl_svc.rowCount()
             self.tbl_svc.insertRow(row)
 
             state = statuses.get(svc.name, "missing")
+
+            # 当前占用 / 已配置上限
+            info = mem.get(svc.container_name or "") or {}
+            actual = info.get("actual_gb", 0.0)
+            limit = info.get("limit_gb", 0.0)
+            if state == "running":
+                mem_text = (
+                    f"{actual:.2f} / {limit:.2f} GB" if limit > 0
+                    else f"{actual:.2f} GB"
+                )
+            else:
+                mem_text = "—"
+
             cells = [
                 svc.name,
                 STATE_TEXT.get(state, state),
                 svc.image,
                 svc.port_summary,
-                svc.container_name or "—",
+                mem_text,
             ]
             for col, text in enumerate(cells):
                 it = QTableWidgetItem(text)
@@ -701,8 +822,7 @@ class ComposePage(QWidget):
         has = self._current is not None
         for act in (
             self.act_up, self.act_down, self.act_restart,
-            self.act_pull, self.act_logs, self.act_save,
-            self.act_delete,
+            self.act_pull, self.act_logs, self.act_delete,
         ):
             act.setEnabled(has)
 
@@ -732,6 +852,30 @@ class ComposePage(QWidget):
         self.ed_yaml.setPlainText(text)
         self._dirty = False
         self.lbl_yaml_hint.setText(str(self._current.path))
+
+    def _yaml_focus_out(self, editor):
+        """给 QPlainTextEdit 挂「失焦自动保存」"""
+        original = editor.focusOutEvent
+
+        def handler(event):
+            original(event)
+            self._autosave_yaml()
+
+        return handler
+
+    def _autosave_yaml(self) -> None:
+        """有未保存修改就静默落盘（不弹窗、不打断操作）"""
+        if not self._dirty or self._current is None:
+            return
+        try:
+            self._current.path.write_text(
+                self.ed_yaml.toPlainText(), encoding="utf-8"
+            )
+            self._dirty = False
+            self.lbl_yaml_hint.setText(str(self._current.path))
+            self.status_message.emit("已自动保存 YAML")
+        except OSError as e:
+            self.status_message.emit(f"自动保存失败: {e}")
 
     def _on_yaml_changed(self) -> None:
         if not self._dirty:
@@ -844,7 +988,7 @@ class ComposePage(QWidget):
             QMessageBox.critical(self, f"{label}失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def on_disconnected(self) -> None:
@@ -1015,7 +1159,7 @@ class ComposePage(QWidget):
             QMessageBox.critical(self, "删除失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _show_logs(self) -> None:
@@ -1037,7 +1181,7 @@ class ComposePage(QWidget):
             QMessageBox.warning(self, "读取日志失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _open_log_dialog(self, proj, text: str) -> None:

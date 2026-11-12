@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════
-#  Podman 管理器 — 安装脚本
+#  PodBox 管理器 — 安装脚本
 #
 #  用法：
 #    ./install.sh                     # 安装到 ~/.local（推荐，无需 root）
@@ -8,15 +8,15 @@
 #    ./install.sh --uninstall         # 卸载
 #
 #  需要同目录下存在：
-#    podman-gui-v*-linux-x86_64      可执行文件
-#    podman-gui.desktop              桌面入口
+#    podbox-v*-linux-x86_64      可执行文件
+#    podbox.desktop              桌面入口
 #    appicon/                        图标目录
 # ══════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-APP_NAME="podman-gui"
-APP_LABEL="Podman 管理器"
+APP_NAME="podbox"
+APP_LABEL="PodBox 管理器"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── 解析参数 ──
@@ -83,7 +83,7 @@ if [ "$ACTION" = "uninstall" ]; then
 
     echo "==> 已卸载"
     echo "    提示：配置和容器数据未删除"
-    echo "    如需清理配置：rm -rf ~/.config/podman-gui ~/.cache/podman-gui"
+    echo "    如需清理配置：rm -rf ~/.config/podbox ~/.cache/podbox"
     exit 0
 fi
 
@@ -95,7 +95,7 @@ echo ""
 
 # ── 1. 定位可执行文件 ──
 BINARY=""
-for f in "$SCRIPT_DIR"/podman-gui-v*-linux-x86_64 "$SCRIPT_DIR"/podman-gui; do
+for f in "$SCRIPT_DIR"/podbox-v*-linux-x86_64 "$SCRIPT_DIR"/podbox; do
     if [ -f "$f" ] && [ -x "$f" ]; then
         BINARY="$f"
         break
@@ -104,7 +104,7 @@ done
 
 if [ -z "$BINARY" ]; then
     # 可能是脚本内嵌的自解压包，稍后由 tail 解出
-    if [ -f "$SCRIPT_DIR/podman-gui.desktop" ]; then
+    if [ -f "$SCRIPT_DIR/podbox.desktop" ]; then
         echo "!! 未找到可执行文件" >&2
         exit 1
     fi
@@ -192,15 +192,15 @@ echo "  ✓ 已安装"
 # ── 4. 安装桌面入口 ──
 echo "[3/5] 安装桌面入口 → $DESKTOP_DIR"
 run_root mkdir -p "$DESKTOP_DIR"
-if [ -f "$SCRIPT_DIR/podman-gui.desktop" ]; then
+if [ -f "$SCRIPT_DIR/podbox.desktop" ]; then
     # 系统级安装时，Exec 要用绝对路径
     if [ "$MODE" = "system" ]; then
-        sed 's|^Exec=.*|Exec=/usr/local/bin/podman-gui|' \
-            "$SCRIPT_DIR/podman-gui.desktop" > /tmp/podman-gui.desktop.tmp
-        run_root cp /tmp/podman-gui.desktop.tmp "$DESKTOP_DIR/$APP_NAME.desktop"
-        rm -f /tmp/podman-gui.desktop.tmp
+        sed 's|^Exec=.*|Exec=/usr/local/bin/podbox|' \
+            "$SCRIPT_DIR/podbox.desktop" > /tmp/podbox.desktop.tmp
+        run_root cp /tmp/podbox.desktop.tmp "$DESKTOP_DIR/$APP_NAME.desktop"
+        rm -f /tmp/podbox.desktop.tmp
     else
-        run_root cp "$SCRIPT_DIR/podman-gui.desktop" "$DESKTOP_DIR/$APP_NAME.desktop"
+        run_root cp "$SCRIPT_DIR/podbox.desktop" "$DESKTOP_DIR/$APP_NAME.desktop"
     fi
     run_root chmod 644 "$DESKTOP_DIR/$APP_NAME.desktop"
 fi
@@ -220,7 +220,7 @@ ICON_SRC="$SCRIPT_DIR/appicon"
 if [ -d "$ICON_SRC" ]; then
     for theme in $THEMES; do
         for size in 16 22 24 32 48 64 128 256 512; do
-            src="$ICON_SRC/podman-gui-${size}.png"
+            src="$ICON_SRC/podbox-${size}.png"
             [ -f "$src" ] || continue
 
             if [ "$theme" = "hicolor" ]; then
@@ -259,7 +259,7 @@ echo "════════════════════════�
 echo ""
 echo "  启动方式："
 echo "    · 应用菜单搜索「Podman」"
-echo "    · 终端执行：podman-gui"
+echo "    · 终端执行：podbox"
 echo ""
 
 # PATH 检查

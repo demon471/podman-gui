@@ -62,13 +62,30 @@ class TrayIcon(QObject):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             raise RuntimeError("当前环境不支持系统托盘")
 
-        self.tray = QSystemTrayIcon()
+        # parent=self：这两个对象必须挂在 TrayIcon 下面。
+        # 不指定 parent 时它们是无主 QObject，Python GC 可能在
+        # 任意时刻回收，而 QSystemTrayIcon 的底层实现仍持有指针
+        # → Qt fatal → abort（进程直接闪退，无 traceback）。
+        self.tray = QSystemTrayIcon(self)
         self.tray.setToolTip("Podman 管理器")
         self._update_icon()
 
         # 菜单（每次右键前重建，保证状态最新）
+        # 注意：QMenu 的 parent 必须是 QWidget，TrayIcon 是 QObject，
+        # 不能传 self —— 用 setParent(None) + 强引用保证不被 GC。
         self.menu = QMenu()
-        self.menu.aboutToShow.connect(self._rebuild_menu)
+        # 不要在 aboutToShow 里 menu.clear() 重建 ——
+        # 菜单正在弹出时销毁 QAction，KDE/Wayland 下点击会落空，
+        # 用户看到的就是「点退出没反应」。改成数据刷新后重建。
+        # None 表示「还没构建过」。
+        # 不能用 () 当初始值 —— 空容器列表的指纹正好也是 ()，
+        # 会被判成「内容没变」而直接跳过，导致菜单一个项都没有，
+        # 右键看起来就是完全失效。
+        self._menu_sig: tuple | None = None
+        self._menu_dirty = False
+        self._rebuild_menu()
+        # 菜单关掉后，如果期间有更新就补建一次
+        self.menu.aboutToHide.connect(self._on_menu_hidden)
         self.tray.setContextMenu(self.menu)
 
         self.tray.activated.connect(self._on_activated)
@@ -81,6 +98,19 @@ class TrayIcon(QObject):
 
         QTimer.singleShot(100, self.refresh)
 
+    def stop(self) -> None:
+        """停止定时刷新（应用退出前调用）
+
+        不停止的话，退出过程中定时器可能再次触发 refresh，
+        创建新的后台线程 —— 而此时 Qt 正在销毁对象，
+        新线程 emit 会命中已释放对象导致 abort。
+        """
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        self._busy = True       # 阻止后续 refresh 再起任务
+
     # ─────────────────────────────────────────
     # 图标
     # ─────────────────────────────────────────
@@ -91,7 +121,9 @@ class TrayIcon(QObject):
         except Exception:
             ok = False
 
-        # 托盘图标用海豹（随主题自动黑白变色）
+        # 托盘图标：线条风（跟应用图标同一种手感），
+        # 但为小尺寸做了简化 —— 只有箱体 + 托盘底两条信息，
+        # 16px 下依然清晰，不会糊成一团
         self.tray.setIcon(icon("seal", 64))
 
     # ─────────────────────────────────────────
@@ -116,6 +148,7 @@ class TrayIcon(QObject):
                 f"Podman 管理器 · {running}/{total} 运行中"
             )
             self._update_icon()
+            self._rebuild_menu()
 
         def error(_msg):
             self.tray.setToolTip("Podman 管理器 · 连接失败")
@@ -128,14 +161,36 @@ class TrayIcon(QObject):
             finally:
                 self._busy = False
 
-        task = run_async(wrap, on_done=done, on_error=error)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        task = run_async(wrap, on_done=done, on_error=error, parent=self)
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     # ─────────────────────────────────────────
     # 菜单构建
     # ─────────────────────────────────────────
+    def _menu_signature(self) -> tuple:
+        """容器列表指纹：内容没变就不用重建菜单"""
+        return tuple(
+            (
+                (c.get("Names") or ["?"])[0],
+                str(c.get("State", "")).lower(),
+            )
+            for c in self._containers
+        )
+
     def _rebuild_menu(self) -> None:
+        # 菜单开着时绝不能动它：清空 QAction 会让已弹出的菜单
+        # 点击落空。等它关掉后由 aboutToHide 再补一次。
+        if self.menu.isVisible():
+            self._menu_dirty = True
+            return
+
+        sig = self._menu_signature()
+        if self._menu_sig is not None and sig == self._menu_sig:
+            return
+        self._menu_sig = sig
+        self._menu_dirty = False
+
         self.menu.clear()
 
         running = [
@@ -149,7 +204,7 @@ class TrayIcon(QObject):
 
         # ── 显示主窗口 ──
         act_show = self.menu.addAction(icon("seal"), "显示主窗口")
-        act_show.triggered.connect(self.show_window.emit)
+        act_show.triggered.connect(lambda *_: self.show_window.emit())
 
         # ── 容器列表（运行中在前，无分组标题）──
         if self._containers:
@@ -167,7 +222,12 @@ class TrayIcon(QObject):
         # ── 退出 ──
         self.menu.addSeparator()
         act_quit = self.menu.addAction("退出")
-        act_quit.triggered.connect(self.quit_app.emit)
+        act_quit.triggered.connect(lambda *_: self.quit_app.emit())
+
+    def _on_menu_hidden(self) -> None:
+        """菜单关闭后补建（开着期间有数据变化的话）"""
+        if self._menu_dirty:
+            self._rebuild_menu()
 
     def _add_container_entry(self, c: dict, is_running: bool) -> None:
         """单个容器：子菜单里放操作"""
@@ -307,8 +367,8 @@ class TrayIcon(QObject):
                 4000,
             )
 
-        task = run_async(work, on_done=done, on_error=error)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        task = run_async(work, on_done=done, on_error=error, parent=self)
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     def _batch_action(self, action: str, containers: list[dict]) -> None:
@@ -371,8 +431,8 @@ class TrayIcon(QObject):
                 QSystemTrayIcon.MessageIcon.Critical, 5000,
             )
 
-        task = run_async(work, on_done=done, on_error=error)
-        self._tasks = [t for t in self._tasks if t._thread is not None]
+        task = run_async(work, on_done=done, on_error=error, parent=self)
+        self._tasks = [t for t in self._tasks if t.alive]
         self._tasks.append(task)
 
     # ─────────────────────────────────────────

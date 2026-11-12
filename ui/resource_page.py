@@ -30,6 +30,7 @@ from core.async_task import run_async
 from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
 from resources.icons import ICON_SIZE_TOOLBAR, icon
+from ui.widgets import make_list_card, apply_aligned_delegate
 
 
 class ResourcePage(QWidget):
@@ -119,16 +120,13 @@ class ResourcePage(QWidget):
 
         self.build_actions(tb)
 
-        # 删除按钮（紧接其他操作，图标红色）
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        # 删除按钮（与其他工具栏按钮同色，危险性由确认框承担）
+        self.act_delete = QAction(icon("delete"), "删除", self)
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.setToolTip("删除选中项（支持多选，Delete 键）")
         self.act_delete.triggered.connect(self._delete_selected)
         tb.addAction(self.act_delete)
 
-        btn = tb.widgetForAction(self.act_delete)
-        if btn is not None:
-            btn.setObjectName("dangerDelete")
 
         # 搜索框
         self.search = QLineEdit()
@@ -154,6 +152,8 @@ class ResourcePage(QWidget):
         self.proxy.setFilterKeyColumn(-1)
 
         self.table = QTableView()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -161,6 +161,8 @@ class ResourcePage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.table.setCornerButtonEnabled(False)
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setShowGrid(False)
         self.table.setFrameShape(QTableView.Shape.NoFrame)
@@ -196,14 +198,12 @@ class ResourcePage(QWidget):
         self._empty = EmptyState(
             icon_name=self.icon_name,
             title=f"还没有{self.unit}",
-            subtitle=self.empty_hint(),
-            action_text=self.empty_action_text(),
-            on_action=self.empty_action(),
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
 
-        layout.addLayout(self._table_stack)
+        # 包一层圆角白底卡片（表格 + 空状态共用）
+        layout.addWidget(make_list_card(self._table_stack))
 
         self.lbl_stats = QLabel("")
         self.lbl_stats.setObjectName("hintLabel")
@@ -311,7 +311,7 @@ class ResourcePage(QWidget):
             self.refresh_silent()
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     # ─────────────────────────────────────────
@@ -449,7 +449,7 @@ class ResourcePage(QWidget):
             QMessageBox.critical(self, "删除失败", msg)
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     def delete_item(self, item: dict) -> None:
@@ -472,23 +472,12 @@ class ResourcePage(QWidget):
 
     def on_reconnected(self) -> None:
         """重连后恢复空状态文案并刷新"""
-        self._empty.set_text(
-            f"还没有{self.unit}",
-            self.empty_hint(),
-        )
+        self._empty.set_text(f"还没有{self.unit}")
         self.refresh_silent()
 
     def empty_hint(self) -> str:
         """空状态副说明（子类可覆盖）"""
         return f"当前没有{self.unit}。可以点下方按钮创建。"
-
-    def empty_action_text(self) -> str:
-        """空状态按钮文字（返回空串表示不显示按钮）"""
-        return ""
-
-    def empty_action(self):
-        """空状态按钮回调"""
-        return None
 
     def _current_item_id(self) -> str:
         """当前选中行的资源 ID（未选中返回空串）"""

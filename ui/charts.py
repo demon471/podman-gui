@@ -36,11 +36,10 @@ def _usage_color(ratio: float) -> QColor:
 class MemorySummary(QWidget):
     """内存总览
 
-    ┌────────────────────────────────────────────────────────┐
-    │ 0.39 GB / 8.00 GB                        正常  ●        │
-    │ ██████▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-    │ 实际 0.39 · 声明 2.50 · 剩余 5.50 GB                    │
-    └────────────────────────────────────────────────────────┘
+    ██████▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    实际 0.39 · 声明 2.50 · 剩余 5.50 GB
+
+    数值和状态徽标由外层卡片标题行显示，这里只画条形与统计。
 
     堆叠条含义：
       ███ 实心   = 实际占用
@@ -52,7 +51,7 @@ class MemorySummary(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setMinimumHeight(88)
+        self.setMinimumHeight(74)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -94,51 +93,8 @@ class MemorySummary(QWidget):
             p.end()
             return
 
-        # ══════ 第一行：大数字 + 状态 ══════
-        f = p.font()
-        f.setPointSize(max(13, f.pointSize() + 6))
-        f.setBold(True)
-        p.setFont(f)
-        p.setPen(QPen(fg))
-
-        big = f"{self._actual_gb:.2f}"
-        p.drawText(m, 26, big)
-        big_w = p.fontMetrics().horizontalAdvance(big)
-
-        f2 = p.font()
-        f2.setPointSize(max(8, f2.pointSize() - 4))
-        f2.setBold(False)
-        p.setFont(f2)
-        p.setPen(QPen(dim))
-        tail = f" GB  /  {self._limit_gb:.2f} GB" if self._limit_gb > 0 \
-            else f" GB  /  整机 {self._host_gb:.1f} GB"
-        p.drawText(m + big_w, 26, tail)
-
-        # 右上：状态徽章
-        if self._limit_gb <= 0:
-            badge, bcolor = "未限制", COLOR_IDLE
-        elif dec_ratio > 1.0:
-            badge, bcolor = "已超限", COLOR_DANGER
-        elif dec_ratio > 0.8:
-            badge, bcolor = "接近上限", COLOR_WARN
-        else:
-            badge, bcolor = "正常", COLOR_OK
-
-        f3 = p.font()
-        f3.setPointSize(max(7, f3.pointSize() - 1))
-        p.setFont(f3)
-        fm3 = p.fontMetrics()
-        bw = fm3.horizontalAdvance(badge) + 18
-        bh = fm3.height() + 6
-        br = QRectF(self.width() - m - bw, 8, bw, bh)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(_alpha(bcolor, 40))
-        p.drawRoundedRect(br, bh / 2, bh / 2)
-        p.setPen(QPen(QColor(bcolor)))
-        p.drawText(br, Qt.AlignmentFlag.AlignCenter, badge)
-
         # ══════ 第二行：堆叠条 ══════
-        bar_y = 42
+        bar_y = 2
         bar_h = 10
         r = bar_h / 2
         p.setPen(Qt.PenStyle.NoPen)
@@ -185,16 +141,37 @@ class MemorySummary(QWidget):
 
         p.drawText(m, bar_y + bar_h + 16, "  ·  ".join(parts))
 
+        # 第四行：预算范围说明（容器与 VM 共用，用户常困惑的点）
+        f5 = p.font()
+        f5.setPointSize(max(7, f5.pointSize() - 1))
+        p.setFont(f5)
+        p.drawText(
+            m, bar_y + bar_h + 30,
+            "容器与虚拟机共用此预算 · 启动前会预检，防止宿主机 OOM",
+        )
+
         p.end()
 
 
-class ContainerRows(QWidget):
-    """容器内存列表（两列网格布局）
+CARD_H = 62          # 每个占用卡片的高度
+CARD_GAP = 10        # 卡片间距
 
-    ┌────────────────────────┬────────────────────────┐
-    │ ● elasticsearch  90%   │ ● rocketmq-broker 77%  │
-    │   ████████████░        │   ██████████░░░        │
-    └────────────────────────┴────────────────────────┘
+
+def _card_bg(widget) -> QColor:
+    """卡片底色：跟随主题的 Base（比窗口稍亮/稍暗）"""
+    return widget.palette().color(widget.palette().ColorRole.Base)
+
+
+def _border_color(widget) -> QColor:
+    c = QColor(widget.palette().color(widget.palette().ColorRole.WindowText))
+    c.setAlpha(45)
+    return c
+
+
+class ContainerRows(QWidget):
+    """容器 + 虚拟机内存列表（两列网格布局）
+
+    VM 与容器同屏展示（同一份内存预算），VM 项名称前带 VM 前缀。
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -205,9 +182,17 @@ class ContainerRows(QWidget):
         self._items: list[dict] = []
         self._host_gb = 1.0
 
-    def set_items(self, items, scale_gb: float = 0, host_gb: float = 0) -> None:
+    def set_items(self, items, scale_gb: float = 0, host_gb: float = 0,
+                  vms=None) -> None:
+        """items：容器列表；vms：虚拟机列表（同构 dict，标记 is_vm）"""
+        merged = list(items or [])
+        for v in (vms or []):
+            v = dict(v)
+            v["is_vm"] = True
+            merged.append(v)
+
         self._items = sorted(
-            [i for i in items if i.get("state") == "running"],
+            [i for i in merged if i.get("state") == "running"],
             key=lambda x: (
                 -(x.get("actual_gb", 0) / x.get("limit_gb", 1)
                   if x.get("limit_gb", 0) > 0 else 0)
@@ -216,7 +201,11 @@ class ContainerRows(QWidget):
         self._host_gb = max(host_gb, 0.1)
         cols = 2
         rows = max(1, (len(self._items) + cols - 1) // cols)
-        self.setMinimumHeight(rows * 50 + 10)
+        # 必须把行间距算进去，否则最后一行会被裁掉半截
+        self.setMinimumHeight(rows * (CARD_H + CARD_GAP))
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         self.update()
 
     def paintEvent(self, e) -> None:
@@ -232,16 +221,20 @@ class ContainerRows(QWidget):
 
         if not self._items:
             p.setPen(QPen(dim))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "无运行中的容器")
+            p.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "无运行中的容器 / 虚拟机",
+            )
             p.end()
             return
 
         cols = 2
-        m = 10
-        gap = 16
+        m = 0
+        gap = 12
         cell_w = (self.width() - m * 2 - gap) / cols
-        row_h = 50
-        bar_h = 5
+        row_h = CARD_H + CARD_GAP
+        bar_h = 6
         dot = 10
 
         f = p.font()
@@ -257,15 +250,32 @@ class ContainerRows(QWidget):
         for idx, it in enumerate(self._items):
             col = idx % cols
             row = idx // cols
-            cx = m + col * (cell_w + gap)
-            cy = 6 + row * row_h
+            card_x = m + col * (cell_w + gap)
+            card_y = row * row_h
+
+            # 卡片底：与设置页其他卡片一致（浅底 + 细边框 + 圆角）
+            p.setPen(QPen(QColor(_border_color(self)), 1))
+            p.setBrush(QColor(_card_bg(self)))
+            p.drawRoundedRect(QRectF(card_x, card_y, cell_w, CARD_H), 6, 6)
+
+            # 用局部变量算内边距，绝不能改动 cell_w ——
+            # 它在循环外算好，被改掉会让下一列卡片错位、内容溢出边框
+            cx = card_x + 12
+            cy = card_y + 8
+            inner_w = cell_w - 24
 
             name = it["name"]
             limit = it.get("limit_gb", 0)
             actual = it.get("actual_gb", 0)
             unlimited = it.get("unlimited", False)
 
-            if unlimited or limit <= 0:
+            if it.get("is_vm"):
+                # 虚拟机只展示当前占用，条形相对整机内存，
+                # 颜色保持中性 —— 拿它跟自己的配置额度比会莫名报红
+                ratio = (actual / self._host_gb) if self._host_gb > 0 else 0.0
+                color = QColor(COLOR_IDLE)
+                pct_text = ""
+            elif unlimited or limit <= 0:
                 color = QColor(COLOR_IDLE)
                 ratio = 0.0
                 pct_text = "∞"
@@ -280,31 +290,37 @@ class ContainerRows(QWidget):
             p.drawEllipse(QRectF(cx, cy + 5, 6, 6))
 
             p.setPen(QPen(fg))
-            name_max = cell_w - 60
+            # VM 项加前缀，与容器区分（同一预算里的两类资源）
+            if it.get("is_vm"):
+                name = "VM · " + name
+            elif it.get("project"):
+                # 标出 compose 项目归属，一眼看出是哪个编排里的容器
+                name = f"{name} · {it['project']}"
+            name_max = inner_w - 60
             elided = fm.elidedText(name, Qt.TextElideMode.ElideRight, int(name_max))
             p.drawText(int(cx + dot + 2), int(cy + 11), elided)
 
             # 百分比（右侧，用语义色）
-            p.setFont(f_pct)
-            p.setPen(QPen(color))
-            fm2 = p.fontMetrics()
-            pw = fm2.horizontalAdvance(pct_text)
-            p.drawText(int(cx + cell_w - pw), int(cy + 11), pct_text)
-            p.setFont(f)
+            # VM 不显示：既然只展示当前值，没有目标值作参照，
+            # 百分比只会让人困惑（RSS 略超配置值时还会红成 104%）
+            if not it.get("is_vm"):
+                p.setFont(f_pct)
+                p.setPen(QPen(color))
+                fm2 = p.fontMetrics()
+                pw = fm2.horizontalAdvance(pct_text)
+                p.drawText(int(cx + inner_w - pw), int(cy + 11), pct_text)
+                p.setFont(f)
 
             # ── 第二行：条形 ──
             by = cy + 19
-            bar_w = cell_w
+            bar_w = inner_w
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(track)
             p.drawRoundedRect(
                 QRectF(cx, by, bar_w, bar_h), bar_h / 2, bar_h / 2
             )
 
-            if unlimited or limit <= 0:
-                fill = min(1.0, actual / self._host_gb)
-            else:
-                fill = min(1.0, ratio)
+            fill = min(1.0, ratio)
 
             if fill > 0:
                 aw = max(fill * bar_w, bar_h)
@@ -315,7 +331,10 @@ class ContainerRows(QWidget):
 
             # ── 数值（条形下方小字）──
             p.setPen(QPen(dim))
-            if unlimited:
+            if it.get("is_vm"):
+                # 虚拟机只显示当前占用（配置值是预留额度，不是用量）
+                val = f"{actual:.2f} GB"
+            elif unlimited:
                 val = f"{actual:.2f} GB"
             else:
                 val = f"{actual:.2f} / {limit:.2f} GB"

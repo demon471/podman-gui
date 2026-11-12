@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 
 from core.config import APP_NAME, APP_VERSION
 from core.kde_theme import ThemeWatcher
-from core.podman_client import PodmanClient, PodmanError, find_socket
+from core.podman_client import PodmanClient, PodmanError, find_socket, drain_state_callbacks
 from resources.icons import ICON_SIZE_TOOLBAR, icon
 from ui.compose_page import ComposePage
 from ui.container_page import ContainerPage
@@ -46,6 +46,7 @@ from ui.tray import TrayIcon
 from ui.sidebar import NAV_LABELS, Sidebar
 from ui.style import build_stylesheet
 from ui.volume_page import VolumePage
+from ui.vm_page import VMPage
 
 
 def _window_icon() -> QIcon:
@@ -54,7 +55,7 @@ def _window_icon() -> QIcon:
 
     from core.config import RESOURCES
 
-    png = RESOURCES / "appicon" / "podman-gui-256.png"
+    png = RESOURCES / "appicon" / "podbox-256.png"
     if png.exists():
         return QIcon(str(png))
     return icon("seal", 256)
@@ -65,8 +66,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
         self.setWindowTitle(APP_NAME)
-        self.resize(1200, 760)
         self.setWindowIcon(_window_icon())
+        self._apply_default_geometry()
 
         self._build_ui()
         self._setup_theme_watcher()
@@ -80,6 +81,38 @@ class MainWindow(QMainWindow):
     # ─────────────────────────────────────────
     # UI
     # ─────────────────────────────────────────
+    def _apply_default_geometry(self) -> None:
+        """默认尺寸与位置：按屏幕大小算，居中显示
+
+        固定像素在小屏上会超出、大屏上又显得局促，
+        所以按屏幕可用区域的百分比算（见下方常量）。
+        """
+        from PyQt6.QtGui import QGuiApplication
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 760)
+            return
+
+        avail = screen.availableGeometry()
+        # 纯百分比：50%×56%。1920×1080 上约 960×604 ——
+        # 列表和工具栏刚好够用，四周留出足够桌面空间。
+        # 只兜一个最小值（再小就挤不下了），不设上限：
+        # 设了上限大屏上就变回固定尺寸了。
+        w = int(avail.width() * 0.50)
+        h = int(avail.height() * 0.56)
+        w = max(820, w)
+        h = max(520, h)
+        # 屏幕本身就很小的话，别超出可用区域
+        w = min(w, avail.width() - 40)
+        h = min(h, avail.height() - 60)
+
+        self.resize(w, h)
+        # 居中
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self.move(max(avail.x(), x), max(avail.y(), y))
+
     def _build_ui(self) -> None:
         # 不显示菜单栏（本应用所有操作都在侧边栏/工具栏）
         self.menuBar().setVisible(False)
@@ -107,6 +140,7 @@ class MainWindow(QMainWindow):
         self.page_pods = PodPage(self.client)
         self.page_compose = ComposePage(self.client)
         self.page_settings = SettingsPage(self.client)
+        self.page_vms = VMPage()
 
         self._pages = {
             "containers": self.page_containers,
@@ -115,6 +149,7 @@ class MainWindow(QMainWindow):
             "networks": self.page_networks,
             "pods": self.page_pods,
             "compose": self.page_compose,
+            "vms": self.page_vms,
             "settings": self.page_settings,
         }
         for p in self._pages.values():
@@ -126,6 +161,9 @@ class MainWindow(QMainWindow):
         self.page_containers.request_logs.connect(self._open_logs)
         self.page_containers.request_terminal.connect(self._open_terminal)
         self.page_compose.request_logs.connect(self._open_compose_logs)
+
+        # 虚拟机页：SSH 连接请求
+        self.page_vms.request_terminal.connect(self._open_vm_ssh)
 
         # 状态栏
         sb = QStatusBar()
@@ -145,6 +183,13 @@ class MainWindow(QMainWindow):
         self._conn_timer = QTimer(self)
         self._conn_timer.timeout.connect(lambda: self._check_connection(False))
         self._conn_timer.start(3000)
+
+        # 驱动跨线程状态回调派发。
+        # 后台任务里 podman 连接状态变化时不能直接调 UI 回调
+        # （Qt fatal），会投递到队列等这里取出执行。
+        self._state_timer = QTimer(self)
+        self._state_timer.timeout.connect(drain_state_callbacks)
+        self._state_timer.start(200)
 
         # 不建菜单栏：所有功能都在侧边栏和工具栏中
 
@@ -169,10 +214,142 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _quit_from_tray(self) -> None:
-        """托盘菜单退出"""
-        if self.tray is not None:
-            self.tray.hide()
-        QApplication.instance().quit()
+        """托盘菜单退出：先把虚拟机转入内存快照，再退出
+
+        为什么休眠而不是关闭或保持运行：
+          · 保持运行 → 没有进程管理它们，内存被长期占用
+          · 彻底关闭 → 下次要冷启动 19 秒
+          · 休眠     → 内存释放（约 250MB 磁盘），下次 2 秒恢复
+
+        休眠后由 systemd 托管的守护进程接管端口，
+        `ssh xxx.vm.local` 依然可用（会自动唤醒）。
+        """
+        # 立即隐藏窗口和托盘图标：休眠虚拟机要几秒，
+        # 期间窗口还杵在那儿，用户会以为「点了没反应」。
+        try:
+            if self.tray is not None:
+                self.tray.hide()
+        except Exception:
+            pass
+        self.hide()
+
+        self._suspend_vms_then_quit()
+
+    def _suspend_vms_then_quit(self) -> None:
+        """退出前把所有「应运行」的虚拟机转入内存快照，然后退出
+
+        后台执行（带进度提示），因为保存 1GB 内存约需 6 秒。
+        休眠完成后由 systemd 守护进程接管端口，用户随时
+        `ssh xxx.vm.local` 都能自动唤醒。
+
+        关键点：**保存意图**。休眠后 vm.desired_running 仍为 True，
+        所以守护进程知道这些机器「应该可用」，会一直占着端口等访问。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        try:
+            from core.vm import manager as vm_manager
+            from core import state as _state
+        except Exception:
+            QApplication.instance().quit()
+            return
+
+        # 找出需要休眠的（应运行且真的在跑）
+        targets = []
+        try:
+            for vm in vm_manager.load_all():
+                want = _state.get_setting(
+                    f"vm.desired_running.{vm.spec.name}", False
+                )
+                if want and vm.running:
+                    targets.append(vm)
+        except Exception:
+            targets = []
+
+        if not targets:
+            # 没有要处理的，直接退出
+            self._final_quit()
+            return
+
+        QTimer.singleShot(self.EXIT_TIMEOUT_MS, self._force_quit)
+
+        # 后台串行休眠，完成后退出
+        from core.async_task import run_async
+
+        def work():
+            results = []
+            for vm in targets:
+                try:
+                    # 退出场景不需要等满默认 30 秒：
+                    # 快照失败会退化成 ACPI 关机，等太久用户以为卡死
+                    ok, msg = vm_manager.soft_stop(vm, timeout=8)
+                    results.append((vm.spec.name, ok, msg))
+                except Exception as e:
+                    results.append((vm.spec.name, False, str(e)))
+            return results
+
+        def done(results):
+            saved = sum(1 for _, ok, _ in results if ok)
+            print(f"[main] 退出前已休眠 {saved}/{len(results)} 台虚拟机")
+            self._final_quit()
+
+        def error(msg):
+            print(f"[main] 退出前休眠失败: {msg}")
+            self._final_quit()
+
+        self._set_status("正在保存虚拟机状态…")
+        run_async(work, on_done=done, on_error=error, parent=self)
+
+    # 退出流程的总时限：超过就强制结束进程
+    # 休眠 1GB 约 6 秒，留一倍余量
+    EXIT_TIMEOUT_MS = 10_000
+
+    def _force_quit(self) -> None:
+        """兜底强制退出
+
+        正常路径是休眠完成 → _final_quit → app.quit()。
+        （历史注释，休眠/快照机制已删）
+        按时退出），那种情况下 app.quit() 永远等不到，
+        用户看到的就是「点退出没反应」。这里直接结束进程。
+        """
+        print("[main] 退出超时，强制结束", flush=True)
+        try:
+            self._final_quit()
+        except Exception:
+            pass
+        # app.quit() 依赖事件循环回到 exec()，线程卡住时不一定生效
+        import os
+
+        os._exit(0)
+
+    def _final_quit(self) -> None:
+        """完成退出
+
+        注意顺序：先停定时器，再 quit。
+        不能在这里调 shutdown_all() —— 调用方（休眠任务的 done 回调）
+        本身就跑在后台任务里，等所有任务会自己等自己，直接死锁。
+        真正的线程清理交给 app.exec() 返回后的 shutdown_all。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        # 先停所有定时器，避免退出过程中又起新任务
+        try:
+            self.page_vms.stop_timers()
+        except Exception:
+            pass
+        try:
+            if self.tray is not None:
+                self.tray.stop()
+        except Exception:
+            pass
+        try:
+            self._conn_timer.stop()
+            self._state_timer.stop()
+        except Exception:
+            pass
+
+        app = QApplication.instance()
+        app.quit()
 
     def _setup_theme_watcher(self) -> None:
         self.theme_watcher = ThemeWatcher(2000, self)
@@ -235,8 +412,8 @@ class MainWindow(QMainWindow):
         self._on_nav("settings")
         self.sidebar.select("settings")
         if hasattr(self.page_settings, "tabs"):
-            # 服务标签是第 1 个（概览=0, 服务=1）
-            self.page_settings.tabs.setCurrentIndex(1)
+            # 服务是第一个标签
+            self.page_settings.tabs.setCurrentIndex(0)
 
     def _check_connection(self, show_error: bool = True) -> None:
         """检测连接状态并更新状态栏指示器
@@ -379,6 +556,54 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self._set_status(f"已关闭 {name} 的终端")
 
+    def _open_vm_ssh(self, vm) -> None:
+        """打开虚拟机 SSH 连接
+
+        优先在系统终端里运行 ssh（用户可直接交互，且能输入密码）。
+        SSH 密钥已由应用生成，使用密钥免密登录。
+        """
+        import shutil
+        import subprocess
+
+        if not vm.running:
+            self._set_status("虚拟机未运行")
+            return
+
+        cmd = vm.ssh_command()
+
+        # 找可用终端
+        candidates = [
+            ("konsole", ["-e", "bash", "-c", cmd + '; echo; read -p "按回车关闭…"']),
+            ("gnome-terminal", ["--", "bash", "-c", cmd + '; read -p "按回车关闭…"']),
+            ("xfce4-terminal", ["-e", "bash -c " + repr(cmd)]),
+            ("alacritty", ["-e", "bash", "-c", cmd]),
+            ("kitty", ["bash", "-c", cmd]),
+            ("xterm", ["-e", "bash", "-c", cmd]),
+        ]
+
+        for term, args in candidates:
+            if shutil.which(term):
+                try:
+                    subprocess.Popen([term] + args)
+                    self._set_status(f"已在 {term} 中打开 {vm.spec.name} 的 SSH 连接")
+                    return
+                except OSError:
+                    continue
+
+        # 没有终端：复制命令到剪贴板并提示
+        from PyQt6.QtGui import QGuiApplication
+
+        QGuiApplication.clipboard().setText(cmd)
+        QMessageBox.information(
+            self, "未找到终端程序",
+            "未检测到可用的终端模拟器。\n\n"
+            "SSH 命令已复制到剪贴板，可在任意终端中粘贴执行：\n\n"
+            f"{cmd}",
+        )
+
+
+
+
     # ─────────────────────────────────────────
     # 关于
     # ─────────────────────────────────────────
@@ -410,15 +635,12 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             self.tray.show_message(
-                "Podman 管理器仍在运行",
+                "PodBox 管理器仍在运行",
                 "已最小化到系统托盘。点击托盘图标可恢复窗口。",
                 3000,
             )
             return
 
-        try:
-            from core.async_task import shutdown_all
-            shutdown_all(3000)
-        except Exception:
-            pass
-        super().closeEvent(event)
+        # 真正退出（托盘不可用）→ 先休眠虚拟机
+        self._suspend_vms_then_quit()
+        return

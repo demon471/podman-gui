@@ -9,11 +9,13 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import threading
 import socket
 from pathlib import Path
 from typing import Any
 
 from .config import SOCKET_CANDIDATES
+
 
 
 def _demux_log_stream(data: bytes) -> str:
@@ -93,6 +95,52 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
+# 跨线程状态回调：只保存「最新一次待通知的状态」。
+#
+# 用单元素列表而非队列，是为了合并同一状态的重复通知：
+# 若用队列，断连时会积压多条，drain 时逐条执行回调，
+# 每条回调都会触发页面刷新 → 新请求 → 新状态变化，
+# 形成递归放大，最终 Qt abort。
+_PENDING_STATE: list = [None]   # [(client, connected)]
+_STATE_QUEUE_LOCK = threading.Lock()
+
+
+def drain_state_callbacks() -> None:
+    """执行待处理的状态回调（必须在 UI 线程调用）
+
+    由 UI 层定时器驱动，例如：
+        QTimer(self, timeout=drain_state_callbacks).start(200)
+    """
+    with _STATE_QUEUE_LOCK:
+        item = _PENDING_STATE[0]
+        _PENDING_STATE[0] = None
+
+    if item is None:
+        return
+
+    client, connected = item
+    # 期间状态又变了的话，以最新为准，跳过这次
+    if client.connected != connected:
+        return
+
+    client._notify(connected)
+
+
+# Podman API 请求锁。
+#
+# 背景：UnixHTTPConnection 每次请求都新建连接，看似线程安全，
+# 但多个后台任务并发请求同一个 podman socket 时，
+# http.client 内部会在 getresponse() 阶段 abort
+# （实测：设置页同时跑 version() 和 VM 内存检测时必现），
+# 表现为 QMessageLogger::fatal + 整个进程 core dump。
+#
+# podman 的 REST API 本身不需要并发（单用户本地守护进程），
+# 串行化请求没有性能损失（单次请求约 1-10ms），
+# 但能彻底避免 abort。UI 侧的多任务仍在各自线程里跑，
+# 只是在 _request 这一小段排队。
+_API_LOCK = threading.Lock()
+
+
 def _socket_usable(path: str) -> bool:
     """判断 socket 路径是否存在且可连接
 
@@ -170,15 +218,60 @@ class PodmanClient:
             self._on_state_change.append(callback)
 
     def _set_connected(self, connected: bool) -> None:
-        """更新连接状态，变化时通知所有回调"""
+        """更新连接状态，变化时通知回调
+
+        线程安全策略
+        ────────────
+        本方法可能在后台工作线程里被调用（_request 失败时）。
+        UI 回调操作 Qt 对象，跨线程直接调用会 Qt fatal（进程 abort）。
+
+        但也不能简单地把回调丢进队列异步执行 —— 实测会引发
+        「断连回调 → 页面 refresh → 请求失败 → 再断连回调」
+        的递归放大，最终 Qt 内部状态损坏而 abort。
+
+        因此采用「合并标志 + UI 线程消费」：
+          · 后台线程调用时，只记录最新状态到一个标志位，不执行回调
+          · UI 线程的 drain_state_callbacks() 读取标志位，
+            在同一线程里执行回调（此时不会再跨线程）
+        同一个状态在多次请求间只会通知一次，杜绝递归放大。
+        """
         if self._connected == connected:
             return
         self._connected = connected
+
+        if not self._on_state_change:
+            return
+
+        if self._on_ui_thread():
+            # 已在 UI 线程：直接通知
+            self._notify(connected)
+            return
+
+        # 后台线程：只标记，等 UI 线程取走
+        with _STATE_QUEUE_LOCK:
+            _PENDING_STATE[0] = (self, connected)
+
+    def _notify(self, connected: bool) -> None:
+        """在 UI 线程执行回调"""
         for cb in list(self._on_state_change):
             try:
                 cb(connected)
             except Exception:
                 pass
+
+    @staticmethod
+    def _on_ui_thread() -> bool:
+        """当前是否在 UI 线程（无 QApplication 时视为 True）"""
+        try:
+            from PyQt6.QtCore import QThread
+            from PyQt6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is None:
+                return True
+            return QThread.currentThread() is app.thread()
+        except Exception:
+            return True
 
     @property
     def connected(self) -> bool | None:
@@ -205,23 +298,26 @@ class PodmanClient:
         if not self.socket_path:
             raise PodmanError("未找到 Podman socket，请确认 Podman 正在运行")
 
-        conn = UnixHTTPConnection(self.socket_path, timeout or self.timeout)
         headers = {"Content-Type": "application/json"} if body is not None else {}
         payload = json.dumps(body).encode() if body is not None else None
 
-        try:
-            conn.request(method, path, body=payload, headers=headers)
-            resp = conn.getresponse()
-            data = resp.read()
-            status = resp.status
-        except PodmanError:
-            raise
-        except (OSError, http.client.HTTPException) as e:
-            # 连接层失败 → 标记断开（UI 会立即清空数据）
-            self._set_connected(False)
-            raise PodmanError(f"请求失败: {e}") from e
-        finally:
-            conn.close()
+        with _API_LOCK:
+            conn = UnixHTTPConnection(
+                self.socket_path, timeout or self.timeout
+            )
+            try:
+                conn.request(method, path, body=payload, headers=headers)
+                resp = conn.getresponse()
+                data = resp.read()
+                status = resp.status
+            except PodmanError:
+                raise
+            except (OSError, http.client.HTTPException) as e:
+                # 连接层失败 → 标记断开（UI 会立即清空数据）
+                self._set_connected(False)
+                raise PodmanError(f"请求失败: {e}") from e
+            finally:
+                conn.close()
 
         # 收到响应 → 连接正常
         self._set_connected(True)

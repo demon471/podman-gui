@@ -35,6 +35,7 @@ from core.notify import notifier
 from core.podman_client import PodmanClient, PodmanError
 from resources.icons import ICON_SIZE_TOOLBAR, icon, state_icon
 from ui.utils import fmt_time
+from ui.widgets import make_list_card, apply_aligned_delegate
 
 COLUMNS = ["名称", "状态", "镜像", "端口", "创建时间", "ID"]
 
@@ -143,14 +144,19 @@ class ContainerPage(QWidget):
         self.act_open.triggered.connect(self._open_container_url)
         tb.addAction(self.act_open)
 
-        self.act_delete = QAction(icon("delete", danger=True), "删除", self)
+        # 不用红色图标：工具栏里只有它一个红块，显得突兀。
+        # 删除的危险性由二次确认对话框承担，不靠颜色。
+        self.act_browse = QAction(icon("folder"), "浏览", self)
+        self.act_browse.setProperty("iconName", "folder")
+        self.act_browse.setToolTip("浏览容器内文件（只读）")
+        self.act_browse.triggered.connect(self._browse_files)
+        tb.addAction(self.act_browse)
+
+        self.act_delete = QAction(icon("delete"), "删除", self)
 
         self.act_delete.setProperty("iconName", "delete")
         self.act_delete.triggered.connect(self._delete)
         tb.addAction(self.act_delete)
-        _btn = tb.widgetForAction(self.act_delete)
-        if _btn is not None:
-            _btn.setObjectName("dangerDelete")
 
         self.act_refresh = QAction(icon("refresh"), "刷新", self)
 
@@ -184,6 +190,8 @@ class ContainerPage(QWidget):
         self.proxy.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
         self.table = QTableView()
+        # 图标与文字视觉居中（Qt 默认会让图标高 2–3px）
+        apply_aligned_delegate(self.table)
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -191,6 +199,8 @@ class ContainerPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        # 行号列已隐藏，左上角那个方块要去掉，否则卡片里多一块白
+        self.table.setCornerButtonEnabled(False)
         self.table.verticalHeader().setDefaultSectionSize(28)
         self.table.setShowGrid(False)
         self.table.setFrameShape(QTableView.Shape.NoFrame)
@@ -213,15 +223,20 @@ class ContainerPage(QWidget):
         hdr.setFixedHeight(26)
         hdr.setHighlightSections(False)
         hdr.setStretchLastSection(False)
+        # 列宽策略：镜像列吃掉剩余空间，其余列都给固定窄宽度 ——
+        # 窗口默认只有 960px 宽，其它列一宽，镜像列就被压成「dock...」
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setColumnWidth(0, 180)
-        self.table.setColumnWidth(1, 96)
-        self.table.setColumnWidth(3, 200)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        hdr.setMinimumSectionSize(56)
+        self.table.setColumnWidth(0, 132)   # 名称
+        self.table.setColumnWidth(1, 84)    # 状态
+        self.table.setColumnWidth(3, 118)   # 端口
+        self.table.setColumnWidth(4, 132)   # 创建时间
+        self.table.setColumnWidth(5, 104)   # ID
 
         # 表格 + 空状态叠加
         from PyQt6.QtWidgets import QStackedLayout
@@ -233,15 +248,12 @@ class ContainerPage(QWidget):
         self._empty = EmptyState(
             icon_name="container",
             title="还没有容器",
-            subtitle="当前没有任何容器。\n"
-                     "可以点下方按钮查看可用镜像，或用 podman run 创建容器。",
-            action_text="查看镜像",
-            on_action=lambda: self._goto_images(),
         )
         self._table_stack.addWidget(self._empty)
         self._table_stack.setCurrentWidget(self.table)
 
-        layout.addLayout(self._table_stack)
+        # 包一层圆角白底卡片（表格 + 空状态共用）
+        layout.addWidget(make_list_card(self._table_stack))
 
         # ── 底部统计 ──
         self.lbl_stats = QLabel("")
@@ -540,12 +552,6 @@ class ContainerPage(QWidget):
             return
         self._open_logs()
 
-    def _goto_images(self) -> None:
-        """跳转到镜像页（空状态按钮用）"""
-        win = self.window()
-        if hasattr(win, "sidebar"):
-            win.sidebar.select("images")
-
     def on_disconnected(self) -> None:
         """Podman 断开：清空容器列表"""
         self._containers = []
@@ -561,11 +567,7 @@ class ContainerPage(QWidget):
 
     def on_reconnected(self) -> None:
         """重连后恢复"""
-        self._empty.set_text(
-            "还没有容器",
-            "当前没有任何容器。\n"
-            "可以点下方按钮查看可用镜像，或用 podman run 创建容器。",
-        )
+        self._empty.set_text("还没有容器")
         self._set_actions_enabled(True)
         self.refresh_silent()
 
@@ -626,6 +628,8 @@ class ContainerPage(QWidget):
         self.act_restart.setEnabled(has)
         self.act_terminal.setEnabled(has and running)
         self.act_logs.setEnabled(has)
+        # 浏览是只读的，停止的容器也能看（只是文件可能不全）
+        self.act_browse.setEnabled(has)
         self.act_delete.setEnabled(has)
 
         # 「访问」按钮：只有运行中且有 TCP 端口时可用
@@ -687,14 +691,14 @@ class ContainerPage(QWidget):
             self.refresh_silent()
 
         task = run_async(work, on_done=done, on_error=error, parent=self)
-        self._tasks = [t for t in getattr(self, "_tasks", []) if t._thread is not None]
+        self._tasks = [t for t in getattr(self, "_tasks", []) if t.alive]
         self._tasks.append(task)
 
     def _set_actions_enabled(self, enabled: bool) -> None:
         """操作进行中禁用按钮，避免重复触发"""
         for act in (
             self.act_start, self.act_stop, self.act_restart,
-            self.act_delete, self.act_refresh,
+            self.act_browse, self.act_delete, self.act_refresh,
         ):
             act.setEnabled(enabled)
         if enabled:
@@ -758,6 +762,18 @@ class ContainerPage(QWidget):
     # ─────────────────────────────────────────
     # 右键菜单
     # ─────────────────────────────────────────
+    def _browse_files(self) -> None:
+        """浏览容器内文件（只读，不改动容器）"""
+        cid = self._current_cid()
+        name = self._current_name() or ""
+        if not cid:
+            return
+
+        from ui.container_files import ContainerFilesDialog
+
+        dlg = ContainerFilesDialog(self.client, cid, name, self)
+        dlg.exec()
+
     def _context_menu(self, pos) -> None:
         idx = self.table.indexAt(pos)
         if not idx.isValid():
@@ -775,6 +791,7 @@ class ContainerPage(QWidget):
         m.addSeparator()
         m.addAction(self.act_terminal)
         m.addAction(self.act_logs)
+        m.addAction(self.act_browse)
         m.addSeparator()
         m.addAction(self.act_delete)
         m.exec(self.table.viewport().mapToGlobal(pos))

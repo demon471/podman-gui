@@ -59,12 +59,6 @@ class NetworkPage(ResourcePage):
     def empty_hint(self) -> str:
         return "Podman 内置了 podman/host/none 三个网络。\n也可以创建自定义网络，让容器互相通信。"
 
-    def empty_action_text(self) -> str:
-        return "新建网络"
-
-    def empty_action(self):
-        return self._create
-
     def item_id(self, item: dict) -> str:
         # Podman 网络 API 返回小写字段
         return item.get("id") or item.get("Id") or item.get("name", "")
