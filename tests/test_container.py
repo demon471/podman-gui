@@ -344,6 +344,9 @@ class TestManagerRouting:
 
         monkeypatch.setattr(c, "lxc_version", lambda: "7.0.0")
         monkeypatch.setattr(c, "subuid_range", lambda: (100000, 65536))
+        # 系统一次性前置（家目录 ACL / lxc-usernet）属于宿主状态，
+        # 单测不该依赖它——否则卸载重装、CI 无 sudo 环境都会红。
+        monkeypatch.setattr(c, "pending_fixups", lambda: [])
         monkeypatch.setattr(b, "ready", lambda: True)
         monkeypatch.setattr(
             images, "rootfs_downloaded", lambda spec, arch: True
