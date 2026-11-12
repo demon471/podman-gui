@@ -159,7 +159,11 @@ UNIT
 #    pkexec 环境里用 PKEXEC_UID 拿发起用户（root 的 whoami 不对）。
 HOME_USER=$(getent passwd "${{PASSWORD_xzrychpv}}" | cut -d: -f1)
 [ -n "$HOME_USER" ] || HOME_USER=$(getent passwd 1000 | cut -d: -f1)
-SUBUID=$(getent subuid "$HOME_USER" 2>/dev/null | head -1 | cut -d: -f2)
+# 注意：**不能用 getent subuid** —— 部分发行版的 glibc 没有
+# subuid 数据库（实测 CachyOS 报「未知的数据库：subuid」并返回
+# 空），导致下面的 setfacl 被静默跳过，用户表现为「已启用共享
+# 网络，却一直提示还缺家目录 ACL」。直接读文件。
+SUBUID=$(grep "^$HOME_USER:" /etc/subuid 2>/dev/null | head -1 | cut -d: -f2)
 
 mkdir -p /etc/lxc
 if ! grep -qE "^$HOME_USER[[:space:]]" /etc/lxc/lxc-usernet 2>/dev/null; then
@@ -167,7 +171,11 @@ if ! grep -qE "^$HOME_USER[[:space:]]" /etc/lxc/lxc-usernet 2>/dev/null; then
 fi
 
 if [ -n "$SUBUID" ] && [ -d "/home/$HOME_USER" ]; then
-    setfacl -m "u:$SUBUID:x" "/home/$HOME_USER" 2>/dev/null || true
+    if ! setfacl -m "u:$SUBUID:x" "/home/$HOME_USER" 2>/dev/null; then
+        echo "WARN: 家目录 ACL 设置失败（是否缺少 acl 包？）" >&2
+    fi
+else
+    echo "WARN: 取不到 subuid 段（/etc/subuid 里没有 $HOME_USER）" >&2
 fi
 
 systemctl daemon-reload
@@ -192,6 +200,17 @@ def setup(timeout: int = 180) -> tuple[bool, str]:
         return False, str(e)
 
     if r.returncode == 0 and ready():
+        # 脚本退出码 0 不代表前置全配好（例如 setfacl 那步可能因
+        # 缺 acl 包失败，只往 stderr 打 WARN）。这里复核一遍，
+        # 否则用户会看到「已启用」却一直提示还缺 ACL。
+        try:
+            from core.vm import container as _c
+
+            missing = _c.pending_fixups()
+        except Exception:
+            missing = []
+        if missing:
+            return False, "网桥已创建，但系统前置仍缺：" + "；".join(missing)
         return True, ""
     if r.returncode in (126, 127):
         return False, "已取消授权"

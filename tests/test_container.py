@@ -752,3 +752,70 @@ class TestExtractSetuid:
         assert ok, err
         mode = (out / "usr" / "bin" / "sudo").stat().st_mode
         assert mode & 0o4000, f"setuid 位丢了: {oct(mode)}"
+
+
+class TestBridgeAclFixup:
+    """getent subuid 在部分发行版不可用，必须直读 /etc/subuid
+
+    历史 bug：脚本用 getent subuid 取起始 uid，CachyOS 的 glibc
+    没有 subuid 数据库 → 返回空 → setfacl 被跳过 → 用户反复被
+    提示「还缺家目录 ACL」。
+    """
+
+    def test_script_reads_subuid_file_not_getent(self):
+        from core.vm import bridge
+
+        src = bridge._setup_script()
+        code = [
+            l for l in src.splitlines()
+            if "SUBUID=" in l and not l.strip().startswith("#")
+        ]
+        assert len(code) == 1
+        assert "/etc/subuid" in code[0]
+        assert "getent" not in code[0]
+
+    def test_script_warns_when_acl_fails(self):
+        from core.vm import bridge
+
+        src = bridge._setup_script()
+        assert "WARN" in src
+        # 不允许再出现吞掉失败的写法
+        assert 'setfacl -m "u:$SUBUID:x" "/home/$HOME_USER" 2>/dev/null || true' not in src
+
+    def test_setup_rechecks_prerequisites(self, monkeypatch):
+        """桥建好了但 ACL 仍缺时，setup 必须报失败而不是「已启用」"""
+        import subprocess as sp
+
+        from core.vm import bridge, container
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(bridge, "has_pkexec", lambda: True)
+        monkeypatch.setattr(bridge, "ready", lambda: True)
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _R())
+        monkeypatch.setattr(
+            container, "pending_fixups",
+            lambda: ["家目录 ACL（容器 root 无法穿越 /home）"],
+        )
+        ok, msg = bridge.setup()
+        assert ok is False
+        assert "家目录 ACL" in msg
+
+    def test_setup_ok_when_prerequisites_done(self, monkeypatch):
+        import subprocess as sp
+
+        from core.vm import bridge, container
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(bridge, "has_pkexec", lambda: True)
+        monkeypatch.setattr(bridge, "ready", lambda: True)
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _R())
+        monkeypatch.setattr(container, "pending_fixups", lambda: [])
+        assert bridge.setup() == (True, "")

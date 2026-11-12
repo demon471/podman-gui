@@ -4,7 +4,7 @@ from pathlib import Path
 
 APP_NAME = "PodBox 管理器"
 APP_ID = "podbox"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 import sys
 
